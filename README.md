@@ -17,6 +17,10 @@
 </p>
 
 <p align="center">
+  <a href="#macos-preview">See Stream Tube running on Apple Silicon macOS</a>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/home.png" alt="Home feed" width="900">
 </p>
 
@@ -149,6 +153,31 @@ the GPU like the browser does. Results depend on the video, resolution and hardw
     <td colspan="2" align="center"><img src="docs/screenshots/stats.png" alt="Stats for nerds" width="60%"><br>Stats for nerds</td>
   </tr>
 </table>
+
+### macOS preview
+
+These screenshots show the Apple Silicon preview running on macOS. The
+[macOS preview branch](https://github.com/wwessex/Stream-Tube-Desktop/tree/codex/macos-apple-silicon)
+contains the port and [local build instructions](https://github.com/wwessex/Stream-Tube-Desktop/blob/codex/macos-apple-silicon/README.md#macos-local-build).
+Follow [upstream PR #22](https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop/pull/22) for the review.
+
+<p align="center">
+  <a href="docs/screenshots/macos-picture-in-picture.png"><img src="docs/screenshots/macos-picture-in-picture.png" alt="Stream Tube on macOS playing Big Buck Bunny in a floating PiP panel while the main window shows Return to player" width="900"></a>
+  <br>Picture-in-picture
+</p>
+
+<table>
+  <tr>
+    <td><a href="docs/screenshots/macos-playback.png"><img src="docs/screenshots/macos-playback.png" alt="Big Buck Bunny in Stream Tube on macOS with recommended videos alongside the player"></a></td>
+    <td><a href="docs/screenshots/macos-theatre.png"><img src="docs/screenshots/macos-theatre.png" alt="Stream Tube on macOS in theatre mode with a wider video player"></a></td>
+  </tr>
+  <tr>
+    <td align="center">Standard playback</td>
+    <td align="center">Theatre mode</td>
+  </tr>
+</table>
+
+*Big Buck Bunny* © 2008, Blender Foundation / www.bigbuckbunny.org. [Licence and attribution](https://peach.blender.org/about/).
 
 ## Install
 
