@@ -1,5 +1,8 @@
 //! Languages and regions offered in Settings (codes YouTube accepts as hl / gl).
 
+/// Special `captions_lang` setting value that selects the video's original language.
+pub const ORIGINAL_CAPTION_LANG: &str = "original";
+
 pub const LANGUAGES: &[(&str, &str)] = &[
     ("af", "Afrikaans"),
     ("am", "Amharic"),

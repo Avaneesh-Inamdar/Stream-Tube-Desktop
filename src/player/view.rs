@@ -1348,7 +1348,7 @@ impl PlayerView {
                 panel = panel
                     .child(row("m-q".into(), Some("sliders-horizontal"), "Quality".into(), Some(q), false).on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::Quality); cx.notify() })))
                     .child(row("m-s".into(), Some("gauge"), "Playback speed".into(), Some(speed_label(speed)), false).on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::Speed); cx.notify() })))
-                    .child(row("m-c".into(), Some("captions"), "Subtitles/CC".into(), Some(caption), false).on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::Captions); cx.notify() })))
+                    .child(row("m-c".into(), Some("captions"), crate::i18n::t("Subtitles/CC"), Some(caption), false).on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::Captions); cx.notify() })))
                     .when(audio_tracks.len() > 1, |d| {
                         let cur = pl.audio_track.clone().unwrap_or_else(|| "Default".into());
                         d.child(row("m-a".into(), Some("languages"), "Audio track".into(), Some(cur), false).on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::Audio); cx.notify() })))
@@ -1453,8 +1453,8 @@ impl PlayerView {
             Menu::Captions => {
                 let cur = pl.caption;
                 let tracks = pl.streams.as_ref().map(|s| s.captions.clone()).unwrap_or_default();
-                panel = panel.child(header("Subtitles/CC", cx)).child(
-                    row("cap-off".into(), None, "Off".into(), None, cur.is_none()).on_click(cx.listener(|t, _, _, cx| {
+                panel = panel.child(header(&crate::i18n::t("Subtitles/CC"), cx)).child(
+                    row("cap-off".into(), None, crate::i18n::t("Off"), None, cur.is_none()).on_click(cx.listener(|t, _, _, cx| {
                         t.menu = None;
                         t.player.update(cx, |p, cx| p.set_caption(None, cx));
                     })),
@@ -1472,7 +1472,7 @@ impl PlayerView {
             Menu::Audio => {
                 let cur = pl.audio_track.clone();
                 let tracks = pl.audio_tracks();
-                panel = panel.child(header("Audio track", cx));
+                panel = panel.child(header(&crate::i18n::t("Audio track"), cx));
                 for (i, t) in tracks.into_iter().enumerate() {
                     let active = cur.as_deref() == Some(t.as_str());
                     let t2 = t.clone();

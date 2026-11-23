@@ -31,19 +31,19 @@ pub enum Route {
 impl Route {
     fn title(&self) -> String {
         match self {
-            Route::Home => "Home".into(),
-            Route::Explore(i) => innertube::EXPLORE.get(*i).map(|e| e.0.to_string()).unwrap_or_default(),
-            Route::Shorts(_) => "Shorts".into(),
-            Route::Subscriptions => "Subscriptions".into(),
-            Route::Channels => "Channels".into(),
-            Route::History => "History".into(),
-            Route::Library => "Playlists".into(),
-            Route::LocalPlaylist(_) | Route::Playlist(_) => "Playlist".into(),
+            Route::Home => crate::i18n::t("Home"),
+            Route::Explore(i) => innertube::EXPLORE.get(*i).map(|e| crate::i18n::t(e.0)).unwrap_or_default(),
+            Route::Shorts(_) => crate::i18n::t("Shorts"),
+            Route::Subscriptions => crate::i18n::t("Subscriptions"),
+            Route::Channels => crate::i18n::t("Channels"),
+            Route::History => crate::i18n::t("History"),
+            Route::Library => crate::i18n::t("Playlists"),
+            Route::LocalPlaylist(_) | Route::Playlist(_) => crate::i18n::t("Playlist"),
             Route::Search(q) => q.clone(),
-            Route::Channel(_) => "Channel".into(),
-            Route::Watch { .. } => "Watch".into(),
-            Route::Settings => "Settings".into(),
-            Route::Downloads => "Downloads".into(),
+            Route::Channel(_) => crate::i18n::t("Channel"),
+            Route::Watch { .. } => crate::i18n::t("Watch"),
+            Route::Settings => crate::i18n::t("Settings"),
+            Route::Downloads => crate::i18n::t("Downloads"),
         }
     }
 }
@@ -1073,7 +1073,7 @@ impl AppView {
             self.history.remove(0);
         }
         self.forward.clear();
-        window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
+        window.set_window_title(&format!("{} - {}", self.route.title(), crate::ui::brand_title()));
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -1134,7 +1134,7 @@ impl AppView {
         if cx.global::<UiState>().fullscreen && !matches!(self.route, Route::Watch { .. }) {
             toggle_fullscreen(window, cx);
         }
-        window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
+        window.set_window_title(&format!("{} - {}", self.route.title(), crate::ui::brand_title()));
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -1302,7 +1302,7 @@ impl AppView {
                     self.page = build_page(&self.route.clone(), window, cx);
                 }
             }
-            window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
+            window.set_window_title(&format!("{} - {}", self.route.title(), crate::ui::brand_title()));
             cx.notify();
         }
     }
@@ -1312,7 +1312,7 @@ impl AppView {
             let cur_r = std::mem::replace(&mut self.route, r);
             let cur_p = std::mem::replace(&mut self.page, p);
             self.history.push((cur_r, cur_p));
-            window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
+            window.set_window_title(&format!("{} - {}", self.route.title(), crate::ui::brand_title()));
             cx.notify();
         }
     }
@@ -1892,7 +1892,8 @@ impl AppView {
                     } else {
                         let lang = store::settings_snapshot().captions_lang.clone();
                         pl.streams.as_ref().and_then(|s| {
-                            s.captions.iter().position(|c| c.lang.starts_with(&lang)).or(if s.captions.is_empty() { None } else { Some(0) })
+                            crate::player::controller::pick_caption(s, &lang)
+                                .or(if s.captions.is_empty() { None } else { Some(0) })
                         })
                     };
                     pl.set_caption(next, cx);
@@ -2201,7 +2202,7 @@ impl AppView {
             icon(name).size_5().text_color(if active { p.accent } else { p.text }).into_any_element()
         };
         let entry = |id: &'static str, name: &'static str, label: &str, r: Route, active: bool, cx: &mut Context<Self>| {
-            row(id.into(), ic(name, active), label.to_string(), active)
+            row(id.into(), ic(name, active), crate::i18n::t(label), active)
                 .on_click(cx.listener(move |this, _, window, cx| this.go(r.clone(), window, cx)))
         };
         let heading = |title: &str| {
@@ -2215,7 +2216,7 @@ impl AppView {
                 .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(p.text)
-                .child(title.to_string())
+                .child(crate::i18n::t(title))
         };
         let sep = || div().flex_none().mx_3().my_3().h(px(1.)).bg(p.border);
 
@@ -2246,7 +2247,7 @@ impl AppView {
             let active = route == Route::LocalPlaylist(pl.id);
             let id = pl.id;
             col = col.child(
-                row(SharedString::from(format!("s-lp-{id}")), ic(name, active), pl.name.clone(), active)
+                row(SharedString::from(format!("s-lp-{id}")), ic(name, active), crate::i18n::t(&pl.name), active)
                     .on_click(cx.listener(move |this, _, window, cx| this.go(Route::LocalPlaylist(id), window, cx))),
             );
         }
@@ -2272,7 +2273,7 @@ impl AppView {
                             .text_color(p.text2)
                             .cursor_pointer()
                             .hover(move |s| s.bg(p.hover).text_color(p.text))
-                            .child("Manage")
+                            .child(crate::i18n::t("Manage"))
                             .on_click(cx.listener(|this, _, window, cx| this.go(Route::Channels, window, cx))),
                     ),
             );
@@ -2291,7 +2292,7 @@ impl AppView {
                     row(
                         "s-subs-more".into(),
                         icon(if expanded { "chevron-up" } else { "chevron-down" }).size_5().text_color(p.text).into_any_element(),
-                        if expanded { "Show fewer".into() } else { format!("Show {} more", subs.len() - SHOWN) },
+                        if expanded { crate::i18n::t("Show fewer") } else if crate::i18n::is_tr() { format!("{} kanal daha göster", subs.len() - SHOWN) } else { format!("Show {} more", subs.len() - SHOWN) },
                         false,
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -2307,7 +2308,7 @@ impl AppView {
             for (i, (name, _)) in innertube::EXPLORE.iter().enumerate() {
                 let active = route == Route::Explore(i);
                 col = col.child(
-                    row(SharedString::from(format!("s-ex-{i}")), ic(icons.get(i).copied().unwrap_or("compass"), active), name.to_string(), active)
+                    row(SharedString::from(format!("s-ex-{i}")), ic(icons.get(i).copied().unwrap_or("compass"), active), crate::i18n::t(name), active)
                         .on_click(cx.listener(move |this, _, window, cx| this.go(Route::Explore(i), window, cx))),
                 );
             }

@@ -6,6 +6,7 @@ mod perf;
 mod recommend;
 mod downloads;
 mod feed;
+mod i18n;
 mod import;
 mod links;
 mod locale;

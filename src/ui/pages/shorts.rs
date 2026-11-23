@@ -596,8 +596,16 @@ impl Render for ShortsPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = pal(cx);
         let ui = *cx.global::<UiState>();
+        let st = store::settings_snapshot();
         if self.list.is_empty() {
-            return div().size_full().child(if self.loading { spinner(cx).into_any_element() } else { empty_state("zap", "No Shorts found", "", cx).into_any_element() }).into_any_element();
+            return div()
+                .size_full()
+                .child(if self.loading {
+                    spinner(cx).into_any_element()
+                } else {
+                    empty_state("zap", &crate::i18n::t("No Shorts found"), "", cx).into_any_element()
+                })
+                .into_any_element();
         }
         let v = self.list[self.idx].clone();
         let h = (ui.viewport.height - px(56. + 32.)).max(px(400.));
@@ -606,6 +614,13 @@ impl Render for ShortsPage {
         let cid = v.channel_id.clone();
         let watch_id = v.id.clone();
         let share_id = v.id.clone();
+        let yt_layout = st.shorts_yt_layout;
+        let info_outside = yt_layout && st.shorts_info_position == "outside" && f32::from(ui.viewport.width) >= 980.;
+        let nav_edge = yt_layout && st.shorts_nav_edge;
+        let show_sub = yt_layout && st.shorts_show_subscribe;
+        let show_dislike = !yt_layout || st.shorts_show_dislike;
+        let show_chan_thumb = yt_layout && st.shorts_show_channel_thumb;
+
         let action = |id: &'static str, ic: &'static str, label: String, cx: &App| {
             let p = pal(cx);
             div()
@@ -618,11 +633,80 @@ impl Render for ShortsPage {
                 .child(div().flex().items_center().justify_center().size_12().rounded_full().bg(p.chip).hover(move |s| s.bg(p.hover)).child(icon(ic).size_6().text_color(p.text)))
                 .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(p.text).child(label))
         };
+
+        let sub_btn = |cx: &App| -> AnyElement {
+            let Some(cid_sub) = cid.clone() else { return div().into_any_element() };
+            let is_sub = store::is_subscribed(&cid_sub);
+            let cname = v.channel_name.clone();
+            let cavatar = v.channel_avatar.clone();
+            let p = pal(cx);
+            div()
+                .id("sh-sub")
+                .flex_none()
+                .px_3()
+                .py_1()
+                .rounded_full()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .cursor_pointer()
+                .when(is_sub, move |d| d.bg(p.chip).text_color(p.text).hover(move |s| s.bg(p.hover)))
+                .when(!is_sub, |d| d.bg(white()).text_color(black()).hover(|s| s.opacity(0.9)))
+                .child(if is_sub { crate::i18n::t("Subscribed") } else { crate::i18n::t("Subscribe") })
+                .on_click(move |_, _, cx| {
+                    if store::is_subscribed(&cid_sub) {
+                        store::unsubscribe(&cid_sub);
+                    } else {
+                        store::subscribe(&cid_sub, &cname, cavatar.as_deref());
+                    }
+                    cx.refresh_windows();
+                })
+                .into_any_element()
+        };
+
+        let cid_info = cid.clone();
+        let chan_row = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .id("sh-chan")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .cursor_pointer()
+                    .on_click(move |_, window, cx| {
+                        if let Some(c) = cid_info.clone() {
+                            navigate(Route::Channel(c), window, cx);
+                        }
+                    })
+                    .child(avatar(v.channel_avatar.as_deref(), px(if yt_layout { 36. } else { 32. }), &v.channel_name, cx))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(if info_outside { p.text } else { white() })
+                            .truncate()
+                            .child(v.channel_name.clone()),
+                    ),
+            )
+            .when(show_sub, |d| d.child(sub_btn(cx)));
+
         let comments_panel = if self.show_comments { self.render_comments(h, cx) } else { div().into_any_element() };
         let can_up = self.idx > 0;
         let can_down = self.idx + 1 < self.list.len();
-        div()
+        let nav_buttons = div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(icon_button("sh-up", "arrow-up", cx).size_12().bg(p.chip).when(!can_up, |d| d.opacity(0.3)).on_click(cx.listener(|t, _, window, cx| t.step(-1, window, cx))))
+            .child(icon_button("sh-down", "arrow-down", cx).size_12().bg(p.chip).when(!can_down, |d| d.opacity(0.3)).on_click(cx.listener(|t, _, window, cx| t.step(1, window, cx))));
+
+        let cid_badge = cid.clone();
+        let mut root = div()
             .id("shorts")
+            .relative()
             .size_full()
             .flex()
             .items_center()
@@ -652,13 +736,47 @@ impl Render for ShortsPage {
                     this.last_step = Instant::now() - Duration::from_secs(1);
                     this.step(d, window, cx);
                 }
-            }))
-            .child(
+            }));
+
+        if info_outside {
+            root = root.child(
+                div()
+                    .w(px(280.))
+                    .h(h)
+                    .flex()
+                    .flex_col()
+                    .justify_end()
+                    .gap_3()
+                    .pb_6()
+                    .pr_2()
+                    .child(chan_row)
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(p.text)
+                            .line_clamp(3)
+                            .child(v.title.clone()),
+                    ),
+            );
+            root = root.child(
                 div()
                     .relative()
                     .w(w)
                     .h(h)
-                    .rounded_xl()
+                    .rounded_2xl()
+                    .overflow_hidden()
+                    .bg(black())
+                    .child(crate::ui::slot::player_slot(cx)),
+            );
+        } else {
+            root = root.child(
+                div()
+                    .relative()
+                    .w(w)
+                    .h(h)
+                    .when(yt_layout, |d| d.rounded_2xl())
+                    .when(!yt_layout, |d| d.rounded_xl())
                     .overflow_hidden()
                     .bg(black())
                     .child(crate::ui::slot::player_slot(cx))
@@ -667,29 +785,20 @@ impl Render for ShortsPage {
                             .absolute()
                             .left_0()
                             .right_0()
-                            .bottom(px(70.))
+                            .bottom(px(if yt_layout { 20. } else { 70. }))
                             .px_4()
+                            .py_2()
+                            .when(yt_layout, |d| d.bg(hsla(0., 0., 0., 0.35)))
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .child(
-                                div()
-                                    .id("sh-chan")
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .cursor_pointer()
-                                    .on_click(move |_, window, cx| {
-                                        if let Some(c) = cid.clone() {
-                                            navigate(Route::Channel(c), window, cx);
-                                        }
-                                    })
-                                    .child(avatar(v.channel_avatar.as_deref(), px(32.), &v.channel_name, cx))
-                                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(white()).child(v.channel_name.clone())),
-                            )
+                            .child(chan_row)
                             .child(div().text_sm().text_color(white()).line_clamp(2).child(v.title.clone())),
                     ),
-            )
+            );
+        }
+
+        root = root
             .child(
                 div()
                     .flex()
@@ -698,10 +807,27 @@ impl Render for ShortsPage {
                     .h(h)
                     .gap_4()
                     .pb_4()
-                    .child(action("sh-like", "thumbs-up", votes.as_ref().map(|v| compact_number(v.likes)).unwrap_or_else(|| "Like".into()), cx))
-                    .child(action("sh-dislike", "thumbs-down", votes.as_ref().map(|v| compact_number(v.dislikes)).unwrap_or_else(|| "Dislike".into()), cx))
+                    .child(action(
+                        "sh-like",
+                        "thumbs-up",
+                        votes.as_ref().map(|v| compact_number(v.likes)).unwrap_or_else(|| crate::i18n::t("Like")),
+                        cx,
+                    ))
+                    .when(show_dislike, |d| {
+                        d.child(action(
+                            "sh-dislike",
+                            "thumbs-down",
+                            votes.as_ref().map(|v| compact_number(v.dislikes)).unwrap_or_else(|| crate::i18n::t("Dislike")),
+                            cx,
+                        ))
+                    })
                     .child({
-                        let n = self.meta.get(&v.id).and_then(|w| w.comment_count_text.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "Comments".into());
+                        let n = self
+                            .meta
+                            .get(&v.id)
+                            .and_then(|w| w.comment_count_text.clone())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| crate::i18n::t("Comments"));
                         action("sh-comments", "message-square", n, cx).on_click(cx.listener(|t, _, _, cx| {
                             if t.show_comments {
                                 t.show_comments = false;
@@ -711,10 +837,31 @@ impl Render for ShortsPage {
                             }
                         }))
                     })
-                    .child(action("sh-share", "share-2", "Share".into(), cx).on_click(move |_, _, cx| copy_to_clipboard(format!("https://youtube.com/shorts/{share_id}"), cx)))
-                    .child(action("sh-watch", "monitor-play", "Full".into(), cx).on_click(move |_, window, cx| {
+                    .child(
+                        action("sh-share", "share-2", crate::i18n::t("Share"), cx)
+                            .on_click(move |_, _, cx| copy_to_clipboard(format!("https://youtube.com/shorts/{share_id}"), cx)),
+                    )
+                    .child(action("sh-watch", "monitor-play", crate::i18n::t("Full"), cx).on_click(move |_, window, cx| {
                         navigate(Route::Watch { id: watch_id.clone(), playlist: None, start: None }, window, cx)
-                    })),
+                    }))
+                    .when(show_chan_thumb, |d| {
+                        d.child(
+                            div()
+                                .id("sh-chan-badge")
+                                .size_10()
+                                .rounded_lg()
+                                .overflow_hidden()
+                                .border_1()
+                                .border_color(p.border)
+                                .cursor_pointer()
+                                .on_click(move |_, window, cx| {
+                                    if let Some(c) = cid_badge.clone() {
+                                        navigate(Route::Channel(c), window, cx);
+                                    }
+                                })
+                                .child(avatar(v.channel_avatar.as_deref(), px(40.), &v.channel_name, cx)),
+                        )
+                    }),
             )
             .when(self.show_comments, |d| {
                 let b = self.comments_bounds.clone();
@@ -725,15 +872,23 @@ impl Render for ShortsPage {
                         .child(canvas(move |bounds, _, _| b.set(bounds), |_, _, _, _| {}).absolute().size_full())
                         .child(comments_panel),
                 )
-            })
-            .child(
+            });
+
+        if nav_edge {
+            root = root.child(
                 div()
+                    .absolute()
+                    .right_6()
+                    .top_0()
+                    .bottom_0()
                     .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(icon_button("sh-up", "arrow-up", cx).size_12().bg(p.chip).when(!can_up, |d| d.opacity(0.3)).on_click(cx.listener(|t, _, window, cx| t.step(-1, window, cx))))
-                    .child(icon_button("sh-down", "arrow-down", cx).size_12().bg(p.chip).when(!can_down, |d| d.opacity(0.3)).on_click(cx.listener(|t, _, window, cx| t.step(1, window, cx)))),
-            )
-            .into_any_element()
+                    .items_center()
+                    .child(nav_buttons),
+            );
+        } else {
+            root = root.child(nav_buttons);
+        }
+
+        root.into_any_element()
     }
 }

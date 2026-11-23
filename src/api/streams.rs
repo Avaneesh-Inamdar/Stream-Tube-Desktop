@@ -99,6 +99,10 @@ fn resolve(video_id: &str) -> Result<StreamInfo> {
                     }
                     if !v.captions.is_empty() {
                         y.captions = v.captions;
+                        y.default_caption_index = v.default_caption_index;
+                    }
+                    if y.original_language.is_none() {
+                        y.original_language = v.original_language;
                     }
                     Ok(y)
                 }
@@ -303,10 +307,13 @@ fn hls_client(video_id: &str, c: HlsClient) -> Result<StreamInfo> {
     // adaptive URLs from this client need a PO token; only the HLS path is usable
     info.audio.clear();
     info.muxed.clear();
-    let (video, audio) = hls_variants(&hls).unwrap_or_default();
+    let (video, audio, hls_orig_lang) = hls_variants(&hls).unwrap_or_default();
     info.video = video;
     // audio renditions (dubbed tracks): only names, the proxy picks the playlist
     info.audio = audio;
+    if info.original_language.is_none() {
+        info.original_language = hls_orig_lang;
+    }
     info.hls_only = true;
     info.source = c.source;
     Ok(info)
@@ -314,7 +321,7 @@ fn hls_client(video_id: &str, c: HlsClient) -> Result<StreamInfo> {
 
 /// The variants of an HLS master playlist, as formats for the quality menu,
 /// plus its audio renditions (one per language, `audio_language` = display name).
-fn hls_variants(master_url: &str) -> Result<(Vec<StreamFormat>, Vec<StreamFormat>)> {
+fn hls_variants(master_url: &str) -> Result<(Vec<StreamFormat>, Vec<StreamFormat>, Option<String>)> {
     let text = http::get_text(master_url)?;
     let attr = |l: &str, k: &str| -> Option<String> {
         let rest = l.split(&format!("{k}=")).nth(1)?;
@@ -322,17 +329,23 @@ fn hls_variants(master_url: &str) -> Result<(Vec<StreamFormat>, Vec<StreamFormat
     };
     let mut out: Vec<StreamFormat> = Vec::new();
     let mut audio: Vec<StreamFormat> = Vec::new();
+    let mut hls_orig_lang: Option<String> = None;
     let mut lines = text.lines();
     while let Some(l) = lines.next() {
         if l.starts_with("#EXT-X-MEDIA") && l.contains("TYPE=AUDIO") {
+            let lang_code = attr(l, "LANGUAGE").unwrap_or_default();
+            let is_orig = l.contains("acont=original") || l.contains("acont%3Doriginal");
+            if is_orig && !lang_code.is_empty() && hls_orig_lang.is_none() {
+                hls_orig_lang = Some(lang_code.clone());
+            }
             if let Some(name) = hls_media_name(l) {
                 if !audio.iter().any(|a| a.audio_language.as_deref() == Some(name.as_str())) {
                     audio.push(StreamFormat {
                         mime: "audio/hls".into(),
                         is_audio: true,
-                        audio_default: name.to_lowercase().contains("original"),
+                        audio_default: is_orig || name.to_lowercase().contains("original"),
                         // the rendition's language code
-                        quality_label: attr(l, "LANGUAGE").unwrap_or_default(),
+                        quality_label: lang_code,
                         audio_language: Some(name),
                         ..Default::default()
                     });
@@ -371,10 +384,23 @@ fn hls_variants(master_url: &str) -> Result<(Vec<StreamFormat>, Vec<StreamFormat
             ..Default::default()
         });
     }
+    let orig_lang = hls_orig_lang.or_else(|| {
+        audio
+            .iter()
+            .find(|a| a.audio_default && !a.quality_label.is_empty())
+            .or_else(|| {
+                if audio.len() == 1 {
+                    audio.first().filter(|a| !a.quality_label.is_empty())
+                } else {
+                    None
+                }
+            })
+            .map(|a| a.quality_label.clone())
+    });
     if audio.len() < 2 {
         audio.clear();
     }
-    Ok((out, audio))
+    Ok((out, audio, orig_lang))
 }
 
 /// NAME="..." of an #EXT-X-MEDIA line.
@@ -470,6 +496,70 @@ fn parse_format(f: &Value) -> Option<StreamFormat> {
     })
 }
 
+fn extract_xtag_lang(xtags: &str) -> Option<String> {
+    xtags
+        .split(':')
+        .find_map(|part| part.strip_prefix("lang="))
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+}
+
+fn extract_innertube_original_lang(r: &Value) -> Option<String> {
+    if let Some(sd) = r.get("streamingData") {
+        let formats = sd
+            .get("adaptiveFormats")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .chain(sd.get("formats").and_then(Value::as_array).into_iter().flatten());
+
+        let mut default_lang: Option<String> = None;
+        for f in formats {
+            let mime = f.get("mimeType").and_then(Value::as_str).unwrap_or("");
+            if !mime.starts_with("audio") {
+                continue;
+            }
+            let xtags = f.get("xtags").and_then(Value::as_str).unwrap_or("");
+            let track_id = f.pointer("/audioTrack/id").and_then(Value::as_str).unwrap_or("");
+            let display = f.pointer("/audioTrack/displayName").and_then(Value::as_str).unwrap_or("");
+            let is_default = f.pointer("/audioTrack/audioIsDefault").and_then(Value::as_bool).unwrap_or(false);
+            let is_auto_dub = f.pointer("/audioTrack/isAutoDubbed").and_then(Value::as_bool).unwrap_or(false);
+
+            let lang = track_id
+                .split('.')
+                .next()
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .or_else(|| extract_xtag_lang(xtags));
+
+            let Some(lang) = lang else { continue };
+
+            if xtags.contains("acont=original")
+                || display.to_lowercase().contains("original")
+                || track_id.ends_with(".4")
+            {
+                return Some(lang);
+            }
+            if is_default && !is_auto_dub && default_lang.is_none() {
+                default_lang = Some(lang);
+            }
+        }
+        if default_lang.is_some() {
+            return default_lang;
+        }
+    }
+
+    let def_audio_idx = r
+        .pointer("/captions/playerCaptionsTracklistRenderer/defaultAudioTrackIndex")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    r.pointer(&format!("/captions/playerCaptionsTracklistRenderer/audioTracks/{def_audio_idx}/audioTrackId"))
+        .and_then(Value::as_str)
+        .and_then(|id| id.split('.').next())
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+}
+
 fn parse_player(r: &Value) -> StreamInfo {
     let vd = r.get("videoDetails").cloned().unwrap_or(Value::Null);
     let sd = r.get("streamingData").cloned().unwrap_or(Value::Null);
@@ -517,6 +607,16 @@ fn parse_player(r: &Value) -> StreamInfo {
             auto: t.get("kind").and_then(Value::as_str) == Some("asr"),
         });
     }
+    info.original_language = extract_innertube_original_lang(r);
+    let def_audio_idx = r
+        .pointer("/captions/playerCaptionsTracklistRenderer/defaultAudioTrackIndex")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    info.default_caption_index = r
+        .pointer(&format!("/captions/playerCaptionsTracklistRenderer/audioTracks/{def_audio_idx}/defaultCaptionTrackIndex"))
+        .and_then(Value::as_u64)
+        .map(|i| i as usize)
+        .filter(|&i| i < info.captions.len());
     if let Some(spec) = r
         .pointer("/storyboards/playerStoryboardSpecRenderer/spec")
         .and_then(Value::as_str)
@@ -713,6 +813,27 @@ pub fn ytdlp_streams(video_id: &str) -> Result<StreamInfo> {
             }
         }
     }
+    info.original_language = s(&v, "/language")
+        .filter(|l| !l.is_empty())
+        .or_else(|| {
+            v.get("formats")
+                .and_then(Value::as_array)
+                .and_then(|fmts| {
+                    fmts.iter()
+                        .filter(|f| {
+                            s(f, "/vcodec").as_deref() == Some("none")
+                                && s(f, "/language").map(|l| !l.is_empty()).unwrap_or(false)
+                        })
+                        .max_by_key(|f| f.get("language_preference").and_then(Value::as_i64).unwrap_or(i64::MIN))
+                        .and_then(|f| s(f, "/language"))
+                })
+        })
+        .or_else(|| {
+            info.captions
+                .iter()
+                .find(|c| c.auto && c.lang.ends_with("-orig"))
+                .map(|c| c.lang.trim_end_matches("-orig").to_string())
+        });
     sort_formats(&mut info);
     Ok(info)
 }

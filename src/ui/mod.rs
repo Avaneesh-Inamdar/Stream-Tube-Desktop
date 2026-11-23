@@ -312,7 +312,7 @@ pub fn empty_state(icon_name: &str, title: &str, subtitle: &str, cx: &App) -> Di
 }
 
 pub fn error_state(err: &str, cx: &App) -> Div {
-    empty_state("circle-alert", "Something went wrong", &friendly_error(err), cx)
+    empty_state("circle-alert", &crate::i18n::t("Something went wrong"), &friendly_error(err), cx)
 }
 
 /// One readable line instead of raw HTTP bodies or error chains.
@@ -385,23 +385,56 @@ pub fn avatar(url: Option<&str>, size: Pixels, name: &str, cx: &App) -> AnyEleme
 
 pub fn copy_to_clipboard(text: String, cx: &mut App) {
     cx.write_to_clipboard(ClipboardItem::new_string(text));
-    toast(cx, "Link copied to clipboard");
+    toast(cx, crate::i18n::t("Link copied to clipboard"));
 }
 
 /// Brand colors of the Stream Tube logo.
 pub const BRAND_PINK: u32 = 0xF0307E;
 pub const BRAND_VIOLET: u32 = 0x7A3CF5;
 
-/// The Stream Tube app logo.
-/// The logo, in the current accent colour.
+/// Active brand title for the top-left wordmark and window title.
+pub fn brand_title() -> String {
+    let custom = crate::store::settings_snapshot().brand_name.trim().to_string();
+    if custom.is_empty() { "Stream Tube".into() } else { custom }
+}
+
+/// The Stream Tube app logo (or user-selected custom logo).
 pub fn logo(size: Pixels) -> Img {
-    let accent = app_icon::icon_accent(crate::store::settings_snapshot().accent);
+    let s = crate::store::settings_snapshot();
+    let custom = s.custom_logo.trim();
+    if !custom.is_empty() && std::path::Path::new(custom).is_file() {
+        let ext = std::path::Path::new(custom)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("png")
+            .to_ascii_lowercase();
+        let mut h: u64 = 14695981039346656037;
+        for b in custom.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(1099511628211);
+        }
+        return img(SharedString::from(format!("brand/custom-logo-{h:016x}.{ext}")))
+            .size(size)
+            .object_fit(ObjectFit::Contain)
+            .flex_none();
+    }
+    let accent = app_icon::icon_accent(s.accent);
     img(SharedString::from(format!("brand/logo-{accent:06x}.svg"))).size(size).flex_none()
 }
 
-/// "Stream Tube" wordmark next to the logo.
+/// Brand wordmark next to the logo.
 pub fn wordmark(cx: &App) -> Div {
     let p = pal(cx);
+    let custom = crate::store::settings_snapshot().brand_name.trim().to_string();
+    if !custom.is_empty() {
+        return div()
+            .flex()
+            .items_baseline()
+            .text_lg()
+            .font_weight(FontWeight::BOLD)
+            .text_color(p.text)
+            .child(custom);
+    }
     div()
         .flex()
         .items_baseline()

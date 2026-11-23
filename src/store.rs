@@ -19,6 +19,9 @@ pub struct Settings {
     // Region
     pub region: String,
     pub language: String,
+    pub app_language: String,
+    pub brand_name: String,
+    pub custom_logo: String,
     // Backend
     pub stream_backend: String,
     /// Linux: "auto", "x11" or "wayland" (see display.rs)
@@ -112,6 +115,18 @@ pub struct Settings {
     pub ambient_mode: bool,
     pub shorts_in_player: bool,
     pub shorts_autoadvance: bool,
+    /// YouTube-style Shorts layout (default off)
+    pub shorts_yt_layout: bool,
+    /// "outside" (bottom-left outside video) or "overlay" (bottom-left over video)
+    pub shorts_info_position: String,
+    /// Place Shorts up/down navigation buttons on the far right edge
+    pub shorts_nav_edge: bool,
+    /// Show Subscribe button next to channel name in YouTube-style Shorts
+    pub shorts_show_subscribe: bool,
+    /// Show Dislike button in YouTube-style Shorts
+    pub shorts_show_dislike: bool,
+    /// Show rounded-square channel thumbnail at the bottom of the action bar
+    pub shorts_show_channel_thumb: bool,
     pub remember_quality: bool,
     pub exit_fullscreen_at_end: bool,
     /// "light" | "default" | "strong": gradient behind the player controls
@@ -144,6 +159,9 @@ impl Default for Settings {
             grid_columns: 0,
             region: "US".into(),
             language: "en".into(),
+            app_language: "en".into(),
+            brand_name: String::new(),
+            custom_logo: String::new(),
             stream_backend: "auto".into(),
             display_server: "auto".into(),
             ytdlp_path: String::new(),
@@ -218,6 +236,12 @@ impl Default for Settings {
             ambient_mode: true,
             shorts_in_player: false,
             shorts_autoadvance: false,
+            shorts_yt_layout: false,
+            shorts_info_position: "outside".into(),
+            shorts_nav_edge: true,
+            shorts_show_subscribe: true,
+            shorts_show_dislike: false,
+            shorts_show_channel_thumb: true,
             remember_quality: false,
             exit_fullscreen_at_end: true,
             controls_shade: "default".into(),

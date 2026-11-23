@@ -108,6 +108,44 @@ fn resource_id(accent: u32) -> u16 {
 }
 
 #[cfg(windows)]
+fn custom_ico_path(logo_path: &str) -> Option<std::path::PathBuf> {
+    let trimmed = logo_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = std::path::Path::new(trimmed);
+    if !path.is_file() {
+        return None;
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if ext == "ico" {
+        return Some(path.to_path_buf());
+    }
+    if ext == "png" {
+        let png = std::fs::read(path).ok()?;
+        // PNG signature + IHDR chunk (width at 16..20, height at 20..24)
+        if png.len() < 24 || &png[0..8] != b"\x89PNG\r\n\x1a\n" {
+            return None;
+        }
+        let w = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+        let h = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
+        let bw = if w >= 256 { 0u8 } else { w as u8 };
+        let bh = if h >= 256 { 0u8 } else { h as u8 };
+        let len = png.len() as u32;
+        let mut ico = Vec::with_capacity(22 + png.len());
+        ico.extend_from_slice(&[0, 0, 1, 0, 1, 0]); // ICONDIR: reserved=0, type=1(ICO), count=1
+        ico.extend_from_slice(&[bw, bh, 0, 0, 1, 0, 32, 0]); // ICONDIRENTRY
+        ico.extend_from_slice(&len.to_le_bytes());
+        ico.extend_from_slice(&22u32.to_le_bytes());
+        ico.extend_from_slice(&png);
+        let out = crate::store::data_dir().join("custom_icon.ico");
+        std::fs::write(&out, &ico).ok()?;
+        return Some(out);
+    }
+    None
+}
+
+#[cfg(windows)]
 pub fn set_window_icon(window: &Window, accent: u32) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     #[link(name = "user32")]
@@ -126,13 +164,31 @@ pub fn set_window_icon(window: &Window, accent: u32) {
     const SM_CXSMICON: i32 = 49;
     let Ok(h) = HasWindowHandle::window_handle(window) else { return };
     let RawWindowHandle::Win32(w) = h.as_raw() else { return };
+    const LR_LOADFROMFILE: u32 = 0x0000_0010;
+    let custom = custom_ico_path(&crate::store::settings_snapshot().custom_logo);
     let id = resource_id(accent) as usize as *const u16; // MAKEINTRESOURCE
     unsafe {
         let inst = GetModuleHandleW(std::ptr::null());
         let big_size = GetSystemMetrics(SM_CXICON).max(32);
         let small_size = GetSystemMetrics(SM_CXSMICON).max(16);
-        let big = LoadImageW(inst, id, IMAGE_ICON, big_size, big_size, 0);
-        let small = LoadImageW(inst, id, IMAGE_ICON, small_size, small_size, 0);
+        let (big, small) = if let Some(ref p) = custom {
+            let wide: Vec<u16> = p.as_os_str().to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
+            let b = LoadImageW(0, wide.as_ptr(), IMAGE_ICON, big_size, big_size, LR_LOADFROMFILE);
+            let s = LoadImageW(0, wide.as_ptr(), IMAGE_ICON, small_size, small_size, LR_LOADFROMFILE);
+            if b != 0 || s != 0 {
+                (b, s)
+            } else {
+                (
+                    LoadImageW(inst, id, IMAGE_ICON, big_size, big_size, 0),
+                    LoadImageW(inst, id, IMAGE_ICON, small_size, small_size, 0),
+                )
+            }
+        } else {
+            (
+                LoadImageW(inst, id, IMAGE_ICON, big_size, big_size, 0),
+                LoadImageW(inst, id, IMAGE_ICON, small_size, small_size, 0),
+            )
+        };
         if big != 0 {
             SendMessageW(w.hwnd.get(), WM_SETICON, 1, big);
         }

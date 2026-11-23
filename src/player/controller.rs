@@ -45,6 +45,7 @@ pub struct Player {
     pub sb_prompt: Option<Segment>,
     muted_by_sb: bool,
     pub caption: Option<usize>,
+    applied_captions_lang: String,
     pub queue: Vec<VideoItem>,
     pub queue_pos: Option<usize>,
     pub chapters: Vec<Chapter>,
@@ -131,6 +132,7 @@ impl Player {
             sb_prompt: None,
             muted_by_sb: false,
             caption: None,
+            applied_captions_lang: s.captions_lang.clone(),
             queue: Vec::new(),
             queue_pos: None,
             chapters: Vec::new(),
@@ -575,13 +577,9 @@ impl Player {
                         p.streams = Some(info);
                         // default caption
                         let s = store::settings_snapshot();
+                        p.applied_captions_lang = s.captions_lang.clone();
                         p.caption = if s.captions_enabled {
-                            p.streams.as_ref().and_then(|i| {
-                                i.captions
-                                    .iter()
-                                    .position(|c| c.lang.starts_with(&s.captions_lang) && !c.auto)
-                                    .or_else(|| i.captions.iter().position(|c| c.lang.starts_with(&s.captions_lang)))
-                            })
+                            p.streams.as_ref().and_then(|i| pick_caption(i, &s.captions_lang))
                         } else {
                             None
                         };
@@ -743,19 +741,20 @@ impl Player {
                 self.set_audio_only(s.audio_only, cx);
             }
             let want_caps = s.captions_enabled;
-            if want_caps && self.caption.is_none() {
-                if let Some(i) = self.streams.as_ref().and_then(|i| {
-                    i.captions
-                        .iter()
-                        .position(|c| c.lang.starts_with(&s.captions_lang) && !c.auto)
-                        .or_else(|| i.captions.iter().position(|c| c.lang.starts_with(&s.captions_lang)))
-                }) {
-                    self.caption = Some(i);
+            let lang_changed = self.applied_captions_lang != s.captions_lang;
+            if want_caps && (self.caption.is_none() || lang_changed) {
+                self.applied_captions_lang = s.captions_lang.clone();
+                let next = self.streams.as_ref().and_then(|i| pick_caption(i, &s.captions_lang));
+                if next != self.caption {
+                    self.caption = next;
                     self.apply_caption();
                 }
             } else if !want_caps && self.caption.is_some() {
+                self.applied_captions_lang = s.captions_lang.clone();
                 self.caption = None;
                 self.apply_caption();
+            } else if lang_changed {
+                self.applied_captions_lang = s.captions_lang.clone();
             }
         }
         cx.notify();
@@ -780,8 +779,11 @@ impl Player {
                 let lang = c.lang.split('-').next().unwrap_or("en").to_string();
                 store::update_settings(|s| {
                     s.captions_enabled = true;
-                    s.captions_lang = lang;
+                    if !s.captions_lang.eq_ignore_ascii_case(crate::locale::ORIGINAL_CAPTION_LANG) {
+                        s.captions_lang = lang;
+                    }
                 });
+                self.applied_captions_lang = store::settings_snapshot().captions_lang.clone();
             }
         } else {
             store::update_settings(|s| s.captions_enabled = false);
@@ -1111,6 +1113,79 @@ fn average_color(data: &[u8], w: u32, h: u32) -> Option<Rgba> {
     }
     let f = |v: u64| ((v as f32 / n as f32) / 255.0 * 1.25).min(1.0);
     Some(Rgba { r: f(r), g: f(g), b: f(b), a: 1.0 })
+}
+
+fn strip_orig_suffix(code: &str) -> &str {
+    code.strip_suffix("-orig").unwrap_or(code)
+}
+
+fn lang_matches(track: &str, target: &str) -> bool {
+    let track = strip_orig_suffix(track);
+    let target = strip_orig_suffix(target);
+    if target.is_empty() {
+        return false;
+    }
+    if track.eq_ignore_ascii_case(target) {
+        return true;
+    }
+    if track.len() > target.len()
+        && track.get(..target.len()).map(|p| p.eq_ignore_ascii_case(target)).unwrap_or(false)
+        && track.as_bytes().get(target.len()) == Some(&b'-')
+    {
+        return true;
+    }
+    if let Some((t_base, _)) = target.split_once('-') {
+        if track.eq_ignore_ascii_case(t_base) {
+            return true;
+        }
+        if track.len() > t_base.len()
+            && track.get(..t_base.len()).map(|p| p.eq_ignore_ascii_case(t_base)).unwrap_or(false)
+            && track.as_bytes().get(t_base.len()) == Some(&b'-')
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn pick_for_lang(captions: &[CaptionTrack], target: &str) -> Option<usize> {
+    let target_clean = strip_orig_suffix(target);
+    captions
+        .iter()
+        .position(|c| !c.auto && strip_orig_suffix(&c.lang).eq_ignore_ascii_case(target_clean))
+        .or_else(|| captions.iter().position(|c| !c.auto && lang_matches(&c.lang, target)))
+        .or_else(|| captions.iter().position(|c| c.auto && strip_orig_suffix(&c.lang).eq_ignore_ascii_case(target_clean)))
+        .or_else(|| captions.iter().position(|c| c.auto && lang_matches(&c.lang, target)))
+}
+
+/// Picks the best caption track index for `pref` (either a language code like `"en"`
+/// or `crate::locale::ORIGINAL_CAPTION_LANG` for the video's original language).
+pub fn pick_caption(info: &StreamInfo, pref: &str) -> Option<usize> {
+    if info.captions.is_empty() {
+        return None;
+    }
+    if pref.eq_ignore_ascii_case(crate::locale::ORIGINAL_CAPTION_LANG) {
+        if let Some(orig) = info.original_language.as_deref() {
+            if let Some(i) = pick_for_lang(&info.captions, orig) {
+                return Some(i);
+            }
+        }
+        if let Some(asr) = info
+            .captions
+            .iter()
+            .find(|c| c.auto && c.lang.ends_with("-orig"))
+            .or_else(|| info.captions.iter().find(|c| c.auto))
+        {
+            if let Some(i) = pick_for_lang(&info.captions, &asr.lang) {
+                return Some(i);
+            }
+        }
+        if let Some(i) = info.default_caption_index.filter(|&i| i < info.captions.len()) {
+            return Some(i);
+        }
+        return Some(0);
+    }
+    pick_for_lang(&info.captions, pref)
 }
 
 /// The font for a caption font choice. libass looks fonts up by name, and finds

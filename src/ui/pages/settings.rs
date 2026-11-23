@@ -64,6 +64,7 @@ impl SettingsPage {
         let fields: Vec<(&'static str, String, &'static str, Setter)> = vec![
             ("region", s.region.clone(), "US", |s, v| s.region = v.to_uppercase()),
             ("language", s.language.clone(), "en", |s, v| s.language = v),
+            ("brand_name", s.brand_name.clone(), "Stream Tube", |s, v| s.brand_name = v),
             ("sb_server", s.sponsorblock_server.clone(), "https://sponsor.ajay.app", |s, v| s.sponsorblock_server = v),
             ("ytdlp", s.ytdlp_path.clone(), "yt-dlp (from PATH)", |s, v| s.ytdlp_path = v),
             ("proxy", s.proxy.clone(), "e.g. socks5://127.0.0.1:9050 or http://host:port", |s, v| s.proxy = v),
@@ -86,11 +87,12 @@ impl SettingsPage {
                     let v = st.read(cx).value().trim().to_string();
                     let changed = key == "sb_user_id" && v != store::settings_snapshot().sb_user_id;
                     store::update_settings(|s| setter(s, v));
+                    if key == "brand_name" { crate::ui::app::refresh_all_pages(cx); cx.refresh_windows(); }
                     if changed {
                         this.load_sb_stats(cx);
                     }
                     if matches!(ev, InputEvent::PressEnter { .. }) {
-                        toast(cx, "Saved");
+                        toast(cx, crate::i18n::t("Saved"));
                     }
                 }
             }));
@@ -232,7 +234,7 @@ fn caption_preview(s: &Settings) -> AnyElement {
         .text_size(px(s.caption_size as f32 * 0.45))
         .text_color(rgba(s.caption_color, s.caption_opacity))
         .when(s.caption_background, |d| d.bg(rgba(s.caption_bg_color, s.caption_bg_opacity)))
-        .child("Captions look like this");
+        .child(crate::i18n::t("Captions look like this"));
     div()
         .w(px(320.))
         .h(px(90.))
@@ -284,8 +286,8 @@ fn row(title: &str, desc: &str, control: impl IntoElement, cx: &App) -> Div {
                 // but never narrower than this
                 .min_w(px(240.))
                 .gap_0p5()
-                .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(p.text).child(title.to_string()))
-                .when(!desc.is_empty(), |d| d.child(div().text_xs().text_color(p.text2).child(desc.to_string()))),
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(p.text).child(crate::i18n::t(title)))
+                .when(!desc.is_empty(), |d| d.child(div().text_xs().text_color(p.text2).child(crate::i18n::t(desc)))),
         )
         .child(div().flex_none().child(control))
 }
@@ -313,8 +315,8 @@ fn stacked_row(title: &str, desc: &str, control: impl IntoElement, cx: &App) -> 
                 .flex()
                 .flex_col()
                 .gap_0p5()
-                .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(p.text).child(title.to_string()))
-                .when(!desc.is_empty(), |d| d.child(div().text_xs().text_color(p.text2).child(desc.to_string()))),
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(p.text).child(crate::i18n::t(title)))
+                .when(!desc.is_empty(), |d| d.child(div().text_xs().text_color(p.text2).child(crate::i18n::t(desc)))),
         )
         .child(div().w_full().min_w_0().child(control))
 }
@@ -356,7 +358,7 @@ fn segmented<T: PartialEq + Clone + 'static>(id: &'static str, options: &[(T, &s
                 .text_sm()
                 .when(active, |d| d.bg(p.accent).text_color(white()).font_weight(FontWeight::MEDIUM))
                 .when(!active, |d| d.text_color(p.text).hover(move |s| s.bg(p.hover)))
-                .child(label.to_string())
+                .child(crate::i18n::t(label))
                 .on_click(move |_, window, cx| {
                     let v3 = v2.clone();
                     store::update_settings(|s| set(s, v3));
@@ -403,7 +405,7 @@ impl SettingsPage {
         if options.len() <= 3 {
             return segmented(id, options, cur, set, cx).into_any_element();
         }
-        let items: Vec<(String, String, bool, T)> = options.iter().map(|(v, l)| (l.to_string(), String::new(), *v == cur, v.clone())).collect();
+        let items: Vec<(String, String, bool, T)> = options.iter().map(|(v, l)| (crate::i18n::t(l), String::new(), *v == cur, v.clone())).collect();
         let label = items.iter().find(|i| i.2).map(|i| i.0.clone()).unwrap_or_default();
         self.select(id, label, 200., items, set, cx)
     }
@@ -506,6 +508,29 @@ impl SettingsPage {
         self.select(id, label, 280., items, set, cx)
     }
 
+    /// Caption language dropdown with an "Original language" option at the top.
+    fn caption_lang_dropdown(&self, cur: String, cx: &mut Context<Self>) -> AnyElement {
+        let is_orig = cur.eq_ignore_ascii_case(crate::locale::ORIGINAL_CAPTION_LANG);
+        let label = if is_orig {
+            crate::i18n::t("Original language")
+        } else {
+            format!("{}  ·  {}", crate::locale::name(crate::locale::LANGUAGES, &cur), cur)
+        };
+        let mut items = Vec::with_capacity(crate::locale::LANGUAGES.len() + 1);
+        items.push((
+            crate::i18n::t("Original language"),
+            crate::i18n::t("Video's audio language"),
+            is_orig,
+            crate::locale::ORIGINAL_CAPTION_LANG.to_string(),
+        ));
+        items.extend(
+            crate::locale::LANGUAGES
+                .iter()
+                .map(|(code, name)| (name.to_string(), code.to_string(), code.eq_ignore_ascii_case(&cur), code.to_string())),
+        );
+        self.select("dd-cap", label, 280., items, |s, v| s.captions_lang = v, cx)
+    }
+
     fn premium(&self, cx: &mut Context<Self>) -> Div {
         let s = store::settings_snapshot();
         let p = pal(cx);
@@ -548,6 +573,30 @@ impl SettingsPage {
         card(cx)
             .child(row("Shorts: play next automatically", "Move to the next Short when one ends", switch("sha", s.shorts_autoadvance, |s, v| s.shorts_autoadvance = v, cx), cx))
             .child(row("Open Shorts in the regular player", "", switch("shp", s.shorts_in_player, |s, v| s.shorts_in_player = v, cx), cx))
+            .child(row(
+                "YouTube-style Shorts layout",
+                "Use a YouTube-like Shorts layout with customizable info placement and edge navigation",
+                switch("shyt", s.shorts_yt_layout, |s, v| s.shorts_yt_layout = v, cx),
+                cx,
+            ))
+            .when(s.shorts_yt_layout, |d| {
+                d.child(row(
+                    "Shorts info placement",
+                    "Show channel and title outside the video (like wide YouTube) or overlaid on it",
+                    self.choice(
+                        "shpos",
+                        &[("outside".to_string(), "Outside (left)"), ("overlay".to_string(), "Overlay")],
+                        s.shorts_info_position.clone(),
+                        |s, v| s.shorts_info_position = v,
+                        cx,
+                    ),
+                    cx,
+                ))
+                .child(row("Edge navigation buttons", "Place the up/down Short buttons on the far right edge", switch("shnav", s.shorts_nav_edge, |s, v| s.shorts_nav_edge = v, cx), cx))
+                .child(row("Show Subscribe button", "", switch("shsub", s.shorts_show_subscribe, |s, v| s.shorts_show_subscribe = v, cx), cx))
+                .child(row("Show Dislike button", "", switch("shdis", s.shorts_show_dislike, |s, v| s.shorts_show_dislike = v, cx), cx))
+                .child(row("Show channel badge in action bar", "", switch("shch", s.shorts_show_channel_thumb, |s, v| s.shorts_show_channel_thumb = v, cx), cx))
+            })
             .child(row("Remember last quality", "Use the quality you picked last as the default", switch("rq", s.remember_quality, |s, v| s.remember_quality = v, cx), cx))
             .child(row("Double-click for fullscreen", "", switch("dcf", s.double_click_fullscreen, |s, v| s.double_click_fullscreen = v, cx), cx))
             .child(row("Exit fullscreen when a video ends", "", switch("efe", s.exit_fullscreen_at_end, |s, v| s.exit_fullscreen_at_end = v, cx), cx))
@@ -583,6 +632,42 @@ impl SettingsPage {
                 };
                 row("YouTube watch history", &desc, ctl, cx)
             })
+            .child(row("App language", "Interface language of the desktop client", self.choice("applang", &[("en".to_string(), "English"), ("tr".to_string(), "Türkçe")], s.app_language.clone(), |s, v| s.app_language = v, cx), cx))
+            .child(row("Brand name", "Text shown in the top-left corner and window title (leave empty for Stream Tube)", text_field(&self.input("brand_name"), 220., cx), cx))
+            .child(row(
+                "Custom logo & app icon",
+                "PNG, SVG or ICO file for the top-left logo and window icon",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(pill("logo-pick", Some("image"), crate::i18n::tr("Choose…", "Seç…"), cx).on_click(|_, _, cx| {
+                        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Select logo (PNG, SVG, ICO)".into()) });
+                        cx.spawn(async move |cx| {
+                            if let Ok(Ok(Some(paths))) = rx.await {
+                                if let Some(path) = paths.into_iter().next() {
+                                    let p_str = path.to_string_lossy().into_owned();
+                                    let _ = cx.update(|cx| {
+                                        store::update_settings(|s| s.custom_logo = p_str);
+                                        crate::ui::app_icon::apply(cx);
+                                        crate::ui::app::refresh_all_pages(cx);
+                                        cx.refresh_windows();
+                                    });
+                                }
+                            }
+                        })
+                        .detach();
+                    }))
+                    .when(!s.custom_logo.trim().is_empty(), |d| {
+                        d.child(pill("logo-reset", Some("rotate-ccw"), crate::i18n::tr("Reset", "Sıfırla"), cx).on_click(|_, _, cx| {
+                            store::update_settings(|s| s.custom_logo.clear());
+                            crate::ui::app_icon::apply(cx);
+                            crate::ui::app::refresh_all_pages(cx);
+                            cx.refresh_windows();
+                        }))
+                    }),
+                cx,
+            ))
             .child(row("Theme", "", self.choice("theme", &[("dark".to_string(), "Dark"), ("light".to_string(), "Light"), ("system".to_string(), "System")], s.theme.clone(), |s, v| s.theme = v, cx), cx))
             .child(row("Accent color", "Switches, highlights, progress and the seek bar", accent_swatches(s.accent, cx), cx))
             .child(row("Start page", "", self.choice("start", &[("home".to_string(), "Home"), ("subscriptions".to_string(), "Subscriptions"), ("history".to_string(), "History")], s.start_page.clone(), |s, v| s.start_page = v, cx), cx))
@@ -619,7 +704,7 @@ impl SettingsPage {
             .child(row("Audio only mode", "", switch("ao", s.audio_only, |s, v| s.audio_only = v, cx), cx))
             .child(row("Hardware decoding", "Takes effect after restart", switch("hw", s.hwdec, |s, v| s.hwdec = v, cx), cx))
             .child(row("Captions on by default", "", switch("cc", s.captions_enabled, |s, v| s.captions_enabled = v, cx), cx))
-            .child(row("Caption language", "Preferred subtitle track", self.dropdown("dd-cap", crate::locale::LANGUAGES, s.captions_lang.clone(), |s, v| s.captions_lang = v, cx), cx))
+            .child(row("Caption language", "Preferred subtitle track", self.caption_lang_dropdown(s.captions_lang.clone(), cx), cx))
             .child(row("Caption size", "", self.choice("capsize", &[(30u32, "Small"), (40, "Medium"), (52, "Large"), (64, "Extra large")], s.caption_size, |s, v| s.caption_size = v, cx), cx))
             .child(row(
                 "Caption font",

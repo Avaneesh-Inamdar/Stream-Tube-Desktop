@@ -13,6 +13,16 @@ pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        if path.starts_with("brand/custom-logo-") {
+            let custom = crate::store::settings_snapshot().custom_logo.clone();
+            let trimmed = custom.trim();
+            if !trimmed.is_empty() {
+                if let Ok(bytes) = std::fs::read(trimmed) {
+                    return Ok(Some(Cow::Owned(bytes)));
+                }
+            }
+            return Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo.svg"))));
+        }
         if path == "brand/logo.svg" {
             return Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo.svg"))));
         }

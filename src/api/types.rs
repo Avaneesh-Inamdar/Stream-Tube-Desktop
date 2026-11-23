@@ -229,6 +229,8 @@ pub struct StreamInfo {
     pub audio: Vec<StreamFormat>,
     pub muxed: Vec<StreamFormat>,
     pub captions: Vec<CaptionTrack>,
+    pub original_language: Option<String>,
+    pub default_caption_index: Option<usize>,
     pub storyboard: Option<Storyboard>,
     pub source: &'static str,
     /// Play `hls_url` (through the proxy); `video` then only lists the HLS
