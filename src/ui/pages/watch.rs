@@ -83,9 +83,9 @@ fn jump_to(t: f64, window: &mut Window, cx: &mut App) {
 impl WatchPage {
     pub fn new(id: String, playlist_id: Option<String>, start: Option<f64>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let pl = player(cx);
-        let sub = cx.subscribe(&pl, |this: &mut Self, _, ev: &PlayerEvent, cx| {
+        let sub = cx.subscribe_in(&pl, window, |this: &mut Self, _, ev: &PlayerEvent, window, cx| {
             match ev {
-                PlayerEvent::Ended => this.on_ended(cx),
+                PlayerEvent::Ended => this.on_ended(window, cx),
                 PlayerEvent::Ambient => cx.notify(),
                 _ => {}
             }
@@ -467,14 +467,17 @@ impl WatchPage {
         .detach();
     }
 
-    fn on_ended(&mut self, cx: &mut Context<Self>) {
+    fn on_ended(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let s = store::settings_snapshot();
         let next = cx.global::<AutoplayNext>().0.clone().filter(|_| s.autoplay_next);
         let looping = player(cx).read(cx).loop_video;
-        if next.is_none() && !looping && s.exit_fullscreen_at_end && cx.global::<UiState>().fullscreen {
-            if let Some(w) = cx.active_window() {
-                let _ = w.update(cx, |_, window, cx| crate::ui::app::toggle_fullscreen(window, cx));
-            }
+        if next.is_none()
+            && !looping
+            && s.exit_fullscreen_at_end
+            && crate::ui::app::is_fullscreen(window, cx)
+            && crate::ui::app::is_current_page(cx.entity_id(), cx)
+        {
+            crate::ui::app::toggle_fullscreen(window, cx);
         }
         if !s.autoplay_next {
             return;
@@ -482,14 +485,13 @@ impl WatchPage {
         if let Some(v) = next {
             toast(cx, format!("Up next: {}", v.title));
             let id = v.id.clone();
+            let main_window = window.window_handle();
             cx.spawn(async move |_, cx| {
                 cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
                 let _ = cx.update(|cx| {
                     let still_ended = player(cx).read(cx).eof;
                     if still_ended {
-                        if let Some(w) = cx.active_window() {
-                            let _ = w.update(cx, |_, window, cx| navigate(Route::Watch { id, playlist: None, start: None }, window, cx));
-                        }
+                        let _ = main_window.update(cx, |_, window, cx| navigate(Route::Watch { id, playlist: None, start: None }, window, cx));
                     }
                 });
             })
@@ -1439,7 +1441,7 @@ impl WatchPage {
 }
 
 impl Render for WatchPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::add(&crate::perf::PAGE_RENDERS, 1);
         let p = pal(cx);
         let ui = *cx.global::<UiState>();
@@ -1458,7 +1460,7 @@ impl Render for WatchPage {
                 cx.defer_in_entity(|this, cx| this.load_more_related(cx));
             }
         }
-        if ui.fullscreen {
+        if crate::ui::app::is_fullscreen(window, cx) {
             return div().size_full().bg(black()).child(crate::ui::slot::player_slot(cx)).into_any_element();
         }
         let vp = ui.viewport;

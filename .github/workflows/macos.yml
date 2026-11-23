@@ -1,0 +1,42 @@
+name: macOS build
+
+on:
+  push:
+    branches: [main]
+    paths: ["src/**", "Cargo.toml", "Cargo.lock", "build.rs", "assets/**", "packaging/macos/**", ".github/workflows/macos.yml"]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: "1.100.0"
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build and package
+        run: |
+          bundle=$(bash packaging/macos/build-app.sh)
+          test "$(lipo -archs "$bundle/Contents/MacOS/streamtube")" = arm64
+          version=$(cargo metadata --format-version 1 --no-deps --locked | plutil -extract packages.0.version raw -o - -)
+          ditto -c -k --sequesterRsrc --keepParent "$bundle" "dist/StreamTube-$version-macos-arm64.zip"
+
+      - name: Test
+        run: cargo test --release --locked
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: dist/*-macos-arm64.zip
+          if-no-files-found: error

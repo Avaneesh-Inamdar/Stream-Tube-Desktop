@@ -51,7 +51,8 @@ impl Route {
 #[derive(Clone, Copy, Default)]
 pub struct UiState {
     pub theater: bool,
-    pub fullscreen: bool,
+    #[cfg(not(target_os = "macos"))]
+    fullscreen: bool,
     pub sidebar_open: bool,
     pub content_width: Pixels,
     pub viewport: Size<Pixels>,
@@ -153,25 +154,42 @@ pub fn go_back(window: &mut Window, cx: &mut App) {
 
 /// Leaves the watch page while keeping playback (mini player).
 pub fn go_back_keep_playing(window: &mut Window, cx: &mut App) {
-    if cx.global::<UiState>().fullscreen {
-        toggle_fullscreen(window, cx);
-    }
     if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
         app.update(cx, |a, cx| {
-            if a.history.is_empty() {
-                a.go(Route::Home, window, cx);
-            } else {
+            if let Some((previous, _)) = a.history.last() {
+                if matches!(previous, Route::Watch { .. }) && is_fullscreen(window, cx) {
+                    toggle_fullscreen(window, cx);
+                }
                 a.back(window, cx);
+            } else {
+                a.go(Route::Home, window, cx);
             }
         });
     }
 }
 
+pub fn is_fullscreen(_window: &Window, _cx: &App) -> bool {
+    // The green traffic light can change fullscreen without a player action.
+    #[cfg(target_os = "macos")]
+    return _window.is_fullscreen();
+    #[cfg(not(target_os = "macos"))]
+    return _cx.global::<UiState>().fullscreen;
+}
+
 pub fn toggle_fullscreen(window: &mut Window, cx: &mut App) {
     window.toggle_fullscreen();
-    let ui = cx.global_mut::<UiState>();
-    ui.fullscreen = !ui.fullscreen;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let ui = cx.global_mut::<UiState>();
+        ui.fullscreen = !ui.fullscreen;
+    }
     cx.refresh_windows();
+}
+
+pub fn is_current_page(id: EntityId, cx: &App) -> bool {
+    cx.try_global::<AppHandle>()
+        .and_then(|handle| handle.0.upgrade())
+        .is_some_and(|app| app.read(cx).page.entity_id() == id)
 }
 
 /// Called by the player when the queue advances so the watch page follows.
@@ -1061,9 +1079,7 @@ impl AppView {
             }
             return;
         }
-        if cx.global::<UiState>().fullscreen && !matches!(route, Route::Watch { .. }) {
-            toggle_fullscreen(window, cx);
-        }
+        self.leave_watch_fullscreen(&route, window, cx);
         let page = build_page(&route, window, cx);
         let old_route = std::mem::replace(&mut self.route, route);
         let old_page = std::mem::replace(&mut self.page, page);
@@ -1120,6 +1136,7 @@ impl AppView {
         // and show the other one
         self.active_tab = index;
         let next = self.tabs[index].clone();
+        self.leave_watch_fullscreen(&next.route, window, cx);
         self.route = next.route;
         self.history = next.history;
         self.forward = next.forward;
@@ -1131,9 +1148,6 @@ impl AppView {
             Some(p) if !stale => p,
             _ => build_page(&self.route.clone(), window, cx),
         };
-        if cx.global::<UiState>().fullscreen && !matches!(self.route, Route::Watch { .. }) {
-            toggle_fullscreen(window, cx);
-        }
         window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
         window.focus(&self.focus, cx);
         cx.notify();
@@ -1292,6 +1306,7 @@ impl AppView {
 
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((r, p)) = self.history.pop() {
+            self.leave_watch_fullscreen(&r, window, cx);
             let cur_r = std::mem::replace(&mut self.route, r);
             let cur_p = std::mem::replace(&mut self.page, p);
             self.forward.push((cur_r, cur_p));
@@ -1309,11 +1324,18 @@ impl AppView {
 
     pub fn forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((r, p)) = self.forward.pop() {
+            self.leave_watch_fullscreen(&r, window, cx);
             let cur_r = std::mem::replace(&mut self.route, r);
             let cur_p = std::mem::replace(&mut self.page, p);
             self.history.push((cur_r, cur_p));
             window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
             cx.notify();
+        }
+    }
+
+    fn leave_watch_fullscreen(&self, next: &Route, window: &mut Window, cx: &mut App) {
+        if matches!(self.route, Route::Watch { .. }) && !matches!(next, Route::Watch { .. }) && is_fullscreen(window, cx) {
+            toggle_fullscreen(window, cx);
         }
     }
 
@@ -1703,12 +1725,13 @@ impl AppView {
         let dialog_focused = self.dialog_input.read(cx).focus_handle(cx).is_focused(window);
         let k = ev.keystroke.key.as_str();
         let m = &ev.keystroke.modifiers;
-        if k == "f5" || (m.control && k == "r" && !search_focused && !dialog_focused) {
+        let primary = if cfg!(target_os = "macos") { m.platform } else { m.control };
+        if k == "f5" || (primary && k == "r" && !search_focused && !dialog_focused) {
             self.refresh(window, cx);
             return;
         }
-        // tabs: Ctrl+T new, Ctrl+W close, Ctrl+Tab / Ctrl+Shift+Tab next / previous, Ctrl+1..9 pick
-        if m.control && !m.alt {
+        // Use Command for tab shortcuts on macOS, with Control+Tab for cycling.
+        if (primary || (m.control && k == "tab")) && !m.alt {
             match k {
                 "t" if !m.shift => {
                     self.new_tab(Route::Home, true, window, cx);
@@ -1716,6 +1739,11 @@ impl AppView {
                 }
                 "w" if !m.shift && self.tabs.len() > 1 => {
                     self.close_tab(self.active_tab, window, cx);
+                    return;
+                }
+                "w" if cfg!(target_os = "macos") && !m.shift => {
+                    crate::save_window_bounds(window);
+                    window.remove_window();
                     return;
                 }
                 "tab" => {
@@ -1728,7 +1756,7 @@ impl AppView {
                 }
                 d if self.tabs.len() > 1 && matches!(d, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9") => {
                     let n: usize = d.parse().unwrap_or(1);
-                    // Ctrl+9 is the last tab, as in browsers
+                    // As in browsers, the 9 shortcut selects the last tab.
                     let i = if n == 9 { self.tabs.len() - 1 } else { (n - 1).min(self.tabs.len() - 1) };
                     self.switch_tab(i, window, cx);
                     return;
@@ -1758,7 +1786,7 @@ impl AppView {
                 cx.notify();
                 return;
             }
-            if cx.global::<UiState>().fullscreen {
+            if is_fullscreen(window, cx) {
                 toggle_fullscreen(window, cx);
                 return;
             }
@@ -1786,7 +1814,7 @@ impl AppView {
             self.forward(window, cx);
             return;
         }
-        if m.control && (k == "l" || k == "k") || k == "/" {
+        if primary && (k == "l" || k == "k") || k == "/" {
             let fh = self.search.read(cx).focus_handle(cx);
             window.focus(&fh, cx);
             return;
@@ -2134,7 +2162,7 @@ impl AppView {
                     .child(icon_button("settings", "settings", cx).on_click(cx.listener(|this, _, window, cx| this.go(Route::Settings, window, cx))))
                     .child(self.account_button(cx))
                     .child(div().id("drag-c").w_3().h(px(56.)).window_control_area(WindowControlArea::Drag))
-                    .child(window_controls(maximized, cx)),
+                    .when(!cfg!(target_os = "macos"), |d| d.child(window_controls(maximized, cx))),
             )
     }
 
@@ -2973,7 +3001,7 @@ impl Render for AppView {
             u.viewport = vp;
             u.content_width = vp.width - px(sidebar_w) - px(48.);
         }
-        let fullscreen = ui.fullscreen && is_watch;
+        let fullscreen = is_watch && is_fullscreen(window, cx);
         let mut root = div()
             .image_cache(self.images.clone())
             .id("app-root")
@@ -2997,6 +3025,7 @@ impl Render for AppView {
                 cx.listener(|this, _, window, cx| this.forward(window, cx)),
             );
         let has_slot = matches!(self.route, Route::Watch { .. } | Route::Shorts(_));
+        let pip_open = crate::ui::pip::handle(cx).is_some();
         let page_area = div()
             .relative()
             .overflow_hidden()
@@ -3011,14 +3040,21 @@ impl Render for AppView {
                         |d, t| d.opacity(0.35 + 0.65 * t),
                     ),
             )
-            .when(has_slot, |d| d.child(crate::ui::slot::SlotFollower::new(cx, self.main_view.clone().into())))
+            .when(has_slot, |d| {
+                let content = if pip_open {
+                    crate::ui::pip::placeholder().into_any_element()
+                } else {
+                    self.main_view.clone().into_any_element()
+                };
+                d.child(crate::ui::slot::SlotFollower::new(cx, content))
+            })
             // only over a thumbnail drawn on this page (the slot is cleared when a
             // preview stops or moves to another video)
             .when(
                 crate::player::preview::showing(cx).is_some() && cx.global::<crate::player::preview::PreviewSlot>().0.get().is_some(),
                 |d| {
                     let slot = cx.global::<crate::player::preview::PreviewSlot>().0.clone();
-                    d.child(crate::ui::slot::SlotFollower::with_slot(slot, self.preview_view.clone().into()))
+                    d.child(crate::ui::slot::SlotFollower::with_slot(slot, self.preview_view.clone()))
                 },
             );
         if fullscreen {
@@ -3043,7 +3079,9 @@ impl Render for AppView {
                 let vp = window.viewport_size();
                 self.mini_geom = clamp_mini(self.mini_geom, vp.width.into(), vp.height.into());
             }
-            root = root.children(self.render_mini_player(cx)).children(self.render_mini_drag(cx));
+            if !pip_open {
+                root = root.children(self.render_mini_player(cx)).children(self.render_mini_drag(cx));
+            }
             root = root.children(self.render_drawer(cx));
         }
         root = root.children(self.render_dl_panel(cx));
@@ -3093,6 +3131,10 @@ fn strip_download_section(notes: &str) -> String {
 pub fn restore_window(window: &mut Window) {
     if !window_minimized(window) {
         return;
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(window) = crate::macos::native_window(window) {
+        window.deminiaturize(None);
     }
     #[cfg(windows)]
     {
@@ -3232,7 +3274,11 @@ fn window_minimized(window: &Window) -> bool {
         }
         false
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        crate::macos::native_window(window).is_some_and(|window| window.isMiniaturized())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = window;
         true

@@ -1001,7 +1001,7 @@ impl SettingsPage {
                 } else if self.ytdlp_version.is_some() {
                     div().into_any_element()
                 } else {
-                    pill("get-ytdlp", Some("download"), &format!("Get yt-dlp ({})", crate::downloads::YTDLP_SIZE), cx)
+                    pill("get-ytdlp", Some("download"), crate::downloads::GET_YTDLP, cx)
                         .on_click(|_, _, cx| crate::downloads::fetch_ytdlp(cx))
                         .into_any_element()
                 },
@@ -1011,13 +1011,14 @@ impl SettingsPage {
                 "FFmpeg",
                 match self.ffmpeg_found {
                     Some(true) => "Installed. Joins the video and audio of downloads above 360p",
+                    Some(false) if cfg!(target_os = "macos") => crate::downloads::GET_FFMPEG_HELP,
                     Some(false) => "Needed to join video and audio above 360p. Stream Tube can fetch it for you",
                     None => "",
                 },
                 if let Some(f) = crate::downloads::ffmpeg_fetch() {
                     fetch_progress("ffmpeg-prog", f, cx)
-                } else if self.ffmpeg_found == Some(false) {
-                    pill("get-ffmpeg", Some("download"), &format!("Get FFmpeg ({})", crate::downloads::FFMPEG_SIZE), cx)
+                } else if let Some(label) = crate::downloads::GET_FFMPEG.filter(|_| self.ffmpeg_found == Some(false)) {
+                    pill("get-ffmpeg", Some("download"), label, cx)
                         .on_click(|_, _, cx| crate::downloads::fetch_ffmpeg(cx))
                         .into_any_element()
                 } else {
@@ -1072,12 +1073,23 @@ impl SettingsPage {
 
     fn about(&self, cx: &mut Context<Self>) -> Div {
         let s = store::settings_snapshot();
-        let mpv = crate::player::mpv::available();
+        let video_engine = if crate::player::mpv::available() {
+            "libmpv"
+        } else if cfg!(target_os = "macos") {
+            "Install libmpv with brew install mpv, then restart Stream Tube"
+        } else if cfg!(windows) {
+            "libmpv-2.dll not found"
+        } else {
+            "libmpv not found (install the libmpv package)"
+        };
         card(cx)
             .child(row("Stream Tube", &format!("Version {}", env!("CARGO_PKG_VERSION")), div(), cx))
-            .child(row("Video engine", if mpv { "libmpv" } else if cfg!(windows) { "libmpv-2.dll not found" } else { "libmpv not found (install the libmpv package)" }, div(), cx))
+            .child(row("Video engine", video_engine, div(), cx))
             .child(row("yt-dlp", self.ytdlp_version.as_deref().unwrap_or("not installed"), div(), cx))
-            .child({
+            .when(cfg!(target_os = "macos"), |card| {
+                card.child(row("Updates", "Local macOS build. Rebuild from source to update.", div(), cx))
+            })
+            .when(!cfg!(target_os = "macos"), |card| {
                 use crate::updater::Status;
                 let status = cx.default_global::<crate::updater::Updates>().status.clone();
                 let text = match &status {
@@ -1092,9 +1104,9 @@ impl SettingsPage {
                     Status::Available(_) => pill("upd-show", Some("download"), "Update", cx).on_click(|_, window, cx| crate::ui::app::open_dialog(crate::ui::app::Dialog::Update, window, cx)),
                     _ => pill("upd-check", Some("refresh-cw"), "Check for updates", cx).on_click(|_, _, cx| crate::updater::check_now(true, cx)),
                 };
-                row("Updates", &text, btn, cx)
+                card.child(row("Updates", &text, btn, cx))
+                    .child(row("Check for updates at startup", "", switch("upd-auto", s.check_updates, |s, v| s.check_updates = v, cx), cx))
             })
-            .child(row("Check for updates at startup", "", switch("upd-auto", s.check_updates, |s, v| s.check_updates = v, cx), cx))
             .child(row("Releases", "Changelog and downloads on GitHub", pill("upd-page", Some("external-link"), "Open", cx).on_click(|_, _, _| {
                 let _ = open::that(crate::updater::RELEASES_PAGE);
             }), cx))

@@ -127,7 +127,6 @@ impl Render for PlayerView {
         let mpv = pl.mpv();
         let vsize = pl.video_size;
         let show = self.controls_visible(paused) || mini && self.hovering;
-        let ui = *cx.global::<UiState>();
         let scale = window.scale_factor();
 
         // ── video surface ──
@@ -352,7 +351,7 @@ impl Render for PlayerView {
                     let now = Instant::now();
                     let dbl = this.last_click.map(|t| now.duration_since(t) < Duration::from_millis(300)).unwrap_or(false);
                     this.last_click = Some(now);
-                    if dbl && store::settings_snapshot().double_click_fullscreen {
+                    if dbl && !this.pip && store::settings_snapshot().double_click_fullscreen {
                         crate::ui::app::toggle_fullscreen(window, cx);
                         // undo the pause toggle from the first click
                         this.player.update(cx, |p, _| p.toggle_pause());
@@ -509,7 +508,7 @@ impl Render for PlayerView {
             root = root.child(self.render_stats(cx));
         }
         if show {
-            root = root.child(self.render_controls(time, duration, ui, window, cx));
+            root = root.child(self.render_controls(time, duration, window, cx));
         }
         if let Some(m) = self.menu {
             root = root.child(self.render_menu(m, cx));
@@ -791,7 +790,7 @@ impl PlayerView {
             )
     }
 
-    fn render_controls(&mut self, time: f64, duration: f64, ui: UiState, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_controls(&mut self, time: f64, duration: f64, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = pal(cx);
         let pl = self.player.read(cx);
         let paused = pl.paused;
@@ -817,7 +816,7 @@ impl PlayerView {
         let accent = p.accent;
         let seek_b = self.seek_bounds.clone();
         let vol_b = self.vol_bounds.clone();
-        let _ = window;
+        let fullscreen = crate::ui::app::is_fullscreen(window, cx);
         // Narrow frames (the Shorts player) only get the essential buttons.
         let bar_w = f32::from(self.seek_bounds.get().size.width);
         let narrow = bar_w > 0.0 && bar_w < 560.0;
@@ -1131,14 +1130,14 @@ impl PlayerView {
             .when(!self.pip && !narrow, |d| {
                 d.child(ctl_btn("c-pip", "picture-in-picture").on_click(|_, _, cx| crate::ui::pip::open(cx)))
             })
-            .when(!ui.fullscreen && !self.pip && !narrow, |d| {
-                d.child(ctl_btn("c-theater", if ui.theater { "rectangle-horizontal" } else { "rectangle-horizontal" }).on_click(|_, _, cx| {
+            .when(!fullscreen && !self.pip && !narrow, |d| {
+                d.child(ctl_btn("c-theater", "rectangle-horizontal").on_click(|_, _, cx| {
                     cx.global_mut::<UiState>().theater ^= true;
                     cx.refresh_windows();
                 }))
             })
             .when(!self.pip, |d| {
-                d.child(ctl_btn("c-fs", if ui.fullscreen { "minimize" } else { "maximize" }).on_click(|_, window, cx| {
+                d.child(ctl_btn("c-fs", if fullscreen { "minimize" } else { "maximize" }).on_click(|_, window, cx| {
                     crate::ui::app::toggle_fullscreen(window, cx);
                 }))
             });

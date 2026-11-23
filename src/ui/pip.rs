@@ -3,6 +3,7 @@
 use crate::player::controller::player;
 use crate::player::view::PlayerView;
 use crate::ui::*;
+use gpui_kit::component::button::Button;
 
 #[derive(Default)]
 struct PipWindow(Option<AnyWindowHandle>);
@@ -34,12 +35,19 @@ pub fn open(cx: &mut App) {
         window_bounds: Some(WindowBounds::Windowed(Bounds::new(origin, size))),
         titlebar: None,
         kind: WindowKind::PopUp,
+        // Keep the main window active when ordering the Mac panel onscreen.
+        focus: !cfg!(target_os = "macos"),
         is_resizable: true,
         is_minimizable: false,
         window_min_size: Some(gpui_kit::size(px(256.), px(144.))),
         ..Default::default()
     };
-    let res = gpui_kit::open_window(opts, cx, |_, cx| {
+    let res = gpui_kit::open_window(opts, cx, |_window, cx| {
+        #[cfg(target_os = "macos")]
+        {
+            _window.set_window_title("Picture in Picture");
+            crate::macos::configure_pip_window(_window);
+        }
         let pl = player(cx);
         let view = cx.new(|cx| {
             let mut v = PlayerView::new(pl, false, cx);
@@ -55,10 +63,30 @@ pub fn open(cx: &mut App) {
     cx.refresh_windows();
 }
 
-pub fn close(window: &mut Window, cx: &mut App) {
-    cx.set_global(PipWindow(None));
-    window.remove_window();
-    cx.refresh_windows();
+pub fn window_closed(id: WindowId, cx: &mut App) {
+    if handle(cx).is_some_and(|panel| panel.window_id() == id) {
+        cx.set_global(PipWindow(None));
+        cx.refresh_windows();
+    }
+}
+
+pub fn placeholder() -> impl IntoElement {
+    div()
+        .size_full()
+        .bg(black())
+        .text_color(white())
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_3()
+        .child(icon("picture-in-picture").size_8())
+        .child("Playing in Picture in Picture")
+        .child(Button::new("return-from-pip").label("Return to player").on_click(|_, _, cx| {
+            if let Some(panel) = handle(cx) {
+                let _ = panel.update(cx, |_, window, _| window.remove_window());
+            }
+        }))
 }
 
 impl Render for PipView {
@@ -84,7 +112,17 @@ impl Render for PipView {
                     .invisible()
                     .group_hover("pip", |s| s.visible())
                     .bg(linear_gradient(180., linear_color_stop(hsla(0., 0., 0., 0.6), 0.), linear_color_stop(hsla(0., 0., 0., 0.), 1.)))
-                    .child(div().id("pip-drag").flex_1().h_full().window_control_area(WindowControlArea::Drag))
+                    .child({
+                        let drag = div().id("pip-drag").flex_1().h_full();
+                        #[cfg(target_os = "macos")]
+                        let drag = drag.on_mouse_down(MouseButton::Left, |_, window, cx| {
+                            cx.stop_propagation();
+                            window.start_window_move();
+                        });
+                        #[cfg(not(target_os = "macos"))]
+                        let drag = drag.window_control_area(WindowControlArea::Drag);
+                        drag
+                    })
                     .child(
                         div()
                             .id("pip-close")
@@ -97,7 +135,7 @@ impl Render for PipView {
                             .child(icon("x").size_4().text_color(white()))
                             .on_click(|_, window, cx| {
                                 cx.stop_propagation();
-                                close(window, cx);
+                                window.remove_window();
                             }),
                     ),
             )

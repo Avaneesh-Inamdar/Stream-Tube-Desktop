@@ -1,5 +1,5 @@
 //! Minimal dynamic binding to libmpv (client API + software render API).
-//! libmpv-2.dll is loaded at runtime so no import library is required.
+//! The platform's libmpv is loaded at runtime.
 #![allow(non_camel_case_types)]
 use anyhow::{Result, anyhow};
 use libloading::Library;
@@ -97,6 +97,8 @@ fn lib() -> Result<&'static (Library, Fns)> {
                         candidates.push(p);
                     }
                 }
+                #[cfg(target_os = "macos")]
+                candidates.push(d.join("../Frameworks/libmpv.2.dylib"));
             }
         }
         #[cfg(windows)]
@@ -107,6 +109,12 @@ fn lib() -> Result<&'static (Library, Fns)> {
         // older distributions (Ubuntu 22.04, Debian 11) ship the same API as .so.1
         candidates.push("libmpv.so.1".into());
         candidates.push("libmpv.so".into());
+        #[cfg(target_os = "macos")]
+        {
+            let brew = crate::macos::homebrew_prefix();
+            candidates.push(brew.join("opt/mpv/lib/libmpv.2.dylib"));
+            candidates.push(brew.join("lib/libmpv.2.dylib"));
+        }
         candidates.push("libmpv.2.dylib".into());
         let mut last_err = String::from("libmpv not found");
         // the error from a copy that is there but won't load says more than
@@ -560,6 +568,58 @@ impl Drop for Mpv {
         if let Ok((_, f)) = lib() {
             unsafe {
                 (f.terminate_destroy)(self.h.0);
+            }
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::{Mpv, MpvEvent};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    #[ignore = "requires macOS libmpv and a local video in STREAMTUBE_MPV_TEST_VIDEO"]
+    fn renders_local_video_without_a_window() {
+        let decoder = render_local_video("no");
+        assert!(matches!(decoder.as_deref(), None | Some("no")));
+    }
+
+    #[test]
+    #[ignore = "requires VideoToolbox, macOS libmpv and a compatible video in STREAMTUBE_MPV_TEST_VIDEO"]
+    fn renders_with_videotoolbox_without_a_window() {
+        let decoder = render_local_video("auto-copy");
+        assert_eq!(decoder.as_deref(), Some("videotoolbox-copy"));
+    }
+
+    fn render_local_video(hwdec: &str) -> Option<String> {
+        let path = std::env::var("STREAMTUBE_MPV_TEST_VIDEO").expect("set a path to a local video");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let player = Mpv::new(
+            &[("vo", "libmpv"), ("ao", "null"), ("hwdec", hwdec), ("config", "no"), ("osc", "no")],
+            move |event| { let _ = tx.send(event); },
+        )
+        .expect("load libmpv and create the software render context");
+        player.set_render_size(320, 180);
+        player.command_sync(&["loadfile", &path]).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(MpvEvent::Frame) => {
+                    if let Some(frame) = player.take_frame() {
+                        if frame.data.chunks_exact(4).any(|pixel| pixel[..3].iter().any(|&value| value > 32)) {
+                            assert_eq!((frame.width, frame.height), (320, 180));
+                            assert_eq!(frame.data.len(), 320 * 180 * 4);
+                            let decoder = player.get_string("hwdec-current");
+                            eprintln!("hwdec={hwdec}, hwdec-current={}", decoder.as_deref().unwrap_or("unavailable"));
+                            return decoder;
+                        }
+                    }
+                }
+                Ok(MpvEvent::EndFile { error: Some(error), .. }) => panic!("mpv playback failed: {error}"),
+                Ok(_) => {}
+                Err(_) => panic!("mpv did not render a video frame"),
             }
         }
     }

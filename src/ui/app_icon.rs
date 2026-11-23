@@ -87,6 +87,7 @@ pub fn logo_svg(accent: u32) -> String {
 
 /// Applies the icon for the current accent everywhere outside the app's own UI.
 pub fn apply(cx: &mut App) {
+    #[cfg(any(windows, target_os = "linux"))]
     let accent = icon_accent(crate::store::settings_snapshot().accent);
     #[cfg(windows)]
     {
@@ -97,9 +98,10 @@ pub fn apply(cx: &mut App) {
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = cx;
         update_menu_icon(accent);
     }
+    #[cfg(not(windows))]
+    let _ = cx;
 }
 
 #[cfg(windows)]
