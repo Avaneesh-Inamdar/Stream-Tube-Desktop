@@ -56,7 +56,7 @@ impl Render for DownloadsPage {
                             .min_w_0()
                             .gap_2()
                             .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).truncate().child(j.video.title.clone()))
-                            .child(div().text_xs().text_color(p.text2).child(format!("{} • format: {}", j.video.channel_name, j.format)))
+                            .child(div().text_xs().text_color(p.text2).child(format!("{} • {}: {}", j.video.channel_name, crate::i18n::tr("format", "biçim"), j.format)))
                             .when(running, |d| {
                                 d.child(div().w_full().h(px(4.)).rounded_full().bg(p.hover).child(div().h_full().rounded_full().w(relative(j.progress.clamp(0.0, 1.0))).bg(p.accent)))
                             })
@@ -97,7 +97,7 @@ impl Render for DownloadsPage {
                                         d.child(pill("dl-clear", Some("list-x"), "Clear list", cx).on_click(|_, _, cx| crate::downloads::clear_history(cx)))
                                     })
                                     .child(pill("dl-change", Some("folder-cog"), "Change folder", cx).on_click(|_, _, cx| {
-                                        let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Save downloads here".into()) });
+                                        let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(crate::i18n::t("Save downloads here").into()) });
                                         cx.spawn(async move |cx| {
                                             if let Ok(Ok(Some(paths))) = rx.await {
                                                 if let Some(d) = paths.into_iter().next() {
@@ -117,10 +117,17 @@ impl Render for DownloadsPage {
                                     })),
                             ),
                     )
-                    .child(div().text_sm().text_color(p.text2).child(format!(
-                        "Saving to {dir}. Engine: {}",
-                        if ytdlp { "yt-dlp (all qualities, SponsorBlock chapters)" } else { "built-in (combined 360p/720p or audio only — install yt-dlp for more)" }
-                    )))
+                    .child(div().text_sm().text_color(p.text2).child(if crate::i18n::is_tr() {
+                        format!(
+                            "Kayıt klasörü: {dir}. Motor: {}",
+                            if ytdlp { "yt-dlp (tüm kaliteler, SponsorBlock bölümleri)" } else { "yerleşik (birleşik 360p/720p veya yalnızca ses — daha fazlası için yt-dlp yükleyin)" }
+                        )
+                    } else {
+                        format!(
+                            "Saving to {dir}. Engine: {}",
+                            if ytdlp { "yt-dlp (all qualities, SponsorBlock chapters)" } else { "built-in (combined 360p/720p or audio only — install yt-dlp for more)" }
+                        )
+                    }))
                     .child(list),
             ),
         )

@@ -242,8 +242,8 @@ impl Render for PlaylistPage {
             })
             .child({
                 let total: u64 = videos.iter().filter_map(|v| v.duration_secs).sum();
-                let count = self.count_text.clone().unwrap_or_else(|| format!("{} videos", videos.len()));
-                let dur = if total >= 3600 { format!("{} h {} min", total / 3600, (total % 3600) / 60) } else if total > 0 { format!("{} min", total / 60) } else { String::new() };
+                let count = self.count_text.clone().unwrap_or_else(|| crate::i18n::t(&format!("{} videos", videos.len())));
+                let dur = if total >= 3600 { if crate::i18n::is_tr() { format!("{} sa {} dk", total / 3600, (total % 3600) / 60) } else { format!("{} h {} min", total / 3600, (total % 3600) / 60) } } else if total > 0 { if crate::i18n::is_tr() { format!("{} dk", total / 60) } else { format!("{} min", total / 60) } } else { String::new() };
                 div().flex().gap_2().text_xs().text_color(p.text2).child(count).when(!dur.is_empty(), |d| d.child("•").child(dur))
             })
             .child(
@@ -330,7 +330,7 @@ impl Render for PlaylistPage {
                 }
                 let mut col = div().flex().flex_col().gap_1().flex_1().min_w_0().child(bar);
                 if shown.is_empty() {
-                    col = col.child(div().py_8().text_sm().text_color(p.text2).child("No videos match"));
+                    col = col.child(div().py_8().text_sm().text_color(p.text2).child(crate::i18n::t("No videos match")));
                 }
                 let vs = &shown;
                 for (i, v) in vs.iter().map(|(i, v)| (*i, v)) {

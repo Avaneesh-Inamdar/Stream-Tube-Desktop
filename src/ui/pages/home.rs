@@ -112,7 +112,7 @@ fn recently_uploaded() -> anyhow::Result<Vec<Item>> {
         })
         .collect();
     if recent.is_empty() {
-        anyhow::bail!("No videos from the last {RECENT_DAYS} days in your feed yet. Sign in or subscribe to some channels to fill this up.");
+        if crate::i18n::is_tr() { anyhow::bail!("Akışınızda son {RECENT_DAYS} güne ait video yok. Burayı doldurmak için oturum açın veya birkaç kanala abone olun."); } else { anyhow::bail!("No videos from the last {RECENT_DAYS} days in your feed yet. Sign in or subscribe to some channels to fill this up."); }
     }
     recent.sort_by(|a, b| b.0.cmp(&a.0));
     Ok(recent

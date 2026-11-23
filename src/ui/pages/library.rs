@@ -407,8 +407,8 @@ impl Render for LibraryPage {
                 })
                 .when_some(self.yt.as_ref().map(|l| match l {
                     Load::Loading => spinner(cx).into_any_element(),
-                    Load::Error(e) => div().text_sm().text_color(p.text2).child(format!("Could not load your YouTube playlists: {e}")).into_any_element(),
-                    Load::Ready(l) if l.is_empty() => div().text_sm().text_color(p.text2).child("No playlists on your account yet").into_any_element(),
+                    Load::Error(e) => div().text_sm().text_color(p.text2).child(crate::i18n::t(&format!("Could not load your YouTube playlists: {e}"))).into_any_element(),
+                    Load::Ready(l) if l.is_empty() => div().text_sm().text_color(p.text2).child(crate::i18n::t("No playlists on your account yet")).into_any_element(),
                     Load::Ready(l) => grid(l.iter().map(|pl| playlist_card(pl, w, cx)).collect(), width).into_any_element(),
                 }), |d, body| {
                     d.child(div().flex().flex_col().gap_4().child(section_title("Your YouTube playlists", cx)).child(body))

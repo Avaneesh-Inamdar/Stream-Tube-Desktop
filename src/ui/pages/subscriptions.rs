@@ -178,8 +178,8 @@ impl Render for FeedPage {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .when_some(self.last_updated.filter(|_| !self.refreshing), |d, t| d.child(div().text_xs().text_color(p.text2).child(format!("Updated {}", crate::api::json::relative_from_ts(t)))))
-                    .when(self.refreshing, |d| d.child(div().text_xs().text_color(p.text2).child(if total == 0 { "Refreshing…".to_string() } else { format!("Refreshing {done}/{total}…") })))
+                    .when_some(self.last_updated.filter(|_| !self.refreshing), |d, t| d.child(div().text_xs().text_color(p.text2).child(crate::i18n::t(&format!("Updated {}", crate::api::json::relative_from_ts(t))))))
+                    .when(self.refreshing, |d| d.child(div().text_xs().text_color(p.text2).child(if total == 0 { crate::i18n::t("Refreshing…") } else { crate::i18n::t(&format!("Refreshing {done}/{total}…")) })))
                     .child(
                         pill("hide-watched", Some(if s.hide_watched_in_feed { "eye-off" } else { "eye" }), if s.hide_watched_in_feed { "Watched hidden" } else { "Hide watched" }, cx).on_click(|_, _, cx| {
                             store::update_settings(|s| s.hide_watched_in_feed ^= true);

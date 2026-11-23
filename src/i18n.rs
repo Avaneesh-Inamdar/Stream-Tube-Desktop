@@ -14,6 +14,17 @@ pub fn tr(en: &'static str, tr: &'static str) -> &'static str {
     if is_tr() { tr } else { en }
 }
 
+/// Formats comment reply counts ("3 replies" -> "3 yanıt").
+pub fn reply_count(count: &str) -> String {
+    if is_tr() {
+        format!("{count} yanıt")
+    } else if count == "1" {
+        format!("{count} reply")
+    } else {
+        format!("{count} replies")
+    }
+}
+
 /// Translates a UI string into the active app language, returning the original if unchanged.
 pub fn t(en: &str) -> String {
     if !is_tr() {
@@ -114,6 +125,33 @@ pub fn t(en: &str) -> String {
     }
     if let Some(rest) = en.strip_prefix("Source: ") {
         return format!("Kaynak: {rest}");
+    }
+    if let Some(rest) = en.strip_prefix("Removed from ") {
+        return format!("{rest} listesinden kaldırıldı");
+    }
+    if let Some(rest) = en.strip_prefix("Added ").and_then(|s| s.strip_suffix(" subscriptions")) {
+        return format!("{rest} abonelik eklendi");
+    }
+    if let Some(rest) = en.strip_suffix(" channels could not be refreshed") {
+        return format!("{rest} kanal yenilenemedi");
+    }
+    if let Some(rest) = en.strip_prefix("You have ") {
+        return format!("Mevcut sürüm: {rest}");
+    }
+    if let Some(rest) = en.strip_prefix("Could not load your YouTube playlists: ") {
+        return format!("YouTube oynatma listeleriniz yüklenemedi: {rest}");
+    }
+    if let Some(rest) = en.strip_prefix("Couldn't remove it from YouTube: ") {
+        return format!("YouTube'dan kaldırılamadı: {rest}");
+    }
+    if let Some(rest) = en.strip_prefix("Connected as ").and_then(|s| s.strip_suffix(". What you watch now shows in your YouTube history.")) {
+        return format!("{rest} olarak bağlandı. İzlediğiniz videolar artık YouTube geçmişinizde görünecek.");
+    }
+    if let Some(rest) = en.strip_suffix("x speed") {
+        return format!("{rest}x hız");
+    }
+    if let Some(rest) = en.strip_prefix("Refreshing ").and_then(|s| s.strip_suffix('…')) {
+        return format!("Yenileniyor {rest}…");
     }
     en.to_string()
 }
@@ -397,6 +435,35 @@ fn lookup_tr(en: &str) -> Option<&'static str> {
         "Save downloads here" => "İndirilenleri buraya kaydet",
         "Open folder" => "Klasörü aç",
         "Connect your YouTube history" => "YouTube geçmişinizi bağlayın",
+        "Use cookies" => "Çerez dosyasını seç",
+        "Use a cookies.txt file instead" => "Bunun yerine cookies.txt dosyası kullan",
+        "Try again" => "Tekrar dene",
+        "Waiting for sign-in…" => "Oturum açma bekleniyor…",
+        "Videos you watch in Stream Tube then show in your YouTube history, and your phone and TV resume them where you stopped. The window uses its own empty profile, which is deleted afterwards." => "Burada izlediğiniz videolar YouTube geçmişinizde görünür; telefonunuz ve TV'nizde kaldığınız yerden devam eder. Pencere kendi boş profilini kullanır ve işlem bitince silinir.",
+        "1. On any device, go to" => "1. Herhangi bir cihazdan şu adrese gidin:",
+        "2. Enter this code and pick your account" => "2. Bu kodu girin ve hesabınızı seçin",
+        "Waiting for approval…" => "Onay bekleniyor…",
+        "Copy code & open" => "Kodu kopyala ve aç",
+        "Getting a code…" => "Kod alınıyor…",
+        "Browser sign-in disconnected" => "Tarayıcı oturum bağlantısı kesildi",
+        "Sync subscriptions" => "Abonelikleri eşitle",
+        "Switch account" => "Hesap değiştir",
+        "Channel handle unknown" => "Kanal kullanıcı adı bilinmiyor",
+        "Could not open your channel" => "Kanalınız açılamadı",
+        "File missing" => "Dosya bulunamadı",
+        "Show in folder" => "Klasörde göster",
+        "Remove from list" => "Listeden kaldır",
+        "Open downloads page" => "İndirilenler sayfasını aç",
+        "No update available" => "Güncelleme yok",
+        "Pre-release" => "Ön sürüm",
+        "New version" => "Yeni sürüm",
+        "WHAT'S NEW" => "YENİLİKLER",
+        "Installing…" => "Yükleniyor…",
+        "Downloading…" => "İndiriliyor…",
+        "Stream Tube restarts by itself when it's done." => "İşlem bitince uygulama kendiliğinden yeniden başlar.",
+        "Skip this version" => "Bu sürümü atla",
+        "Later" => "Daha sonra",
+        "Save video to…" => "Videoyu şuraya kaydet…",
 
         // Settings sections
         "General" => "Genel",

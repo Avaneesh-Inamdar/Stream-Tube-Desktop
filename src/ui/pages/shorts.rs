@@ -420,7 +420,7 @@ impl ShortsPage {
                 .font_weight(FontWeight::MEDIUM)
                 .cursor_pointer()
                 .child(icon(if open { "chevron-up" } else { "chevron-down" }).size_4().text_color(p.link))
-                .child(format!("{} {}", c.reply_count, if c.reply_count == "1" { "reply" } else { "replies" }))
+                .child(crate::i18n::reply_count(&c.reply_count))
                 .on_click(cx.listener(move |t, _, _, cx| {
                     if t.replies.remove(&cid2).is_some() {
                         cx.notify();
@@ -489,7 +489,7 @@ impl ShortsPage {
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(p.link)
                             .cursor_pointer()
-                            .child("Show more replies")
+                            .child(crate::i18n::t("Show more replies"))
                             .on_click(cx.listener(move |t, _, _, cx| t.load_replies(cid.clone(), tok.clone(), cx)))
                             .into_any_element(),
                         true,
@@ -529,7 +529,7 @@ impl ShortsPage {
                 .text_color(p.text)
                 .cursor_pointer()
                 .hover(move |s| s.bg(p.hover))
-                .child(label)
+                .child(crate::i18n::t(label))
                 .when_some(tok, |d, tok| d.on_click(cx.listener(move |t, _, _, cx| t.load_comment_page(tok.clone(), false, cx))))
         };
         let header = div()
@@ -623,6 +623,7 @@ impl Render for ShortsPage {
         let ui = *cx.global::<UiState>();
         let st = store::settings_snapshot();
         if self.list.is_empty() {
+            crate::ui::slot::clear_slot(cx);
             return div()
                 .size_full()
                 .child(if self.loading {
@@ -633,6 +634,46 @@ impl Render for ShortsPage {
                 .into_any_element();
         }
         let v = self.list[self.idx].clone();
+        if ui.fullscreen {
+            let h = ui.viewport.height.max(px(240.));
+            let w = (h * (9. / 16.)).min(ui.viewport.width);
+            return div()
+                .id("shorts-fs")
+                .size_full()
+                .bg(black())
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_scroll(cx.listener(|this, ev: &ScrollEvent, window, cx| {
+                    let dy: f32 = ev.delta.pixel_delta(window.line_height()).y.into();
+                    if this.last_wheel.elapsed() > Duration::from_millis(220) {
+                        this.wheel_acc = 0.0;
+                        this.wheel_used = false;
+                    }
+                    this.last_wheel = Instant::now();
+                    if this.wheel_used {
+                        return;
+                    }
+                    this.wheel_acc += dy;
+                    if this.wheel_acc.abs() >= 48.0 {
+                        let d = if this.wheel_acc < 0.0 { 1 } else { -1 };
+                        this.wheel_acc = 0.0;
+                        this.wheel_used = true;
+                        this.last_step = Instant::now() - Duration::from_secs(1);
+                        this.step(d, window, cx);
+                    }
+                }))
+                .child(
+                    div()
+                        .relative()
+                        .w(w)
+                        .h(h)
+                        .overflow_hidden()
+                        .bg(black())
+                        .child(crate::ui::slot::player_slot(cx)),
+                )
+                .into_any_element();
+        }
         let h = (ui.viewport.height - px(56. + 32.)).max(px(400.));
         let w = h * (9. / 16.);
         let votes = self.votes.get(&v.id).cloned();

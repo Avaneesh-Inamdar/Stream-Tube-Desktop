@@ -293,7 +293,7 @@ pub fn open_web_sign_in(cx: &mut App) {
 
 /// Connects the browser session from a cookies.txt file the user picks.
 pub fn import_web_cookies(cx: &mut App) {
-    let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Use cookies".into()) });
+    let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some(crate::i18n::t("Use cookies").into()) });
     cx.spawn(async move |cx| {
         let Ok(Ok(Some(paths))) = rx.await else { return };
         let Some(path) = paths.into_iter().next() else { return };
@@ -363,7 +363,7 @@ pub fn open_dialog(d: Dialog, window: &mut Window, cx: &mut App) {
 
 pub fn prompt_text(title: &str, placeholder: &str, window: &mut Window, cx: &mut App, f: impl Fn(String, &mut Window, &mut App) + 'static) {
     open_dialog(
-        Dialog::TextPrompt { title: title.into(), placeholder: placeholder.into(), on_submit: Arc::new(f) },
+        Dialog::TextPrompt { title: crate::i18n::t(title), placeholder: crate::i18n::t(placeholder), on_submit: Arc::new(f) },
         window,
         cx,
     );
@@ -371,7 +371,7 @@ pub fn prompt_text(title: &str, placeholder: &str, window: &mut Window, cx: &mut
 
 pub fn confirm(title: &str, body: &str, confirm: &str, window: &mut Window, cx: &mut App, f: impl Fn(&mut Window, &mut App) + 'static) {
     open_dialog(
-        Dialog::Confirm { title: title.into(), body: body.into(), confirm: confirm.into(), on_confirm: Arc::new(f) },
+        Dialog::Confirm { title: crate::i18n::t(title), body: crate::i18n::t(body), confirm: crate::i18n::t(confirm), on_confirm: Arc::new(f) },
         window,
         cx,
     );
@@ -788,7 +788,7 @@ impl AppView {
             .text_color(p.link)
             .cursor_pointer()
             .hover(|s| s.underline())
-            .child("Use a cookies.txt file instead")
+            .child(crate::i18n::t("Use a cookies.txt file instead"))
             .on_click(|_, _, cx| import_web_cookies(cx));
         let cancel = pill("wsi-cancel", None, "Cancel", cx).on_click(cx.listener(|this, _, _, cx| {
             if let Some(c) = this.web_login.cancel.take() {
@@ -821,12 +821,12 @@ impl AppView {
                         .gap_2()
                         .text_sm()
                         .text_color(p.text2)
-                        .child(format!("Sign in to YouTube in the {browser} window that opened. It closes by itself when you're done."))
+                        .child(if crate::i18n::is_tr() { format!("Açılan {browser} penceresinde YouTube hesabınızla oturum açın. İşlem bittiğinde pencere kendiliğinden kapanır.") } else { format!("Sign in to YouTube in the {browser} window that opened. It closes by itself when you're done.") })
                         .child(
                             div()
                                 .text_xs()
                                 .text_color(p.text3)
-                                .child("Videos you watch in Stream Tube then show in your YouTube history, and your phone and TV resume them where you stopped. The window uses its own empty profile, which is deleted afterwards."),
+                                .child(crate::i18n::t("Videos you watch in Stream Tube then show in your YouTube history, and your phone and TV resume them where you stopped. The window uses its own empty profile, which is deleted afterwards.")),
                         ),
                 )
                 .child(
@@ -834,7 +834,7 @@ impl AppView {
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child(div().flex().items_center().gap_2().child(spinner(cx)).child(div().text_xs().text_color(p.text3).child("Waiting for sign-in…")))
+                        .child(div().flex().items_center().gap_2().child(spinner(cx)).child(div().text_xs().text_color(p.text3).child(crate::i18n::t("Waiting for sign-in…"))))
                         .child(cancel),
                 )
                 .child(cookies_link);
@@ -879,7 +879,7 @@ impl AppView {
                         .text_sm()
                         .text_color(p.text2)
                         .child(
-                            div().flex().gap_1().child("1. On any device, go to").child(
+                            div().flex().gap_1().child(crate::i18n::t("1. On any device, go to")).child(
                                 div()
                                     .id("si-url")
                                     .text_color(p.link)
@@ -891,7 +891,7 @@ impl AppView {
                                     }),
                             ),
                         )
-                        .child("2. Enter this code and pick your account"),
+                        .child(crate::i18n::t("2. Enter this code and pick your account")),
                 )
                 .child(
                     div()
@@ -917,7 +917,7 @@ impl AppView {
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child(div().text_xs().text_color(p.text3).child("Waiting for approval…"))
+                        .child(div().text_xs().text_color(p.text3).child(crate::i18n::t("Waiting for approval…")))
                         .child(
                             div()
                                 .flex()
@@ -942,7 +942,7 @@ impl AppView {
                     .gap_3()
                     .py_4()
                     .child(spinner(cx))
-                    .child(div().text_sm().text_color(p.text2).child("Getting a code…")),
+                    .child(div().text_sm().text_color(p.text2).child(crate::i18n::t("Getting a code…"))),
             );
         }
         col.into_any_element()
@@ -1057,12 +1057,14 @@ impl AppView {
         if route == self.route {
             // re-navigating to the same place refreshes it (like clicking Home again)
             if !matches!(route, Route::Watch { .. }) {
+                crate::ui::slot::clear_slot(cx);
                 self.page = build_page(&route, window, cx);
                 cx.notify();
             }
             return;
         }
-        if cx.global::<UiState>().fullscreen && !matches!(route, Route::Watch { .. }) {
+        crate::ui::slot::clear_slot(cx);
+        if cx.global::<UiState>().fullscreen && !matches!(route, Route::Watch { .. } | Route::Shorts(_)) {
             toggle_fullscreen(window, cx);
         }
         let page = build_page(&route, window, cx);
@@ -1132,7 +1134,8 @@ impl AppView {
             Some(p) if !stale => p,
             _ => build_page(&self.route.clone(), window, cx),
         };
-        if cx.global::<UiState>().fullscreen && !matches!(self.route, Route::Watch { .. }) {
+        crate::ui::slot::clear_slot(cx);
+        if cx.global::<UiState>().fullscreen && !matches!(self.route, Route::Watch { .. } | Route::Shorts(_)) {
             toggle_fullscreen(window, cx);
         }
         window.set_window_title(&format!("{} - {}", self.route.title(), crate::ui::brand_title()));
@@ -1293,6 +1296,7 @@ impl AppView {
 
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((r, p)) = self.history.pop() {
+            crate::ui::slot::clear_slot(cx);
             let cur_r = std::mem::replace(&mut self.route, r);
             let cur_p = std::mem::replace(&mut self.page, p);
             self.forward.push((cur_r, cur_p));
@@ -1310,6 +1314,7 @@ impl AppView {
 
     pub fn forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((r, p)) = self.forward.pop() {
+            crate::ui::slot::clear_slot(cx);
             let cur_r = std::mem::replace(&mut self.route, r);
             let cur_p = std::mem::replace(&mut self.page, p);
             self.history.push((cur_r, cur_p));
@@ -1511,22 +1516,22 @@ impl AppView {
                     .gap_2()
                     .py_8()
                     .child(icon("download").size_8().text_color(p.text3))
-                    .child(div().text_sm().text_color(p.text2).child("No downloads yet")),
+                    .child(div().text_sm().text_color(p.text2).child(crate::i18n::t("No downloads yet"))),
             );
         }
         for j in jobs.iter().take(50) {
             let id = j.id;
             let title = if j.video.title.is_empty() { j.video.id.clone() } else { j.video.title.clone() };
             let (line, color, running) = match &j.status {
-                JobStatus::Queued => ("Waiting…".to_string(), p.text2, true),
+                JobStatus::Queued => (crate::i18n::t("Waiting…"), p.text2, true),
                 JobStatus::Running => (format!("{:.0}%  {}", j.progress * 100.0, j.detail.split("at").nth(1).map(|s| format!("· {}", s.trim())).unwrap_or_default()), p.text2, true),
                 JobStatus::Done(path) => (
-                    std::fs::metadata(path).map(|m| format!("{:.1} MB · {}", m.len() as f64 / 1e6, j.format)).unwrap_or_else(|_| "File missing".into()),
+                    std::fs::metadata(path).map(|m| format!("{:.1} MB · {}", m.len() as f64 / 1e6, j.format)).unwrap_or_else(|_| crate::i18n::t("File missing")),
                     p.text2,
                     false,
                 ),
-                JobStatus::Failed(e) => (format!("Failed: {e}"), rgb(0xff4e45).into(), false),
-                JobStatus::Cancelled => ("Cancelled".into(), p.text2, false),
+                JobStatus::Failed(e) => (crate::i18n::t(&format!("Failed: {e}")), rgb(0xff4e45).into(), false),
+                JobStatus::Cancelled => (crate::i18n::t("Cancelled"), p.text2, false),
             };
             let done_path = if let JobStatus::Done(pth) = &j.status { Some(pth.clone()) } else { None };
             let open_path = done_path.clone();
@@ -1611,7 +1616,7 @@ impl AppView {
                 .text_color(p.link)
                 .cursor_pointer()
                 .hover(move |s| s.bg(p.hover))
-                .child(label)
+                .child(crate::i18n::t(label))
         };
         let has_finished = jobs.iter().any(|j| !matches!(j.status, JobStatus::Running | JobStatus::Queued));
         Some(
@@ -1651,7 +1656,7 @@ impl AppView {
                                     .px_4()
                                     .pt_3()
                                     .pb_2()
-                                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Downloads"))
+                                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(crate::i18n::t("Downloads")))
                                     .when(has_finished, |d| {
                                         d.child(footer_btn("dlp-clear", "Clear list").on_click(|_, _, cx| downloads::clear_history(cx)))
                                     }),
@@ -2538,7 +2543,7 @@ impl AppView {
             Status::Available(r) => (r, None),
             Status::Downloading(r, f) => (r, Some(f)),
             _ => {
-                return div().p_5().text_sm().text_color(p.text2).child("No update available").into_any_element();
+                return div().p_5().text_sm().text_color(p.text2).child(crate::i18n::t("No update available")).into_any_element();
             }
         };
         // release notes are Markdown; long ones are cut at a line break
@@ -2552,9 +2557,9 @@ impl AppView {
         let version = rel.name.trim_start_matches("Stream Tube").trim().trim_start_matches('v').to_string();
         let accent = crate::ui::app_icon::icon_accent(store::settings_snapshot().accent);
         let [c0, _, c2] = crate::ui::app_icon::accent_stops(accent);
-        let mut meta = vec![format!("You have {}", crate::updater::current_version())];
+        let mut meta = vec![crate::i18n::t(&format!("You have {}", crate::updater::current_version()))];
         if rel.prerelease {
-            meta.push("Pre-release".into());
+            meta.push(crate::i18n::t("Pre-release"));
         }
         if let Some(sz) = size {
             meta.push(sz);
@@ -2605,14 +2610,14 @@ impl AppView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(white())
                     .child(icon("sparkles").size_3p5().text_color(white()))
-                    .child("New version"),
+                    .child(crate::i18n::t("New version")),
             )
             .child(div().text_3xl().font_weight(FontWeight::BOLD).text_color(white()).child(format!("Stream Tube {version}")))
             .child(div().text_sm().text_color(hsla(0., 0., 1., 0.85)).child(meta.join("  ·  ")));
 
         let mut body = div().flex().flex_col().gap_4().p_6();
         if !notes.trim().is_empty() {
-            body = body.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text2).child("WHAT'S NEW")).child(
+            body = body.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text2).child(crate::i18n::t("WHAT'S NEW"))).child(
                 div()
                     .id("upd-notes")
                     .when(notes.len() > 280, |d| d.h(px(230.)))
@@ -2638,7 +2643,7 @@ impl AppView {
                             .flex()
                             .justify_between()
                             .text_sm()
-                            .child(div().text_color(p.text).font_weight(FontWeight::MEDIUM).child(if f >= 0.999 { "Installing…" } else { "Downloading…" }))
+                            .child(div().text_color(p.text).font_weight(FontWeight::MEDIUM).child(if f >= 0.999 { crate::i18n::t("Installing…") } else { crate::i18n::t("Downloading…") }))
                             .child(div().text_color(p.text2).child(format!("{:.0}%", f * 100.0))),
                     )
                     .child(
@@ -2665,7 +2670,7 @@ impl AppView {
                                 ),
                         ),
                     )
-                    .child(div().text_xs().text_color(p.text2).child("Stream Tube restarts by itself when it's done.")),
+                    .child(div().text_xs().text_color(p.text2).child(crate::i18n::t("Stream Tube restarts by itself when it's done."))),
             );
             return div().flex().flex_col().child(hero).child(body).into_any_element();
         }
@@ -2681,12 +2686,12 @@ impl AppView {
                         .gap_4()
                         .text_sm()
                         .text_color(p.text2)
-                        .child(div().id("upd-skip").cursor_pointer().hover(|s| s.text_color(p.text)).child("Skip this version").on_click(cx.listener(|this, _, _, cx| {
+                        .child(div().id("upd-skip").cursor_pointer().hover(|s| s.text_color(p.text)).child(crate::i18n::t("Skip this version")).on_click(cx.listener(|this, _, _, cx| {
                             crate::updater::skip(cx);
                             this.dialog = None;
                             cx.notify();
                         })))
-                        .child(div().id("upd-later").cursor_pointer().hover(|s| s.text_color(p.text)).child("Later").on_click(cx.listener(|this, _, _, cx| {
+                        .child(div().id("upd-later").cursor_pointer().hover(|s| s.text_color(p.text)).child(crate::i18n::t("Later")).on_click(cx.listener(|this, _, _, cx| {
                             this.dialog = None;
                             cx.notify();
                         }))),
@@ -2708,7 +2713,7 @@ impl AppView {
                         .text_color(white())
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(icon(if has_installer { "download" } else { "external-link" }).size_4().text_color(white()))
-                        .child(if has_installer { "Update now" } else { "Download" })
+                        .child(if has_installer { crate::i18n::t("Update now") } else { crate::i18n::t("Download") })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !has_installer {
                                 this.dialog = None;
@@ -2736,7 +2741,7 @@ impl AppView {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).pb_2().child("Save video to…"))
+                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).pb_2().child(crate::i18n::t("Save video to…")))
                     .children(pls.into_iter().map(|pl| {
                         let contains = store::playlist_contains(pl.id, &v.id);
                         let v2 = v.clone();
@@ -2751,7 +2756,7 @@ impl AppView {
                             .cursor_pointer()
                             .hover(move |s| s.bg(p.hover))
                             .child(icon(if contains { "square-check" } else { "square" }).text_color(p.text))
-                            .child(div().flex_1().text_sm().text_color(p.text).child(pl.name.clone()))
+                            .child(div().flex_1().text_sm().text_color(p.text).child(if pl.protected { crate::i18n::t(&pl.name) } else { pl.name.clone() }))
                             .child(icon(if pl.protected { "lock" } else { "globe-lock" }).size_4().text_color(p.text3))
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 if store::playlist_contains(pl.id, &v2.id) {
@@ -2986,7 +2991,8 @@ impl Render for AppView {
             u.viewport = vp;
             u.content_width = vp.width - px(sidebar_w) - px(48.);
         }
-        let fullscreen = ui.fullscreen && is_watch;
+        let is_shorts = matches!(self.route, Route::Shorts(_));
+        let fullscreen = ui.fullscreen && (is_watch || is_shorts);
         let mut root = div()
             .image_cache(self.images.clone())
             .id("app-root")

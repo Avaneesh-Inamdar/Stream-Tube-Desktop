@@ -315,7 +315,7 @@ impl WatchPage {
         }
         let mut list = div().id("chat-list").h(px(440.)).overflow_y_scroll().track_scroll(&chat.scroll).flex().flex_col().gap_1().px_3().py_2();
         if chat.messages.is_empty() {
-            list = list.child(div().py_6().flex().justify_center().text_sm().text_color(p.text2).child(chat.error.clone().unwrap_or_else(|| "Loading chat…".into())));
+            list = list.child(div().py_6().flex().justify_center().text_sm().text_color(p.text2).child(chat.error.clone().unwrap_or_else(|| crate::i18n::t("Loading chat…"))));
         }
         for m in &chat.messages {
             let name_color = match m.role {
@@ -986,7 +986,7 @@ impl WatchPage {
                                 .cursor_pointer()
                                 .hover(move |s| s.bg(p.hover))
                                 .child(icon(if open { "chevron-up" } else { "chevron-down" }).size_4().text_color(p.link))
-                                .child(format!("{} {}", c.reply_count, if c.reply_count == "1" { "reply" } else { "replies" }))
+                                .child(crate::i18n::reply_count(&c.reply_count))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if this.replies.contains_key(&cid2) {
                                         this.replies.remove(&cid2);
@@ -1101,14 +1101,28 @@ impl WatchPage {
             let later = total - reached.len();
             col = col.child(div().text_sm().text_color(p.text2).child(if total == 0 {
                 if data.continuation.is_some() && data.comments.len() < 400 {
-                    format!("Looking for comments with timestamps… ({} checked)", data.comments.len())
+                    if crate::i18n::is_tr() {
+                        format!("Zaman damgalı yorumlar aranıyor… ({} incelendi)", data.comments.len())
+                    } else {
+                        format!("Looking for comments with timestamps… ({} checked)", data.comments.len())
+                    }
+                } else if crate::i18n::is_tr() {
+                    format!("İncelenen {} yorumda zaman damgası bulunamadı.", data.comments.len())
                 } else {
                     format!("None of the {} comments checked mention a timestamp.", data.comments.len())
                 }
             } else if reached.is_empty() {
-                format!("Comments appear here as the video reaches the moment they mention ({total} so far).")
+                if crate::i18n::is_tr() {
+                    format!("Video ilgili ana ulaştığında zaman damgalı yorumlar burada görünür (şimdiye kadar {total}).")
+                } else {
+                    format!("Comments appear here as the video reaches the moment they mention ({total} so far).")
+                }
             } else if later > 0 {
-                format!("{later} more later in the video")
+                if crate::i18n::is_tr() {
+                    format!("Videonun ilerisinde {later} yorum daha var")
+                } else {
+                    format!("{later} more later in the video")
+                }
             } else {
                 String::new()
             }));
