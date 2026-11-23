@@ -2,7 +2,7 @@ name: macOS build
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/macos-0.7.0-alpha]
     paths: ["src/**", "Cargo.toml", "Cargo.lock", "build.rs", "assets/**", "packaging/macos/**", ".github/workflows/macos.yml"]
   pull_request:
   workflow_dispatch:
