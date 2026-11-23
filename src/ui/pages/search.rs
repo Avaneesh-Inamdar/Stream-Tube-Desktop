@@ -89,7 +89,7 @@ impl SearchPage {
             .flex_col()
             .flex_1()
             .min_w(px(150.))
-            .child(div().pb_3().mb_2().border_b_1().border_color(p.border).text_xs().font_weight(FontWeight::BOLD).text_color(p.text).child(title.to_uppercase()));
+            .child(div().pb_3().mb_2().border_b_1().border_color(p.border).text_xs().font_weight(FontWeight::BOLD).text_color(p.text).child(crate::i18n::t(title).to_uppercase()));
         for (label, v) in options {
             let v = *v;
             let active = current == v && v != 0;
@@ -102,7 +102,7 @@ impl SearchPage {
                     .text_color(if active { p.text } else { p.text2 })
                     .when(active, |d| d.font_weight(FontWeight::BOLD))
                     .hover(move |s| s.text_color(p.text))
-                    .child(label.to_string())
+                    .child(crate::i18n::t(label))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let cur = current;
                         set(&mut this.filter, if cur == v { 0 } else { v });
@@ -123,7 +123,7 @@ impl SearchPage {
             .text_color(if on { p.text } else { p.text2 })
             .when(on, |d| d.font_weight(FontWeight::BOLD))
             .hover(move |s| s.text_color(p.text))
-            .child(label.to_string())
+            .child(crate::i18n::t(label))
             .on_click(cx.listener(move |this, _, _, cx| {
                 toggle(&mut this.filter);
                 this.load(cx);
@@ -180,7 +180,7 @@ impl Render for SearchPage {
                         .flex_col()
                         .flex_1()
                         .min_w(px(150.))
-                        .child(div().pb_3().mb_2().border_b_1().border_color(p.border).text_xs().font_weight(FontWeight::BOLD).text_color(p.text).child("FEATURES"))
+                        .child(div().pb_3().mb_2().border_b_1().border_color(p.border).text_xs().font_weight(FontWeight::BOLD).text_color(p.text).child(crate::i18n::t("FEATURES")))
                         .child(self.feature("Live", f.live, |f| f.live ^= true, cx))
                         .child(self.feature("4K", f.four_k, |f| f.four_k ^= true, cx))
                         .child(self.feature("HD", f.hd, |f| f.hd ^= true, cx))

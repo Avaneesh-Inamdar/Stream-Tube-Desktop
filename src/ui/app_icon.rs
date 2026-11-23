@@ -107,8 +107,11 @@ fn resource_id(accent: u32) -> u16 {
     ACCENTS.iter().position(|a| *a == accent).map(|i| 101 + i as u16).unwrap_or(1)
 }
 
+/// Builds a crisp multi-resolution ICO (16..256 px with Lanczos3 downsampling and square
+/// transparent padding) from a PNG/JPG/WebP/BMP/ICO file so Windows never blurs or stretches it.
 #[cfg(windows)]
 fn custom_ico_path(logo_path: &str) -> Option<std::path::PathBuf> {
+    use image::GenericImageView;
     let trimmed = logo_path.trim();
     if trimmed.is_empty() {
         return None;
@@ -117,32 +120,83 @@ fn custom_ico_path(logo_path: &str) -> Option<std::path::PathBuf> {
     if !path.is_file() {
         return None;
     }
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-    if ext == "ico" {
-        return Some(path.to_path_buf());
-    }
-    if ext == "png" {
-        let png = std::fs::read(path).ok()?;
-        // PNG signature + IHDR chunk (width at 16..20, height at 20..24)
-        if png.len() < 24 || &png[0..8] != b"\x89PNG\r\n\x1a\n" {
-            return None;
-        }
-        let w = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
-        let h = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
-        let bw = if w >= 256 { 0u8 } else { w as u8 };
-        let bh = if h >= 256 { 0u8 } else { h as u8 };
-        let len = png.len() as u32;
-        let mut ico = Vec::with_capacity(22 + png.len());
-        ico.extend_from_slice(&[0, 0, 1, 0, 1, 0]); // ICONDIR: reserved=0, type=1(ICO), count=1
-        ico.extend_from_slice(&[bw, bh, 0, 0, 1, 0, 32, 0]); // ICONDIRENTRY
-        ico.extend_from_slice(&len.to_le_bytes());
-        ico.extend_from_slice(&22u32.to_le_bytes());
-        ico.extend_from_slice(&png);
-        let out = crate::store::data_dir().join("custom_icon.ico");
-        std::fs::write(&out, &ico).ok()?;
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let cache_key = format!("{}|{}|{}", path.display(), meta.len(), mtime);
+    let out = crate::store::data_dir().join("custom_icon.ico");
+    if out.is_file() && crate::store::kv_get("custom_ico_key").as_deref() == Some(cache_key.as_str()) {
         return Some(out);
     }
-    None
+
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if ext == "ico" {
+        if std::fs::copy(path, &out).is_ok() {
+            crate::store::kv_set("custom_ico_key", &cache_key);
+            return Some(out);
+        }
+        return Some(path.to_path_buf());
+    }
+
+    let bytes = std::fs::read(path).ok()?;
+    let decoded = image::load_from_memory(&bytes).ok()?;
+    let (w, h) = decoded.dimensions();
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let side = w.max(h);
+    let mut square = image::RgbaImage::new(side, side);
+    let ox = (side - w) / 2;
+    let oy = (side - h) / 2;
+    image::imageops::overlay(&mut square, &decoded.to_rgba8(), ox as i64, oy as i64);
+
+    const SIZES: [u32; 10] = [16, 20, 24, 32, 40, 48, 64, 96, 128, 256];
+    let mut frames: Vec<(u32, Vec<u8>)> = Vec::with_capacity(SIZES.len());
+    for sz in SIZES {
+        let resized = if side == sz {
+            square.clone()
+        } else {
+            image::imageops::resize(&square, sz, sz, image::imageops::FilterType::Lanczos3)
+        };
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(resized)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .ok()?;
+        frames.push((sz, png));
+    }
+
+    let count = frames.len() as u16;
+    let header_size = 6u32 + (count as u32) * 16u32;
+    let total_data: usize = frames.iter().map(|(_, p)| p.len()).sum();
+    let mut ico = Vec::with_capacity(header_size as usize + total_data);
+    ico.extend_from_slice(&0u16.to_le_bytes());
+    ico.extend_from_slice(&1u16.to_le_bytes());
+    ico.extend_from_slice(&count.to_le_bytes());
+
+    let mut offset = header_size;
+    for (sz, png) in &frames {
+        let b = if *sz >= 256 { 0u8 } else { *sz as u8 };
+        ico.push(b);
+        ico.push(b);
+        ico.push(0);
+        ico.push(0);
+        ico.extend_from_slice(&1u16.to_le_bytes());
+        ico.extend_from_slice(&32u16.to_le_bytes());
+        ico.extend_from_slice(&(png.len() as u32).to_le_bytes());
+        ico.extend_from_slice(&offset.to_le_bytes());
+        offset += png.len() as u32;
+    }
+    for (_, png) in &frames {
+        ico.extend_from_slice(png);
+    }
+
+    std::fs::write(&out, &ico).ok()?;
+    crate::store::kv_set("custom_ico_key", &cache_key);
+    Some(out)
 }
 
 #[cfg(windows)]
@@ -169,11 +223,12 @@ pub fn set_window_icon(window: &Window, accent: u32) {
     let id = resource_id(accent) as usize as *const u16; // MAKEINTRESOURCE
     unsafe {
         let inst = GetModuleHandleW(std::ptr::null());
-        let big_size = GetSystemMetrics(SM_CXICON).max(32);
+        let big_size = GetSystemMetrics(SM_CXICON).max(48);
         let small_size = GetSystemMetrics(SM_CXSMICON).max(16);
         let (big, small) = if let Some(ref p) = custom {
             let wide: Vec<u16> = p.as_os_str().to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
-            let b = LoadImageW(0, wide.as_ptr(), IMAGE_ICON, big_size, big_size, LR_LOADFROMFILE);
+            let b = LoadImageW(0, wide.as_ptr(), IMAGE_ICON, 256, 256, LR_LOADFROMFILE);
+            let b = if b != 0 { b } else { LoadImageW(0, wide.as_ptr(), IMAGE_ICON, big_size, big_size, LR_LOADFROMFILE) };
             let s = LoadImageW(0, wide.as_ptr(), IMAGE_ICON, small_size, small_size, LR_LOADFROMFILE);
             if b != 0 || s != 0 {
                 (b, s)
@@ -206,25 +261,32 @@ fn update_shortcuts(accent: u32) {
     // the exe's timestamp are part of what "already done" means
     let built = std::fs::metadata(&exe).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
     let exe = exe.display().to_string();
-    let key = format!("{exe}|{accent:06x}|{}|{built}", env!("CARGO_PKG_VERSION"));
+    let custom_ico = custom_ico_path(&crate::store::settings_snapshot().custom_logo);
+    let icon_loc = match &custom_ico {
+        Some(p) => format!("{},0", p.display()),
+        None => format!("{exe},-{}", resource_id(accent)),
+    };
+    let custom_key = crate::store::kv_get("custom_ico_key").unwrap_or_default();
+    let key = format!("{exe}|{accent:06x}|{}|{built}|{icon_loc}|{custom_key}", env!("CARGO_PKG_VERSION"));
     if crate::store::kv_get("shortcut_icon").as_deref() == Some(key.as_str()) {
         return;
     }
-    let id = resource_id(accent);
     std::thread::spawn(move || {
         // .lnk files are COM objects; PowerShell's WScript.Shell edits them simply
         let script = format!(
             r#"$exe = '{exe}'
+$icon = '{icon}'
 $shell = New-Object -ComObject WScript.Shell
 $dirs = @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'), (Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'))
 foreach ($d in $dirs) {{
   if (-not (Test-Path $d)) {{ continue }}
   Get-ChildItem -Path $d -Filter *.lnk -Recurse -Depth 1 -ErrorAction SilentlyContinue | ForEach-Object {{
     $l = $shell.CreateShortcut($_.FullName)
-    if ($l.TargetPath -ieq $exe) {{ $l.IconLocation = "$exe,-{id}"; $l.Save() }}
+    if ($l.TargetPath -ieq $exe) {{ $l.IconLocation = $icon; $l.Save() }}
   }}
 }}"#,
             exe = exe.replace('\'', "''"),
+            icon = icon_loc.replace('\'', "''"),
         );
         let mut c = std::process::Command::new("powershell");
         c.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &script]);

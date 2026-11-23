@@ -199,12 +199,17 @@ pub fn toast_with_action(
     toast_with_actions(cx, text, action.into_iter().collect());
 }
 
-pub fn toast_with_actions(cx: &mut App, text: impl Into<SharedString>, mut actions: Vec<(SharedString, Arc<dyn Fn(&mut Window, &mut App)>)>) {
+pub fn toast_with_actions(cx: &mut App, text: impl Into<SharedString>, actions: Vec<(SharedString, Arc<dyn Fn(&mut Window, &mut App)>)>) {
+    let text: SharedString = crate::i18n::t(&text.into()).into();
+    let mut actions: Vec<(SharedString, Arc<dyn Fn(&mut Window, &mut App)>)> = actions
+        .into_iter()
+        .map(|(l, f)| (crate::i18n::t(&l).into(), f))
+        .collect();
     let action = if actions.is_empty() { None } else { Some(actions.remove(0)) };
     let t = cx.default_global::<Toasts>();
     t.next += 1;
     let id = t.next;
-    t.items.push(Toast { id, text: text.into(), action, extra: actions });
+    t.items.push(Toast { id, text, action, extra: actions });
     if t.items.len() > 4 {
         t.items.remove(0);
     }
@@ -241,7 +246,8 @@ pub fn icon_button(id: impl Into<ElementId>, name: &str, cx: &App) -> Stateful<D
 /// Pill button with optional icon.
 pub fn pill(id: impl Into<ElementId>, icon_name: Option<&str>, label: impl Into<SharedString>, cx: &App) -> Stateful<Div> {
     let p = pal(cx);
-    let label: SharedString = label.into();
+    let raw: SharedString = label.into();
+    let label: SharedString = if raw.is_empty() { raw } else { crate::i18n::t(&raw).into() };
     div()
         .id(id.into())
         .flex()
@@ -274,7 +280,7 @@ pub fn chip(id: impl Into<ElementId>, label: impl Into<SharedString>, active: bo
         .cursor_pointer()
         .when(active, |d| d.bg(p.chip_active_bg).text_color(p.chip_active_fg))
         .when(!active, move |d| d.bg(p.chip).text_color(p.text).hover(move |s| s.bg(p.hover)))
-        .child(label.into())
+        .child(crate::i18n::t(&label.into()))
 }
 
 pub fn spinner(cx: &App) -> impl IntoElement {
@@ -307,12 +313,12 @@ pub fn empty_state(icon_name: &str, title: &str, subtitle: &str, cx: &App) -> Di
         .py_20()
         .w_full()
         .child(icon(icon_name).size_16().text_color(p.text3))
-        .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(title.to_string()))
-        .child(div().text_sm().text_color(p.text2).max_w(px(480.)).text_center().child(subtitle.to_string()))
+        .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(crate::i18n::t(title)))
+        .child(div().text_sm().text_color(p.text2).max_w(px(480.)).text_center().child(crate::i18n::t(subtitle)))
 }
 
 pub fn error_state(err: &str, cx: &App) -> Div {
-    empty_state("circle-alert", &crate::i18n::t("Something went wrong"), &friendly_error(err), cx)
+    empty_state("circle-alert", "Something went wrong", &friendly_error(err), cx)
 }
 
 /// One readable line instead of raw HTTP bodies or error chains.
@@ -324,26 +330,30 @@ pub fn friendly_error(err: &str) -> String {
         .and_then(|r| r.get(..3))
         .and_then(|c| c.parse::<u16>().ok());
     match status {
-        Some(404) => return "This page isn't available.".into(),
-        Some(429) => return "YouTube is rate limiting requests. Try again in a minute.".into(),
-        Some(s) if (400..500).contains(&s) => return format!("YouTube rejected the request (HTTP {s})."),
-        Some(s) if s >= 500 => return format!("YouTube had a problem (HTTP {s}). Try again."),
+        Some(404) => return crate::i18n::t("This page isn't available."),
+        Some(429) => return crate::i18n::t("YouTube is rate limiting requests. Try again in a minute."),
+        Some(s) if (400..500).contains(&s) => {
+            return if crate::i18n::is_tr() { format!("YouTube isteği reddetti (HTTP {s}).") } else { format!("YouTube rejected the request (HTTP {s}).") };
+        }
+        Some(s) if s >= 500 => {
+            return if crate::i18n::is_tr() { format!("YouTube'da bir sorun oluştu (HTTP {s}). Tekrar deneyin.") } else { format!("YouTube had a problem (HTTP {s}). Try again.") };
+        }
         _ => {}
     }
     if ["dns", "timed out", "timeout", "connect", "network", "resolve"].iter().any(|k| lower.contains(k)) {
-        return "Couldn't reach YouTube. Check your connection.".into();
+        return crate::i18n::t("Couldn't reach YouTube. Check your connection.");
     }
     if lower.contains("recording is not available") {
-        return "This live stream has ended and its recording isn't available.".into();
+        return crate::i18n::t("This live stream has ended and its recording isn't available.");
     }
     if lower.contains("premieres in") || lower.contains("live event will begin") {
-        return "This hasn't started yet.".into();
+        return crate::i18n::t("This hasn't started yet.");
     }
     if lower.contains("members-only") || lower.contains("join this channel") {
-        return "This video is for channel members only.".into();
+        return crate::i18n::t("This video is for channel members only.");
     }
     if lower.contains("private video") {
-        return "This video is private.".into();
+        return crate::i18n::t("This video is private.");
     }
     let line = err.lines().next().unwrap_or(err).trim();
     // which YouTube client failed is a detail, not news
@@ -385,17 +395,134 @@ pub fn avatar(url: Option<&str>, size: Pixels, name: &str, cx: &App) -> AnyEleme
 
 pub fn copy_to_clipboard(text: String, cx: &mut App) {
     cx.write_to_clipboard(ClipboardItem::new_string(text));
-    toast(cx, crate::i18n::t("Link copied to clipboard"));
+    toast(cx, "Link copied to clipboard");
 }
 
 /// Brand colors of the Stream Tube logo.
 pub const BRAND_PINK: u32 = 0xF0307E;
 pub const BRAND_VIOLET: u32 = 0x7A3CF5;
 
-/// Active brand title for the top-left wordmark and window title.
+/// Font choices for the top-left brand wordmark.
+pub fn brand_font_family(key: &str) -> Option<&'static str> {
+    match key {
+        "youtube" => Some(if cfg!(windows) { "Bahnschrift" } else { "Roboto Condensed" }),
+        "segoe" => Some(if cfg!(windows) { "Segoe UI" } else { "DejaVu Sans" }),
+        "arial" => Some("Arial"),
+        "impact" => Some("Impact"),
+        "verdana" => Some("Verdana"),
+        "trebuchet" => Some("Trebuchet MS"),
+        "georgia" => Some("Georgia"),
+        "mono" => Some(if cfg!(windows) { "Consolas" } else { "DejaVu Sans Mono" }),
+        _ => None,
+    }
+}
+
+fn parse_hex_6(s: &str) -> Option<u32> {
+    if s.len() == 6 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        u32::from_str_radix(s, 16).ok()
+    } else {
+        None
+    }
+}
+
+fn mc_color(code: char, default_color: Hsla, accent_color: Hsla) -> Option<Hsla> {
+    let hex = match code.to_ascii_lowercase() {
+        '0' => 0x000000,
+        '1' => 0x0000AA,
+        '2' => 0x00AA00,
+        '3' => 0x00AAAA,
+        '4' => 0xAA0000,
+        '5' => 0xAA00AA,
+        '6' => 0xFFAA00,
+        '7' => 0xAAAAAA,
+        '8' => 0x555555,
+        '9' => 0x5555FF,
+        'a' => 0x55FF55,
+        'b' => 0x55FFFF,
+        'c' => 0xFF5555,
+        'd' => 0xFF55FF,
+        'e' => 0xFFFF55,
+        'f' => 0xFFFFFF,
+        'r' => return Some(default_color),
+        'x' => return Some(accent_color),
+        _ => return None,
+    };
+    Some(rgb(hex).into())
+}
+
+/// Parses inline color codes in brand text:
+/// - `[#RRGGBB]`, `[accent]`, `[reset]`
+/// - `&#RRGGBB`, `&0`..`&f`, `&r` (reset), `&x` (accent)
+fn parse_brand_segments(input: &str, default_color: Hsla, accent_color: Hsla) -> Vec<(String, Hsla)> {
+    let mut out: Vec<(String, Hsla)> = Vec::new();
+    let mut cur_color = default_color;
+    let mut buf = String::new();
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &input[i..];
+        if rest.starts_with('[') {
+            if let Some(end) = rest.find(']') {
+                let tag = &rest[1..end];
+                let parsed = if tag.eq_ignore_ascii_case("accent") {
+                    Some(accent_color)
+                } else if tag.eq_ignore_ascii_case("reset") || tag == "/" {
+                    Some(default_color)
+                } else if let Some(h) = tag.strip_prefix('#') {
+                    parse_hex_6(h).map(|c| rgb(c).into())
+                } else {
+                    None
+                };
+                if let Some(col) = parsed {
+                    if !buf.is_empty() {
+                        out.push((std::mem::take(&mut buf), cur_color));
+                    }
+                    cur_color = col;
+                    i += end + 1;
+                    continue;
+                }
+            }
+        } else if rest.starts_with("&#") && rest.len() >= 8 {
+            if let Some(c) = parse_hex_6(&rest[2..8]) {
+                if !buf.is_empty() {
+                    out.push((std::mem::take(&mut buf), cur_color));
+                }
+                cur_color = rgb(c).into();
+                i += 8;
+                continue;
+            }
+        } else if (rest.starts_with('&') || rest.starts_with('§')) && rest.len() >= 2 {
+            let prefix_len = rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+            if let Some(code) = rest[prefix_len..].chars().next() {
+                if let Some(col) = mc_color(code, default_color, accent_color) {
+                    if !buf.is_empty() {
+                        out.push((std::mem::take(&mut buf), cur_color));
+                    }
+                    cur_color = col;
+                    i += prefix_len + code.len_utf8();
+                    continue;
+                }
+            }
+        }
+        let ch = rest.chars().next().unwrap();
+        buf.push(ch);
+        i += ch.len_utf8();
+    }
+    if !buf.is_empty() {
+        out.push((buf, cur_color));
+    }
+    out
+}
+
+/// Active brand title (plain text, with inline color codes stripped) for window title.
 pub fn brand_title() -> String {
-    let custom = crate::store::settings_snapshot().brand_name.trim().to_string();
-    if custom.is_empty() { "Stream Tube".into() } else { custom }
+    let raw = crate::store::settings_snapshot().brand_name.trim().to_string();
+    if raw.is_empty() {
+        return "Stream Tube".into();
+    }
+    let plain: String = parse_brand_segments(&raw, white(), white()).into_iter().map(|(s, _)| s).collect();
+    let plain = plain.trim().to_string();
+    if plain.is_empty() { "Stream Tube".into() } else { plain }
 }
 
 /// The Stream Tube app logo (or user-selected custom logo).
@@ -403,13 +530,20 @@ pub fn logo(size: Pixels) -> Img {
     let s = crate::store::settings_snapshot();
     let custom = s.custom_logo.trim();
     if !custom.is_empty() && std::path::Path::new(custom).is_file() {
-        let ext = std::path::Path::new(custom)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("png")
-            .to_ascii_lowercase();
+        let path = std::path::Path::new(custom);
+        let raw_ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png").to_ascii_lowercase();
+        let ext = if raw_ext == "ico" { "png".to_string() } else { raw_ext };
+        let meta = std::fs::metadata(path).ok();
+        let mtime = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let len = meta.map(|m| m.len()).unwrap_or(0);
+        let key = format!("{custom}|{len}|{mtime}");
         let mut h: u64 = 14695981039346656037;
-        for b in custom.as_bytes() {
+        for b in key.as_bytes() {
             h ^= *b as u64;
             h = h.wrapping_mul(1099511628211);
         }
@@ -422,18 +556,24 @@ pub fn logo(size: Pixels) -> Img {
     img(SharedString::from(format!("brand/logo-{accent:06x}.svg"))).size(size).flex_none()
 }
 
-/// Brand wordmark next to the logo.
+/// Brand wordmark next to the logo (supports custom font and inline color codes).
 pub fn wordmark(cx: &App) -> Div {
     let p = pal(cx);
-    let custom = crate::store::settings_snapshot().brand_name.trim().to_string();
+    let s = crate::store::settings_snapshot();
+    let font = brand_font_family(&s.brand_font);
+    let custom = s.brand_name.trim().to_string();
     if !custom.is_empty() {
-        return div()
+        let segs = parse_brand_segments(&custom, p.text, p.accent);
+        let mut d = div()
             .flex()
             .items_baseline()
             .text_lg()
             .font_weight(FontWeight::BOLD)
-            .text_color(p.text)
-            .child(custom);
+            .when_some(font, |d, f| d.font_family(f));
+        for (text, col) in segs {
+            d = d.child(div().text_color(col).child(text));
+        }
+        return d;
     }
     div()
         .flex()
@@ -441,6 +581,7 @@ pub fn wordmark(cx: &App) -> Div {
         .gap(px(5.))
         .text_lg()
         .font_weight(FontWeight::BOLD)
+        .when_some(font, |d, f| d.font_family(f))
         .child(div().text_color(p.text).child("Stream"))
         .child(div().text_color(p.accent).child("Tube"))
 }

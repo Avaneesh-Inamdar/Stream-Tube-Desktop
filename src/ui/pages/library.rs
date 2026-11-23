@@ -29,7 +29,7 @@ fn only_videos(items: Vec<crate::api::types::Item>) -> impl Iterator<Item = crat
 
 impl HistoryPage {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Search history"));
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::t("Search history")));
         cx.observe(&filter, |_, _, cx| cx.notify()).detach();
         let signed_in = crate::api::auth::signed_in();
         let mut s = Self {
@@ -184,7 +184,7 @@ impl HistoryPage {
 
 fn loading_row(cx: &App) -> Div {
     let p = pal(cx);
-    div().py_6().flex().justify_center().text_color(p.text2).child("Loading…")
+    div().py_6().flex().justify_center().text_color(p.text2).child(crate::i18n::t("Loading…"))
 }
 
 impl Render for HistoryPage {
@@ -338,16 +338,16 @@ impl Render for LibraryPage {
                     .w(w)
                     .cursor_pointer()
                     .on_click(move |_, window, cx| navigate(Route::LocalPlaylist(id), window, cx))
-                    .child(playlist_thumb(pl.thumbnail.clone(), Some(format!("{} videos", pl.count)), w, w * (9. / 16.), cx))
+                    .child(playlist_thumb(pl.thumbnail.clone(), Some(crate::i18n::t(&format!("{} videos", pl.count))), w, w * (9. / 16.), cx))
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_2()
                             .when(pl.protected, |d| d.child(icon(if pl.name == "Watch later" { "clock" } else { "heart" }).size_4().text_color(p.text2)))
-                            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(pl.name.clone())),
+                            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(if pl.protected { crate::i18n::t(&pl.name) } else { pl.name.clone() })),
                     )
-                    .child(div().text_xs().text_color(p.text2).child("Local • Private"))
+                    .child(div().text_xs().text_color(p.text2).child(crate::i18n::t("Local • Private")))
                     .into_any_element()
             })
             .collect();
@@ -368,7 +368,7 @@ impl Render for LibraryPage {
                 .cursor_pointer()
                 .hover(move |s| s.bg(p.surface))
                 .child(icon("plus").size_8().text_color(p.text2))
-                .child(div().text_sm().text_color(p.text2).child("New playlist"))
+                .child(div().text_sm().text_color(p.text2).child(crate::i18n::t("New playlist")))
                 .on_click(|_, window, cx| {
                     prompt_text("New playlist", "Playlist name", window, cx, |name, _, cx| {
                         store::playlist_create(&name);

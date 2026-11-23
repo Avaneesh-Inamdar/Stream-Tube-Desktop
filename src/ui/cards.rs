@@ -535,8 +535,8 @@ pub fn subscribe_button(id: SharedString, c: &ChannelItem, subscribed: bool, cx:
         .cursor_pointer()
         .text_sm()
         .font_weight(FontWeight::MEDIUM)
-        .when(subscribed, |d| d.bg(p.chip).text_color(p.text).hover(move |s| s.bg(p.hover)).child(icon("bell").size_4()).child("Subscribed"))
-        .when(!subscribed, |d| d.bg(p.chip_active_bg).text_color(p.chip_active_fg).child("Subscribe"))
+        .when(subscribed, |d| d.bg(p.chip).text_color(p.text).hover(move |s| s.bg(p.hover)).child(icon("bell").size_4()).child(crate::i18n::t("Subscribed")))
+        .when(!subscribed, |d| d.bg(p.chip_active_bg).text_color(p.chip_active_fg).child(crate::i18n::t("Subscribe")))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
@@ -595,7 +595,7 @@ pub fn playlist_card(pl: &PlaylistItem, width: Pixels, cx: &mut App) -> AnyEleme
                 .gap_1()
                 .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).line_clamp(2).child(pl.title.clone()))
                 .when_some(pl.channel_name.clone(), |d, c| d.child(div().text_sm().text_color(p.text2).truncate().child(c)))
-                .child(div().text_sm().text_color(p.text2).child("View full playlist")),
+                .child(div().text_sm().text_color(p.text2).child(crate::i18n::t("View full playlist"))),
         )
         .into_any_element()
 }
@@ -663,7 +663,7 @@ pub fn playlist_row(pl: &PlaylistItem, cx: &mut App) -> AnyElement {
                 .flex_1()
                 .child(div().text_lg().text_color(p.text).line_clamp(2).child(pl.title.clone()))
                 .when_some(pl.channel_name.clone(), |d, c| d.child(div().text_xs().text_color(p.text2).child(c)))
-                .child(div().text_xs().text_color(p.text2).font_weight(FontWeight::MEDIUM).child("View full playlist")),
+                .child(div().text_xs().text_color(p.text2).font_weight(FontWeight::MEDIUM).child(crate::i18n::t("View full playlist"))),
         )
         .into_any_element()
 }

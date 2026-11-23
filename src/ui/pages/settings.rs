@@ -78,7 +78,7 @@ impl SettingsPage {
         let mut subs = Vec::new();
         for (key, val, ph, setter) in fields {
             let st = cx.new(|cx| {
-                let mut i = InputState::new(window, cx).placeholder(ph);
+                let mut i = InputState::new(window, cx).placeholder(crate::i18n::t(ph));
                 i.set_value(val, window, cx);
                 i
             });
@@ -92,13 +92,13 @@ impl SettingsPage {
                         this.load_sb_stats(cx);
                     }
                     if matches!(ev, InputEvent::PressEnter { .. }) {
-                        toast(cx, crate::i18n::t("Saved"));
+                        toast(cx, "Saved");
                     }
                 }
             }));
             inputs.push((key, st));
         }
-        let keyword = cx.new(|cx| InputState::new(window, cx).placeholder("Add a keyword and press Enter"));
+        let keyword = cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::t("Add a keyword and press Enter")));
         subs.push(cx.subscribe_in(&keyword, window, |_, st, ev: &InputEvent, window, cx| {
             if let InputEvent::PressEnter { .. } = ev {
                 let v = st.read(cx).value().trim().to_string();
@@ -113,7 +113,7 @@ impl SettingsPage {
                 }
             }
         }));
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search settings"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::t("Search settings")));
         subs.push(cx.subscribe_in(&search, window, |_, _, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::Change) {
                 cx.notify();
@@ -258,9 +258,15 @@ fn rgb_to(c: u32) -> Hsla {
 
 fn row(title: &str, desc: &str, control: impl IntoElement, cx: &App) -> Div {
     let p = pal(cx);
+    let title_t = crate::i18n::t(title);
+    let desc_t = if desc.is_empty() { String::new() } else { crate::i18n::t(desc) };
     let hidden = QUERY.with(|q| {
         let q = q.borrow();
-        !q.is_empty() && !title.to_lowercase().contains(q.as_str()) && !desc.to_lowercase().contains(q.as_str())
+        !q.is_empty()
+            && !title.to_lowercase().contains(q.as_str())
+            && !desc.to_lowercase().contains(q.as_str())
+            && !title_t.to_lowercase().contains(q.as_str())
+            && !desc_t.to_lowercase().contains(q.as_str())
     });
     if hidden {
         return div();
@@ -286,8 +292,8 @@ fn row(title: &str, desc: &str, control: impl IntoElement, cx: &App) -> Div {
                 // but never narrower than this
                 .min_w(px(240.))
                 .gap_0p5()
-                .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(p.text).child(crate::i18n::t(title)))
-                .when(!desc.is_empty(), |d| d.child(div().text_xs().text_color(p.text2).child(crate::i18n::t(desc)))),
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(p.text).child(title_t))
+                .when(!desc_t.is_empty(), |d| d.child(div().text_xs().text_color(p.text2).child(desc_t))),
         )
         .child(div().flex_none().child(control))
 }
@@ -296,9 +302,15 @@ fn row(title: &str, desc: &str, control: impl IntoElement, cx: &App) -> Div {
 /// underneath, across the full width of the card.
 fn stacked_row(title: &str, desc: &str, control: impl IntoElement, cx: &App) -> Div {
     let p = pal(cx);
+    let title_t = crate::i18n::t(title);
+    let desc_t = if desc.is_empty() { String::new() } else { crate::i18n::t(desc) };
     let hidden = QUERY.with(|q| {
         let q = q.borrow();
-        !q.is_empty() && !title.to_lowercase().contains(q.as_str()) && !desc.to_lowercase().contains(q.as_str())
+        !q.is_empty()
+            && !title.to_lowercase().contains(q.as_str())
+            && !desc.to_lowercase().contains(q.as_str())
+            && !title_t.to_lowercase().contains(q.as_str())
+            && !desc_t.to_lowercase().contains(q.as_str())
     });
     if hidden {
         return div();
@@ -315,8 +327,8 @@ fn stacked_row(title: &str, desc: &str, control: impl IntoElement, cx: &App) -> 
                 .flex()
                 .flex_col()
                 .gap_0p5()
-                .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(p.text).child(crate::i18n::t(title)))
-                .when(!desc.is_empty(), |d| d.child(div().text_xs().text_color(p.text2).child(crate::i18n::t(desc)))),
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(p.text).child(title_t))
+                .when(!desc_t.is_empty(), |d| d.child(div().text_xs().text_color(p.text2).child(desc_t))),
         )
         .child(div().w_full().min_w_0().child(control))
 }
@@ -549,7 +561,7 @@ impl SettingsPage {
                     div()
                         .text_sm()
                         .text_color(p.text)
-                        .child("These are built into Stream Tube, so they work without YouTube Premium and without signing in."),
+                        .child(crate::i18n::t("These are built into Stream Tube, so they work without YouTube Premium and without signing in.")),
                 )
         });
         card(cx)
@@ -575,27 +587,14 @@ impl SettingsPage {
             .child(row("Open Shorts in the regular player", "", switch("shp", s.shorts_in_player, |s, v| s.shorts_in_player = v, cx), cx))
             .child(row(
                 "YouTube-style Shorts layout",
-                "Use a YouTube-like Shorts layout with customizable info placement and edge navigation",
+                "Place channel info outside the video (like YouTube) with customizable controls",
                 switch("shyt", s.shorts_yt_layout, |s, v| s.shorts_yt_layout = v, cx),
                 cx,
             ))
             .when(s.shorts_yt_layout, |d| {
-                d.child(row(
-                    "Shorts info placement",
-                    "Show channel and title outside the video (like wide YouTube) or overlaid on it",
-                    self.choice(
-                        "shpos",
-                        &[("outside".to_string(), "Outside (left)"), ("overlay".to_string(), "Overlay")],
-                        s.shorts_info_position.clone(),
-                        |s, v| s.shorts_info_position = v,
-                        cx,
-                    ),
-                    cx,
-                ))
-                .child(row("Edge navigation buttons", "Place the up/down Short buttons on the far right edge", switch("shnav", s.shorts_nav_edge, |s, v| s.shorts_nav_edge = v, cx), cx))
-                .child(row("Show Subscribe button", "", switch("shsub", s.shorts_show_subscribe, |s, v| s.shorts_show_subscribe = v, cx), cx))
-                .child(row("Show Dislike button", "", switch("shdis", s.shorts_show_dislike, |s, v| s.shorts_show_dislike = v, cx), cx))
-                .child(row("Show channel badge in action bar", "", switch("shch", s.shorts_show_channel_thumb, |s, v| s.shorts_show_channel_thumb = v, cx), cx))
+                d.child(row("Edge navigation buttons", "Place the up/down Short buttons on the far right edge", switch("shnav", s.shorts_nav_edge, |s, v| s.shorts_nav_edge = v, cx), cx))
+                    .child(row("Show Subscribe button", "", switch("shsub", s.shorts_show_subscribe, |s, v| s.shorts_show_subscribe = v, cx), cx))
+                    .child(row("Show Dislike button", "", switch("shdis", s.shorts_show_dislike, |s, v| s.shorts_show_dislike = v, cx), cx))
             })
             .child(row("Remember last quality", "Use the quality you picked last as the default", switch("rq", s.remember_quality, |s, v| s.remember_quality = v, cx), cx))
             .child(row("Double-click for fullscreen", "", switch("dcf", s.double_click_fullscreen, |s, v| s.double_click_fullscreen = v, cx), cx))
@@ -632,17 +631,39 @@ impl SettingsPage {
                 };
                 row("YouTube watch history", &desc, ctl, cx)
             })
-            .child(row("App language", "Interface language of the desktop client", self.choice("applang", &[("en".to_string(), "English"), ("tr".to_string(), "Türkçe")], s.app_language.clone(), |s, v| s.app_language = v, cx), cx))
-            .child(row("Brand name", "Text shown in the top-left corner and window title (leave empty for Stream Tube)", text_field(&self.input("brand_name"), 220., cx), cx))
+            .child(row("App language", "Interface language of the desktop client", self.dropdown("dd-applang", crate::i18n::APP_LANGUAGES, s.app_language.clone(), |s, v| s.app_language = v, cx), cx))
+            .child(row("Brand name", "Top-left text and window title. Color codes: [#FF0033]You[#FFFFFF]Tube or &cYou&fTube", text_field(&self.input("brand_name"), 260., cx), cx))
+            .child(row(
+                "Brand font",
+                "Font used for the top-left brand text",
+                self.choice(
+                    "bfont",
+                    &[
+                        ("default".to_string(), "Default"),
+                        ("youtube".to_string(), "YouTube Condensed"),
+                        ("segoe".to_string(), "Segoe UI"),
+                        ("arial".to_string(), "Arial"),
+                        ("impact".to_string(), "Impact"),
+                        ("verdana".to_string(), "Verdana"),
+                        ("trebuchet".to_string(), "Trebuchet MS"),
+                        ("georgia".to_string(), "Georgia"),
+                        ("mono".to_string(), "Monospace"),
+                    ],
+                    s.brand_font.clone(),
+                    |s, v| s.brand_font = v,
+                    cx,
+                ),
+                cx,
+            ))
             .child(row(
                 "Custom logo & app icon",
-                "PNG, SVG or ICO file for the top-left logo and window icon",
+                "PNG, SVG, JPG, WebP or ICO file for the top-left logo and taskbar icon",
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(pill("logo-pick", Some("image"), crate::i18n::tr("Choose…", "Seç…"), cx).on_click(|_, _, cx| {
-                        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Select logo (PNG, SVG, ICO)".into()) });
+                    .child(pill("logo-pick", Some("image"), "Choose…", cx).on_click(|_, _, cx| {
+                        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Select logo (PNG, SVG, JPG, WebP, ICO)".into()) });
                         cx.spawn(async move |cx| {
                             if let Ok(Ok(Some(paths))) = rx.await {
                                 if let Some(path) = paths.into_iter().next() {
@@ -659,7 +680,7 @@ impl SettingsPage {
                         .detach();
                     }))
                     .when(!s.custom_logo.trim().is_empty(), |d| {
-                        d.child(pill("logo-reset", Some("rotate-ccw"), crate::i18n::tr("Reset", "Sıfırla"), cx).on_click(|_, _, cx| {
+                        d.child(pill("logo-reset", Some("rotate-ccw"), "Reset", cx).on_click(|_, _, cx| {
                             store::update_settings(|s| s.custom_logo.clear());
                             crate::ui::app_icon::apply(cx);
                             crate::ui::app::refresh_all_pages(cx);
@@ -802,8 +823,8 @@ impl SettingsPage {
                 .filter(|(v, _)| !(*cat == "poi_highlight" && (*v == "skip" || *v == "ask")))
                 .map(|(v, l)| (v.to_string(), l))
                 .collect();
-            let items = opts.iter().map(|(v, l)| (l.to_string(), String::new(), *v == cur, (cat.to_string(), v.clone()))).collect();
-            let label = opts.iter().find(|(v, _)| *v == cur).map(|(_, l)| l.to_string()).unwrap_or_default();
+            let items = opts.iter().map(|(v, l)| (crate::i18n::t(l), String::new(), *v == cur, (cat.to_string(), v.clone()))).collect();
+            let label = opts.iter().find(|(v, _)| *v == cur).map(|(_, l)| crate::i18n::t(l)).unwrap_or_default();
             let id: &'static str = Box::leak(format!("sbcat-{cat}").into_boxed_str());
             let ctl = self.select(id, label, 180., items, |s, (c, v): (String, String)| {
                 s.sb_actions.insert(c, v);
@@ -848,16 +869,16 @@ impl SettingsPage {
                 .rounded_lg()
                 .bg(p.bg)
                 .child(div().text_xl().font_weight(FontWeight::BOLD).text_color(p.text).child(value))
-                .child(div().text_xs().text_color(p.text2).child(label.to_string()))
+                .child(div().text_xs().text_color(p.text2).child(crate::i18n::t(label)))
         };
         let body = match &self.sb_stats {
-            None => div().py_3().text_sm().text_color(p.text2).child("Loading your stats…").into_any_element(),
+            None => div().py_3().text_sm().text_color(p.text2).child(crate::i18n::t("Loading your stats…")).into_any_element(),
             Some(Err(e)) => div()
                 .flex()
                 .items_center()
                 .justify_between()
                 .py_3()
-                .child(div().text_sm().text_color(p.text2).child(format!("Couldn't load stats: {e}")))
+                .child(div().text_sm().text_color(p.text2).child(crate::i18n::t(&format!("Couldn't load stats: {e}"))))
                 .child(pill("sb-retry", Some("refresh-cw"), "Retry", cx).on_click(cx.listener(|this, _, _, cx| this.load_sb_stats(cx))))
                 .into_any_element(),
             Some(Ok(u)) => {
@@ -887,7 +908,7 @@ impl SettingsPage {
                             .child(stat(crate::api::services::format_saved_minutes(u.minutes_saved), "of people's time saved"))
                             .child(stat(format!("{:.1}", u.reputation), "reputation")),
                     )
-                    .when(u.segments == 0, |d| d.child(div().text_xs().text_color(p.text2).child("No submissions yet for this ID. Segments you submit will count here.")))
+                    .when(u.segments == 0, |d| d.child(div().text_xs().text_color(p.text2).child(crate::i18n::t("No submissions yet for this ID. Segments you submit will count here."))))
                     .when(u.warnings > 0, |d| d.child(div().text_xs().text_color(p.text2).child(format!("{} active warning(s) on this account", u.warnings))))
                     .into_any_element()
             }
@@ -976,7 +997,7 @@ impl SettingsPage {
             .child(
                 card(cx)
                     .child(row("Blocked channels", "", div(), cx))
-                    .child(div().py_2().child(if s.blocked_channels.is_empty() { div().text_xs().text_color(p.text2).child("None").into_any_element() } else { chans.into_any_element() })),
+                    .child(div().py_2().child(if s.blocked_channels.is_empty() { div().text_xs().text_color(p.text2).child(crate::i18n::t("None")).into_any_element() } else { chans.into_any_element() })),
             )
     }
 
@@ -1130,7 +1151,7 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap_6()
-            .child(div().text_sm().text_color(p.text2).child(format!("{n_subs} subscriptions • {n_hist} history entries • {n_pl} playlists • stored in {}", store::data_dir().display())))
+            .child(div().text_sm().text_color(p.text2).child(if crate::i18n::is_tr() { format!("{n_subs} abonelik • {n_hist} geçmiş kaydı • {n_pl} oynatma listesi • konum: {}", store::data_dir().display()) } else { format!("{n_subs} subscriptions • {n_hist} history entries • {n_pl} playlists • stored in {}", store::data_dir().display()) }))
             .child(
                 card(cx)
                     .child(row(
@@ -1268,7 +1289,7 @@ impl Render for SettingsPage {
                     .when(active, |d| d.bg(p.chip).font_weight(FontWeight::SEMIBOLD))
                     .hover(move |s| s.bg(p.hover))
                     .child(icon(ic).size_5().text_color(if active { p.accent } else { p.text }))
-                    .child(name.to_string())
+                    .child(crate::i18n::t(name))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.section = sec;
                         cx.notify();
@@ -1293,7 +1314,7 @@ impl Render for SettingsPage {
             // search: matching rows from every section
             let mut all = div().flex().flex_col().gap_4();
             for (sec, name, _) in SECTIONS {
-                all = all.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text2).child(name.to_uppercase())).child(render_section(self, *sec, cx));
+                all = all.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text2).child(crate::i18n::t(name).to_uppercase())).child(render_section(self, *sec, cx));
             }
             QUERY.with(|q| q.borrow_mut().clear());
             return page_scroll("settings-scroll", &self.scroll).child(
@@ -1336,8 +1357,8 @@ impl Render for SettingsPage {
 fn fetch_progress(id: &'static str, f: crate::downloads::ToolFetch, cx: &App) -> AnyElement {
     let p = pal(cx);
     let (label, frac) = match f {
-        crate::downloads::ToolFetch::Downloading(n) => (format!("Downloading… {n}%"), n as f32 / 100.0),
-        crate::downloads::ToolFetch::Unpacking => ("Unpacking…".to_string(), 1.0),
+        crate::downloads::ToolFetch::Downloading(n) => (crate::i18n::t(&format!("Downloading… {n}%")), n as f32 / 100.0),
+        crate::downloads::ToolFetch::Unpacking => (crate::i18n::t("Unpacking…"), 1.0),
     };
     div()
         .id(id)

@@ -107,7 +107,7 @@ impl PlayerView {
 }
 
 fn speed_label(s: f64) -> String {
-    if (s - 1.0).abs() < 0.001 { "Normal".into() } else { format!("{s}") }
+    if (s - 1.0).abs() < 0.001 { crate::i18n::t("Normal") } else { format!("{s}") }
 }
 
 impl Render for PlayerView {
@@ -185,7 +185,7 @@ impl Render for PlayerView {
                                     .text_xs()
                                     .text_color(white())
                                     .child(icon("headphones").size_4().text_color(white()))
-                                    .child("Audio only"),
+                                    .child(crate::i18n::t("Audio only")),
                             ),
                     )
                 })
@@ -403,7 +403,7 @@ impl Render for PlayerView {
                                 .text_color(black())
                                 .text_sm()
                                 .cursor_pointer()
-                                .child("Retry")
+                                .child(crate::i18n::t("Retry"))
                                 .on_click(move |_, _, cx| {
                                     retry_player.update(cx, |p, cx| {
                                         if let Some(v) = p.video.clone() {
@@ -457,7 +457,7 @@ impl Render for PlayerView {
                     .text_sm()
                     .cursor_pointer()
                     .child(div().size_2().rounded_full().bg(rgb(services::sponsor_category_color(&seg.category))))
-                    .child(format!("Skip {}", services::sponsor_category_name(&seg.category)))
+                    .child(format!("{} {}", crate::i18n::tr("Skip", "Atla:"), crate::i18n::t(services::sponsor_category_name(&seg.category))))
                     .child(icon("skip-forward").size_4().text_color(white()))
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
@@ -484,7 +484,7 @@ impl Render for PlayerView {
                     .text_sm()
                     .cursor_pointer()
                     .child(icon("sparkles").size_4().text_color(rgb(0xff1684)))
-                    .child("Jump to highlight")
+                    .child(crate::i18n::t("Jump to highlight"))
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         pp.update(cx, |p, _| p.seek_to(start))
@@ -664,7 +664,12 @@ fn context_items(player: &Entity<Player>, cx: &App) -> Vec<crate::ui::app::MenuI
 
 fn navigate_to_current(this: &mut PlayerView, window: &mut Window, cx: &mut Context<PlayerView>) {
     if let Some(v) = this.player.read(cx).video.clone() {
-        navigate(Route::Watch { id: v.id, playlist: None, start: None }, window, cx);
+        let route = if v.is_short && !store::settings_snapshot().shorts_in_player {
+            Route::Shorts(Some(v.id))
+        } else {
+            Route::Watch { id: v.id, playlist: None, start: None }
+        };
+        navigate(route, window, cx);
     }
 }
 
@@ -980,7 +985,7 @@ impl PlayerView {
         let vol_icon = if muted || volume <= 0.0 { "volume-x" } else if volume < 50.0 { "volume-1" } else { "volume-2" };
         let vol_frac = if muted { 0.0 } else { (volume / 100.0).min(1.0) as f32 };
         let time_text = if is_live {
-            "● LIVE".to_string()
+            crate::i18n::t("● LIVE")
         } else {
             format!("{} / {}", format_duration(time as u64), format_duration(duration as u64))
         };
@@ -1078,7 +1083,7 @@ impl PlayerView {
                         .text_sm()
                         .text_color(white())
                         .child(icon("fast-forward").size_4().text_color(white()))
-                        .child("Jump ahead")
+                        .child(crate::i18n::t("Jump ahead"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.player.update(cx, |p, _| p.seek_to(t));
                             this.poke(cx);
@@ -1330,36 +1335,37 @@ impl PlayerView {
         match menu {
             Menu::Main => {
                 let q = if pl.audio_only {
-                    "Audio only".to_string()
+                    crate::i18n::t("Audio only")
                 } else {
                     let h = pl.current_height();
-                    if h > 0 { format!("{}p", h) } else { "Auto".into() }
+                    if h > 0 { format!("{}p", h) } else { crate::i18n::t("Auto") }
                 };
                 let caption = pl
                     .caption
                     .and_then(|i| pl.streams.as_ref()?.captions.get(i))
                     .map(|c| c.name.clone())
-                    .unwrap_or_else(|| "Off".into());
+                    .unwrap_or_else(|| crate::i18n::t("Off"));
+                let on_off = |b: bool| if b { crate::i18n::t("On") } else { crate::i18n::t("Off") };
                 let audio_tracks = pl.audio_tracks();
                 let audio_only = pl.audio_only;
                 let looping = pl.loop_video;
                 let speed = pl.speed;
                 let source = pl.streams.as_ref().map(|s| s.source).unwrap_or("");
                 panel = panel
-                    .child(row("m-q".into(), Some("sliders-horizontal"), "Quality".into(), Some(q), false).on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::Quality); cx.notify() })))
-                    .child(row("m-s".into(), Some("gauge"), "Playback speed".into(), Some(speed_label(speed)), false).on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::Speed); cx.notify() })))
+                    .child(row("m-q".into(), Some("sliders-horizontal"), crate::i18n::t("Quality"), Some(q), false).on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::Quality); cx.notify() })))
+                    .child(row("m-s".into(), Some("gauge"), crate::i18n::t("Playback speed"), Some(speed_label(speed)), false).on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::Speed); cx.notify() })))
                     .child(row("m-c".into(), Some("captions"), crate::i18n::t("Subtitles/CC"), Some(caption), false).on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::Captions); cx.notify() })))
                     .when(audio_tracks.len() > 1, |d| {
-                        let cur = pl.audio_track.clone().unwrap_or_else(|| "Default".into());
-                        d.child(row("m-a".into(), Some("languages"), "Audio track".into(), Some(cur), false).on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::Audio); cx.notify() })))
+                        let cur = pl.audio_track.clone().unwrap_or_else(|| crate::i18n::t("Default"));
+                        d.child(row("m-a".into(), Some("languages"), crate::i18n::t("Audio track"), Some(cur), false).on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::Audio); cx.notify() })))
                     })
                     .child(
-                        row("m-ao".into(), Some("headphones"), "Audio only (background)".into(), Some(if audio_only { "On".into() } else { "Off".into() }), false)
+                        row("m-ao".into(), Some("headphones"), crate::i18n::t("Audio only (background)"), Some(on_off(audio_only)), false)
                             .on_click(cx.listener(move |t, _, _, cx| t.player.update(cx, |p, cx| p.set_audio_only(!audio_only, cx)))),
                     )
                     .child({
                         let ambient = store::settings_snapshot().ambient_mode;
-                        row("m-amb".into(), Some("sun"), "Ambient mode".into(), Some(if ambient { "On".into() } else { "Off".into() }), false).on_click(cx.listener(move |t, _, _, cx| {
+                        row("m-amb".into(), Some("sun"), crate::i18n::t("Ambient mode"), Some(on_off(ambient)), false).on_click(cx.listener(move |t, _, _, cx| {
                             store::update_settings(|s| s.ambient_mode = !ambient);
                             t.player.update(cx, |p, cx| {
                                 if ambient {
@@ -1372,7 +1378,7 @@ impl PlayerView {
                     })
                     .when(!pl.annotations.is_empty(), |d| {
                         let on = store::settings_snapshot().annotations;
-                        d.child(row("m-ann".into(), Some("message-square"), "Annotations".into(), Some(if on { "On".into() } else { "Off".into() }), false).on_click(
+                        d.child(row("m-ann".into(), Some("message-square"), crate::i18n::t("Annotations"), Some(on_off(on)), false).on_click(
                             cx.listener(move |_, _, _, cx| {
                                 store::update_settings(|s| s.annotations = !on);
                                 cx.notify();
@@ -1380,11 +1386,11 @@ impl PlayerView {
                         ))
                     })
                     .child(
-                        row("m-l".into(), Some("repeat"), "Loop".into(), Some(if looping { "On".into() } else { "Off".into() }), false)
+                        row("m-l".into(), Some("repeat"), crate::i18n::t("Loop"), Some(on_off(looping)), false)
                             .on_click(cx.listener(move |t, _, _, cx| t.player.update(cx, |p, cx| { p.set_loop(!looping); cx.notify() }))),
                     )
                     .child(
-                        row("m-stats".into(), Some("activity"), "Stats for nerds".into(), None, false).on_click(cx.listener(|t, _, _, cx| {
+                        row("m-stats".into(), Some("activity"), crate::i18n::t("Stats for nerds"), None, false).on_click(cx.listener(|t, _, _, cx| {
                             t.menu = None;
                             t.player.update(cx, |p, cx| {
                                 p.show_stats = !p.show_stats;
@@ -1393,11 +1399,11 @@ impl PlayerView {
                         })),
                     )
                     .child(
-                        row("m-shot".into(), Some("camera"), "Screenshot".into(), None, false)
+                        row("m-shot".into(), Some("camera"), crate::i18n::t("Screenshot"), None, false)
                             .on_click(cx.listener(|t, _, _, cx| { t.menu = None; t.player.update(cx, |p, cx| p.screenshot(cx)) })),
                     )
                     .child(
-                        row("m-ext".into(), Some("external-link"), "Open in external player".into(), None, false).on_click(cx.listener(|t, _, _, cx| {
+                        row("m-ext".into(), Some("external-link"), crate::i18n::t("Open in external player"), None, false).on_click(cx.listener(|t, _, _, cx| {
                             t.menu = None;
                             let (id, time) = {
                                 let p = t.player.read(cx);
@@ -1409,12 +1415,12 @@ impl PlayerView {
                             }
                         })),
                     )
-                    .child(div().px_4().pt_1().text_xs().text_color(hsla(0., 0., 1., 0.5)).child(format!("Source: {source} • libmpv")));
+                    .child(div().px_4().pt_1().text_xs().text_color(hsla(0., 0., 1., 0.5)).child(crate::i18n::t(&format!("Source: {source} • libmpv"))));
             }
             Menu::Quality => {
                 let cur = pl.quality;
                 let quals = pl.available_qualities();
-                panel = panel.child(header("Quality", cx));
+                panel = panel.child(header(&crate::i18n::t("Quality"), cx));
                 for q in quals {
                     panel = panel.child(
                         row(SharedString::from(format!("q-{q}")), None, format!("{q}p{}", if q >= 2160 { " 4K" } else if q >= 720 { " HD" } else { "" }), None, q == cur)
@@ -1428,7 +1434,7 @@ impl PlayerView {
             }
             Menu::Speed => {
                 let cur = pl.speed;
-                panel = panel.child(header("Playback speed", cx));
+                panel = panel.child(header(&crate::i18n::t("Playback speed"), cx));
                 for s in [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0] {
                     panel = panel.child(
                         row(SharedString::from(format!("s-{s}")), None, speed_label(s), None, (cur - s).abs() < 0.001)
@@ -1461,7 +1467,7 @@ impl PlayerView {
                 );
                 for (i, c) in tracks.iter().enumerate() {
                     panel = panel.child(
-                        row(SharedString::from(format!("cap-{i}")), None, format!("{}{}", c.name, if c.auto && !c.name.contains("auto") { " (auto-generated)" } else { "" }), None, cur == Some(i))
+                        row(SharedString::from(format!("cap-{i}")), None, format!("{}{}", c.name, if c.auto && !c.name.contains("auto") && !c.name.contains("otomatik") { crate::i18n::t(" (auto-generated)") } else { String::new() }), None, cur == Some(i))
                             .on_click(cx.listener(move |t, _, _, cx| {
                                 t.menu = None;
                                 t.player.update(cx, |p, cx| p.set_caption(Some(i), cx));

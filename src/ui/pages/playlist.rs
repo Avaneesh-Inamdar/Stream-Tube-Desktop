@@ -79,7 +79,7 @@ impl PlaylistPage {
     }
 
     fn make_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let f = cx.new(|cx| gpui_kit::component::input::InputState::new(window, cx).placeholder("Search in playlist"));
+        let f = cx.new(|cx| gpui_kit::component::input::InputState::new(window, cx).placeholder(crate::i18n::t("Search in playlist")));
         cx.observe(&f, |_, _, cx| cx.notify()).detach();
         self.filter = Some(f);
     }
@@ -128,11 +128,11 @@ impl PlaylistPage {
     fn reload_local(&mut self) {
         if let Source::Local(id) = self.source {
             let pl = store::playlists().into_iter().find(|p| p.id == id);
-            self.title = pl.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "Playlist".into());
+            self.title = pl.as_ref().map(|p| if p.protected { crate::i18n::t(&p.name) } else { p.name.clone() }).unwrap_or_else(|| crate::i18n::t("Playlist"));
             self.protected = pl.as_ref().map(|p| p.protected).unwrap_or(false);
             let items = store::playlist_items(id);
-            self.count_text = Some(format!("{} videos", items.len()));
-            self.owner = Some(("You".into(), None));
+            self.count_text = Some(crate::i18n::t(&format!("{} videos", items.len())));
+            self.owner = Some((crate::i18n::t("You"), None));
             self.videos = Load::Ready(items);
         }
     }

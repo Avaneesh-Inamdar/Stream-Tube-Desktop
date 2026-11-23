@@ -221,7 +221,8 @@ pub struct MenuItem {
 
 impl MenuItem {
     pub fn new(icon: &'static str, label: impl Into<SharedString>, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
-        Self { icon, label: label.into(), action: Arc::new(f) }
+        let raw: SharedString = label.into();
+        Self { icon, label: crate::i18n::t(&raw).into(), action: Arc::new(f) }
     }
 }
 
@@ -448,7 +449,7 @@ impl AppView {
         crate::downloads::load_history(cx);
         cx.set_global(AutoplayNext::default());
         cx.set_global(crate::ui::cards::Watched(store::progress_map()));
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search or paste a YouTube link"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::t("Search or paste a YouTube link")));
         let dialog_input = cx.new(|cx| InputState::new(window, cx));
         let mut subs = Vec::new();
         subs.push(cx.subscribe_in(&search, window, |this: &mut Self, state, ev: &InputEvent, window, cx| match ev {
@@ -779,7 +780,7 @@ impl AppView {
                 .items_center()
                 .gap_3()
                 .child(icon("history").size_6().text_color(p.text))
-                .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Connect your YouTube history")),
+                .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(crate::i18n::t("Connect your YouTube history"))),
         );
         let cookies_link = div()
             .id("wsi-cookies")
@@ -849,7 +850,7 @@ impl AppView {
                 .items_center()
                 .gap_3()
                 .child(icon("circle-user").size_6().text_color(p.text))
-                .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Sign in to YouTube")),
+                .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(crate::i18n::t("Sign in to YouTube"))),
         );
         if let Some(err) = &self.login.error {
             col = col.child(div().text_sm().text_color(p.text2).child(err.clone())).child(
@@ -968,7 +969,7 @@ impl AppView {
                 .cursor_pointer()
                 .hover(move |s| s.bg(p.hover))
                 .child(icon("circle-user").size_5().text_color(p.link))
-                .child("Sign in")
+                .child(crate::i18n::t("Sign in"))
                 .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx)))
                 .into_any_element();
         }
@@ -1960,14 +1961,19 @@ impl AppView {
                 cx.notify();
             }
             ("i", false) => {
-                if matches!(self.route, Route::Watch { .. }) {
+                if matches!(self.route, Route::Watch { .. } | Route::Shorts(_)) {
                     if self.history.is_empty() {
                         self.go(Route::Home, window, cx);
                     } else {
                         self.back(window, cx);
                     }
                 } else if let Some(v) = p.read(cx).video.clone() {
-                    self.go(Route::Watch { id: v.id, playlist: None, start: None }, window, cx);
+                    let route = if v.is_short && !store::settings_snapshot().shorts_in_player {
+                        Route::Shorts(Some(v.id))
+                    } else {
+                        Route::Watch { id: v.id, playlist: None, start: None }
+                    };
+                    self.go(route, window, cx);
                 }
             }
             ("n", true) => play_next(window, cx),
@@ -2161,7 +2167,7 @@ impl AppView {
                     .when(active, |d| d.bg(p.chip))
                     .hover(move |s| s.bg(p.hover))
                     .child(icon(ic).size_5().text_color(if active { p.accent } else { p.text }))
-                    .child(div().text_size(px(10.)).text_color(p.text).child(label))
+                    .child(div().text_size(px(10.)).text_color(p.text).child(crate::i18n::t(label)))
                     .on_click(cx.listener(move |this, _, window, cx| this.go(r.clone(), window, cx)))
             };
             return div()
@@ -2369,6 +2375,7 @@ impl AppView {
             return None;
         }
         let id = video.id.clone();
+        let is_short = video.is_short;
         let (right, bottom, w) = self.mini_geom;
         let h = w * 9.0 / 16.0;
         let start = |resize: bool| {
@@ -2406,7 +2413,12 @@ impl AppView {
                             if std::mem::take(&mut this.mini_dragged) {
                                 return;
                             }
-                            this.go(Route::Watch { id: id.clone(), playlist: None, start: None }, window, cx)
+                            let route = if is_short && !store::settings_snapshot().shorts_in_player {
+                                Route::Shorts(Some(id.clone()))
+                            } else {
+                                Route::Watch { id: id.clone(), playlist: None, start: None }
+                            };
+                            this.go(route, window, cx)
                         }))
                         .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).truncate().child(video.title.clone()))
                         .child(div().text_xs().text_color(p.text2).truncate().child(video.channel_name.clone())),
@@ -2765,7 +2777,7 @@ impl AppView {
                             .cursor_pointer()
                             .hover(move |s| s.bg(p.hover))
                             .child(icon("plus").text_color(p.text))
-                            .child(div().text_sm().text_color(p.text).child("Create new playlist"))
+                            .child(div().text_sm().text_color(p.text).child(crate::i18n::t("Create new playlist")))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 let v3 = v.clone();
                                 this.dialog = None;

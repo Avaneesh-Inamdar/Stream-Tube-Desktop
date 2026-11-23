@@ -34,7 +34,7 @@ const WANTED_TABS: &[&str] = &["Home", "Videos", "Shorts", "Live", "Podcasts", "
 
 impl ChannelPage {
     pub fn new(id: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search channel"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::t("Search channel")));
         let sub = cx.subscribe_in(&search, window, |this: &mut Self, st, ev: &InputEvent, _, cx| {
             if let InputEvent::PressEnter { .. } = ev {
                 let q = st.read(cx).value().to_string();
@@ -254,7 +254,7 @@ impl Render for ChannelPage {
                                                     .font_weight(FontWeight::SEMIBOLD)
                                                     .text_color(p.text)
                                                     .cursor_pointer()
-                                                    .child(if open { "Show less" } else { "Show more" })
+                                                    .child(if open { crate::i18n::t("Show less") } else { crate::i18n::t("Show more") })
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.about_open ^= true;
                                                         cx.notify();

@@ -189,7 +189,7 @@ pub fn content_width(cx: &App) -> Pixels {
 
 pub fn section_title(text: impl Into<SharedString>, cx: &App) -> Div {
     let p = pal(cx);
-    div().text_xl().font_weight(FontWeight::BOLD).text_color(p.text).child(text.into())
+    div().text_xl().font_weight(FontWeight::BOLD).text_color(p.text).child(crate::i18n::t(&text.into()))
 }
 
 /// Sets up a "load more" trigger: call from render; spawns `f` when near the bottom.
@@ -445,7 +445,7 @@ pub fn comment_body(id: impl Into<SharedString>, c: &crate::api::types::Comment,
                     .text_color(p.text2)
                     .cursor_pointer()
                     .hover(move |s| s.text_color(p.text))
-                    .child(if open { "Show less" } else { "Read more" })
+                    .child(if open { crate::i18n::t("Show less") } else { crate::i18n::t("Read more") })
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         OPEN_COMMENTS.with(|o| {

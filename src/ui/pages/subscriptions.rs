@@ -216,15 +216,15 @@ impl Render for FeedPage {
             let bucket = |ts: Option<i64>| -> &'static str {
                 let d = ts.map(|t| now - t).unwrap_or(i64::MAX);
                 if d < 86400 {
-                    "Today"
+                    crate::i18n::tr("Today", "Bugün")
                 } else if d < 2 * 86400 {
-                    "Yesterday"
+                    crate::i18n::tr("Yesterday", "Dün")
                 } else if d < 7 * 86400 {
-                    "This week"
+                    crate::i18n::tr("This week", "Bu hafta")
                 } else if d < 30 * 86400 {
-                    "This month"
+                    crate::i18n::tr("This month", "Bu ay")
                 } else {
-                    "Older"
+                    crate::i18n::tr("Older", "Daha eski")
                 }
             };
             let mut col = div().flex().flex_col().gap_8();
@@ -263,7 +263,7 @@ pub struct ChannelsPage {
 
 impl ChannelsPage {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter channels"));
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::t("Filter channels")));
         cx.observe(&filter, |_, _, cx| cx.notify()).detach();
         Self { filter, scroll: ScrollHandle::new(), profile: None }
     }

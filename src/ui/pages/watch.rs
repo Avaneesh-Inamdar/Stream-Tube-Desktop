@@ -146,7 +146,7 @@ impl WatchPage {
 
     fn make_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let signed_in = crate::api::auth::signed_in();
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder(if signed_in { "Chat…" } else { "Sign in to chat" }));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(if signed_in { crate::i18n::t("Chat…") } else { crate::i18n::t("Sign in to chat") }));
         let sub = cx.subscribe_in(&input, window, |this: &mut Self, st, ev: &InputEvent, window, cx| {
             if let InputEvent::PressEnter { .. } = ev {
                 let text = st.read(cx).value().to_string();
@@ -283,7 +283,7 @@ impl WatchPage {
             .py_2()
             .border_b_1()
             .border_color(p.border)
-            .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Live chat"))
+            .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(crate::i18n::t("Live chat")))
             .child(chip("chat-top", "Top", chat.top, cx).on_click(cx.listener(|this, _, _, cx| {
                 if let Some(c) = &mut this.chat {
                     if !c.top {
@@ -639,7 +639,7 @@ impl WatchPage {
         let likes = like_n
             .map(vote_count)
             .or_else(|| w.likes_text.clone().filter(|t| !t.chars().any(|c| c.is_ascii_digit())))
-            .unwrap_or_else(|| "Like".into());
+            .unwrap_or_else(|| crate::i18n::t("Like"));
         let dislikes = dislike_n.map(vote_count);
         let ratio = like_n.zip(dislike_n).filter(|(l, d)| l + d > 0).map(|(l, d)| l as f32 / (l + d) as f32);
         let video_item = player(cx).read(cx).video.clone().unwrap_or_else(|| VideoItem { id: w.id.clone(), title: w.title.clone(), ..Default::default() });
@@ -826,7 +826,7 @@ impl WatchPage {
                                 .flex()
                                 .items_center()
                                 .justify_between()
-                                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Chapters"))
+                                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(crate::i18n::t("Chapters")))
                                 .child(
                                     div()
                                         .id("chap-all")
@@ -838,7 +838,7 @@ impl WatchPage {
                                         .text_color(p.link)
                                         .cursor_pointer()
                                         .hover(move |s| s.bg(p.hover))
-                                        .child("View all")
+                                        .child(crate::i18n::t("View all"))
                                         .on_click(|_, window, cx| {
                                             cx.stop_propagation();
                                             CHAPTERS_OPEN.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -877,7 +877,7 @@ impl WatchPage {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(p.text)
                     .cursor_pointer()
-                    .child(if expanded { "Show less" } else { "...more" })
+                    .child(if expanded { crate::i18n::t("Show less") } else { crate::i18n::t("...more") })
                     .on_click(cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();
                         this.desc_expanded ^= true;
@@ -932,7 +932,7 @@ impl WatchPage {
                     .flex_1()
                     .min_w_0()
                     .gap_1()
-                    .when(c.is_pinned, |d| d.child(div().flex().items_center().gap_1().text_xs().text_color(p.text2).child(icon("pin").size_3()).child("Pinned")))
+                    .when(c.is_pinned, |d| d.child(div().flex().items_center().gap_1().text_xs().text_color(p.text2).child(icon("pin").size_3()).child(crate::i18n::t("Pinned"))))
                     .child(
                         div()
                             .flex()
@@ -1025,7 +1025,7 @@ impl WatchPage {
                                 .text_sm()
                                 .text_color(p.link)
                                 .cursor_pointer()
-                                .child("Show more replies")
+                                .child(crate::i18n::t("Show more replies"))
                                 .on_click(cx.listener(move |this, _, _, cx| this.load_replies(cid3.clone(), tok.clone(), cx)))
                                 .into_any_element(),
                             true,
@@ -1046,11 +1046,11 @@ impl WatchPage {
             return div().into_any_element();
         }
         let Some(state) = &self.comments else {
-            return div().py_4().text_sm().text_color(p.text2).child(if w.comments_token.is_none() { "Comments are turned off." } else { "" }).into_any_element();
+            return div().py_4().text_sm().text_color(p.text2).child(if w.comments_token.is_none() { crate::i18n::t("Comments are turned off.") } else { String::new() }).into_any_element();
         };
         let data = match state {
             Load::Loading => return spinner(cx).into_any_element(),
-            Load::Error(e) => return div().py_4().text_sm().text_color(p.text2).child(format!("Could not load comments: {e}")).into_any_element(),
+            Load::Error(e) => return div().py_4().text_sm().text_color(p.text2).child(crate::i18n::t(&format!("Could not load comments: {e}"))).into_any_element(),
             Load::Ready(c) => c.clone(),
         };
         let sort_new = self.comment_sort_new;
@@ -1063,7 +1063,8 @@ impl WatchPage {
                 .gap_6()
                 .child(div().text_xl().font_weight(FontWeight::BOLD).text_color(p.text).child({
                     let n = data.count_text.clone().or(w.comment_count_text.clone()).unwrap_or_default();
-                    if n.to_lowercase().contains("comment") { n } else { format!("{n} Comments").trim().to_string() }
+                    let has_word = n.split(|c: char| !c.is_alphabetic()).any(|w| w.chars().count() >= 2);
+                    if has_word { n } else if n.is_empty() { crate::i18n::t("Comments") } else { format!("{n} {}", crate::i18n::t("Comments")).trim().to_string() }
                 }))
                 .child(
                     div()
@@ -1252,7 +1253,7 @@ impl WatchPage {
                             div()
                                 .flex()
                                 .flex_col()
-                                .child(div().text_base().font_weight(FontWeight::BOLD).text_color(p.text).child("Chapters"))
+                                .child(div().text_base().font_weight(FontWeight::BOLD).text_color(p.text).child(crate::i18n::t("Chapters")))
                                 .child(div().text_xs().text_color(p.text2).child(format!("{} / {}", current.map(|c| c + 1).unwrap_or(0), chapters.len()))),
                         )
                         .child(icon_button("chp-close", "x", cx).on_click(|_, _, cx| {
@@ -1280,7 +1281,7 @@ impl WatchPage {
             .ready()
             .and_then(|w| w.playlist.as_ref().map(|p| p.title.clone()))
             .or(self.local_playlist.as_ref().map(|l| l.1.clone()))
-            .unwrap_or_else(|| "Queue".into());
+            .unwrap_or_else(|| crate::i18n::t("Queue"));
         let mut list = div().id("queue-list").flex().flex_col().max_h(px(400.)).overflow_y_scroll();
         for (i, v) in queue.iter().enumerate() {
             let plc = pl.clone();
@@ -1364,7 +1365,7 @@ impl WatchPage {
                 .items_center()
                 .justify_between()
                 .pb_1()
-                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Up next"))
+                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(crate::i18n::t("Up next")))
                 .child(
                     div()
                         .id("autoplay")
@@ -1374,7 +1375,7 @@ impl WatchPage {
                         .text_xs()
                         .text_color(p.text2)
                         .cursor_pointer()
-                        .child("Autoplay")
+                        .child(crate::i18n::t("Autoplay"))
                         .child(
                             div()
                                 .w(px(36.))
@@ -1481,7 +1482,7 @@ impl Render for WatchPage {
                 let c = self.render_comments(w, cx);
                 div().flex().flex_col().child(i).child(c).into_any_element()
             }
-            (Load::Error(e), _) => div().py_4().text_color(p.text2).child(format!("Could not load video details: {e}")).into_any_element(),
+            (Load::Error(e), _) => div().py_4().text_color(p.text2).child(crate::i18n::t(&format!("Could not load video details: {e}"))).into_any_element(),
             _ => spinner(cx).into_any_element(),
         };
         let chapters_panel = self.render_chapters_panel(cx);

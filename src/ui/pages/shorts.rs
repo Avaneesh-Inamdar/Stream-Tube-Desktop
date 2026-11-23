@@ -69,16 +69,33 @@ impl ShortsPage {
             comments_bounds: Default::default(),
             _sub: sub,
         };
-        if let Some(id) = &start {
-            s.list.push(VideoItem { id: id.clone(), is_short: true, thumbnail: innertube::default_thumb(id), ..Default::default() });
+        let cur_playing = player(cx).read(cx).video.clone();
+        let initial_id: Option<String> = if let Some(id) = &start {
+            let item = match cur_playing {
+                Some(mut v) if v.id == *id => {
+                    v.is_short = true;
+                    v
+                }
+                _ => VideoItem { id: id.clone(), is_short: true, thumbnail: innertube::default_thumb(id), ..Default::default() },
+            };
+            s.list.push(item);
             s.play_current(cx);
-        }
-        let start2 = start.clone();
+            Some(id.clone())
+        } else if let Some(mut v) = cur_playing.filter(|v| v.is_short) {
+            let id = v.id.clone();
+            v.is_short = true;
+            s.list.push(v);
+            s.play_current(cx);
+            Some(id)
+        } else {
+            None
+        };
+        let had_initial = initial_id.is_some();
         cx.spawn(async move |this, cx| {
             let res = blocking(move || {
-                // YouTube's own Shorts sequence: the account's recommendations with the
-                // browser sign-in, otherwise one that follows on from the last Short watched
-                let seed = crate::store::history_list("", 60).into_iter().find(|h| h.video.is_short).map(|h| h.video.id);
+                // YouTube's own Shorts sequence: follow on from the opened/playing Short when present,
+                // otherwise the account's recommendations or the last Short watched
+                let seed = initial_id.or_else(|| crate::store::history_list("", 60).into_iter().find(|h| h.video.is_short).map(|h| h.video.id));
                 let seeded = seed.as_deref().and_then(|s| innertube::shorts_feed(None, Some(s)).ok());
                 let feed = seeded.filter(|(i, _)| !i.is_empty()).or_else(|| innertube::shorts_feed(None, None).ok());
                 if let Some((items, cont)) = feed {
@@ -115,7 +132,7 @@ impl ShortsPage {
                 }
                 this.continuation = res.1;
                 this.reel_feed = res.2;
-                if start2.is_none() && !this.list.is_empty() {
+                if !had_initial && !this.list.is_empty() {
                     this.play_current(cx);
                 }
                 cx.notify();
@@ -126,13 +143,21 @@ impl ShortsPage {
     }
 
     fn play_current(&mut self, cx: &mut Context<Self>) {
-        let Some(v) = self.list.get(self.idx).cloned() else { return };
+        let Some(mut v) = self.list.get(self.idx).cloned() else { return };
+        v.is_short = true;
         let pl = player(cx);
         pl.update(cx, |p, cx| {
             p.queue.clear();
             p.queue_pos = None;
             p.set_loop(!store::settings_snapshot().shorts_autoadvance);
-            p.play(v.clone(), Some(0.0), cx);
+            let same_playing = p.video.as_ref().map(|cur| cur.id.as_str()) == Some(v.id.as_str());
+            if same_playing {
+                if let Some(cur) = p.video.as_mut() {
+                    cur.is_short = true;
+                }
+            } else {
+                p.play(v.clone(), Some(0.0), cx);
+            }
         });
         self.fetch_meta(v.id.clone(), cx);
         if let Some(n) = self.list.get(self.idx + 1) {
@@ -255,7 +280,7 @@ impl ShortsPage {
         let Some(token) = token else {
             // still waiting for the watch info, or comments are off
             let pending = self.meta.get(&id).map(|w| w.title.is_empty()).unwrap_or(true);
-            self.comments = if pending { None } else { Some(Load::Error("Comments are turned off.".into())) };
+            self.comments = if pending { None } else { Some(Load::Error(crate::i18n::t("Comments are turned off."))) };
             cx.notify();
             return;
         };
@@ -525,7 +550,7 @@ impl ShortsPage {
                             .flex()
                             .items_baseline()
                             .gap_2()
-                            .child(div().text_base().font_weight(FontWeight::BOLD).text_color(p.text).child("Comments"))
+                            .child(div().text_base().font_weight(FontWeight::BOLD).text_color(p.text).child(crate::i18n::t("Comments")))
                             .when_some(count, |d, c| d.child(div().text_sm().text_color(p.text2).child(c))),
                     )
                     .child(icon_button("sh-cm-close", "x", cx).on_click(cx.listener(|t, _, _, cx| {
@@ -543,7 +568,7 @@ impl ShortsPage {
             Some(Load::Ready(page)) => {
                 let (list, more) = (page.comments.clone(), page.continuation.clone());
                 if list.is_empty() {
-                    body = body.child(div().text_sm().text_color(p.text2).child("No comments yet."));
+                    body = body.child(div().text_sm().text_color(p.text2).child(crate::i18n::t("No comments yet.")));
                 }
                 for c in &list {
                     body = body.child(self.comment_row(c, false, false, cx));
@@ -557,7 +582,7 @@ impl ShortsPage {
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(p.link)
                             .cursor_pointer()
-                            .child(if self.comments_more { "Loading…" } else { "Show more comments" })
+                            .child(if self.comments_more { crate::i18n::t("Loading…") } else { crate::i18n::t("Show more comments") })
                             .on_click(cx.listener(move |t, _, _, cx| t.load_comment_page(tok.clone(), true, cx))),
                     );
                 }
@@ -603,7 +628,7 @@ impl Render for ShortsPage {
                 .child(if self.loading {
                     spinner(cx).into_any_element()
                 } else {
-                    empty_state("zap", &crate::i18n::t("No Shorts found"), "", cx).into_any_element()
+                    empty_state("zap", "No Shorts found", "", cx).into_any_element()
                 })
                 .into_any_element();
         }
@@ -615,11 +640,9 @@ impl Render for ShortsPage {
         let watch_id = v.id.clone();
         let share_id = v.id.clone();
         let yt_layout = st.shorts_yt_layout;
-        let info_outside = yt_layout && st.shorts_info_position == "outside" && f32::from(ui.viewport.width) >= 980.;
         let nav_edge = yt_layout && st.shorts_nav_edge;
         let show_sub = yt_layout && st.shorts_show_subscribe;
         let show_dislike = !yt_layout || st.shorts_show_dislike;
-        let show_chan_thumb = yt_layout && st.shorts_show_channel_thumb;
 
         let action = |id: &'static str, ic: &'static str, label: String, cx: &App| {
             let p = pal(cx);
@@ -686,7 +709,7 @@ impl Render for ShortsPage {
                         div()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(if info_outside { p.text } else { white() })
+                            .text_color(if yt_layout { p.text } else { white() })
                             .truncate()
                             .child(v.channel_name.clone()),
                     ),
@@ -703,7 +726,6 @@ impl Render for ShortsPage {
             .child(icon_button("sh-up", "arrow-up", cx).size_12().bg(p.chip).when(!can_up, |d| d.opacity(0.3)).on_click(cx.listener(|t, _, window, cx| t.step(-1, window, cx))))
             .child(icon_button("sh-down", "arrow-down", cx).size_12().bg(p.chip).when(!can_down, |d| d.opacity(0.3)).on_click(cx.listener(|t, _, window, cx| t.step(1, window, cx))));
 
-        let cid_badge = cid.clone();
         let mut root = div()
             .id("shorts")
             .relative()
@@ -738,10 +760,11 @@ impl Render for ShortsPage {
                 }
             }));
 
-        if info_outside {
+        if yt_layout {
+            let info_w = if f32::from(ui.viewport.width) >= 1040. { px(280.) } else { px(210.) };
             root = root.child(
                 div()
-                    .w(px(280.))
+                    .w(info_w)
                     .h(h)
                     .flex()
                     .flex_col()
@@ -775,8 +798,7 @@ impl Render for ShortsPage {
                     .relative()
                     .w(w)
                     .h(h)
-                    .when(yt_layout, |d| d.rounded_2xl())
-                    .when(!yt_layout, |d| d.rounded_xl())
+                    .rounded_xl()
                     .overflow_hidden()
                     .bg(black())
                     .child(crate::ui::slot::player_slot(cx))
@@ -785,10 +807,8 @@ impl Render for ShortsPage {
                             .absolute()
                             .left_0()
                             .right_0()
-                            .bottom(px(if yt_layout { 20. } else { 70. }))
+                            .bottom(px(70.))
                             .px_4()
-                            .py_2()
-                            .when(yt_layout, |d| d.bg(hsla(0., 0., 0., 0.35)))
                             .flex()
                             .flex_col()
                             .gap_2()
@@ -843,25 +863,7 @@ impl Render for ShortsPage {
                     )
                     .child(action("sh-watch", "monitor-play", crate::i18n::t("Full"), cx).on_click(move |_, window, cx| {
                         navigate(Route::Watch { id: watch_id.clone(), playlist: None, start: None }, window, cx)
-                    }))
-                    .when(show_chan_thumb, |d| {
-                        d.child(
-                            div()
-                                .id("sh-chan-badge")
-                                .size_10()
-                                .rounded_lg()
-                                .overflow_hidden()
-                                .border_1()
-                                .border_color(p.border)
-                                .cursor_pointer()
-                                .on_click(move |_, window, cx| {
-                                    if let Some(c) = cid_badge.clone() {
-                                        navigate(Route::Channel(c), window, cx);
-                                    }
-                                })
-                                .child(avatar(v.channel_avatar.as_deref(), px(40.), &v.channel_name, cx)),
-                        )
-                    }),
+                    })),
             )
             .when(self.show_comments, |d| {
                 let b = self.comments_bounds.clone();

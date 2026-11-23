@@ -25,11 +25,11 @@ impl Render for DownloadsPage {
             let id = j.id;
             let vid = j.video.id.clone();
             let (status, color): (String, Hsla) = match &j.status {
-                JobStatus::Queued => ("Queued".into(), p.text2),
-                JobStatus::Running => (if j.detail.is_empty() { "Starting…".into() } else { j.detail.clone() }, p.text2),
-                JobStatus::Done(path) => (format!("Saved to {path}"), rgb(0x2ba640).into()),
-                JobStatus::Failed(e) => (format!("Failed: {e}"), rgb(0xff4e45).into()),
-                JobStatus::Cancelled => ("Cancelled".into(), p.text3),
+                JobStatus::Queued => (crate::i18n::t("Queued"), p.text2),
+                JobStatus::Running => (if j.detail.is_empty() { crate::i18n::t("Starting…") } else { j.detail.clone() }, p.text2),
+                JobStatus::Done(path) => (crate::i18n::t(&format!("Saved to {path}")), rgb(0x2ba640).into()),
+                JobStatus::Failed(e) => (crate::i18n::t(&format!("Failed: {e}")), rgb(0xff4e45).into()),
+                JobStatus::Cancelled => (crate::i18n::t("Cancelled"), p.text3),
             };
             let done_path = if let JobStatus::Done(path) = &j.status { Some(path.clone()) } else { None };
             let running = matches!(j.status, JobStatus::Running | JobStatus::Queued);

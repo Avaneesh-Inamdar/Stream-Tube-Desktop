@@ -18,6 +18,19 @@ impl AssetSource for Assets {
             let trimmed = custom.trim();
             if !trimmed.is_empty() {
                 if let Ok(bytes) = std::fs::read(trimmed) {
+                    let ext = std::path::Path::new(trimmed)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    if ext == "ico" {
+                        if let Ok(img) = image::load_from_memory(&bytes) {
+                            let mut png = Vec::new();
+                            if img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).is_ok() {
+                                return Ok(Some(Cow::Owned(png)));
+                            }
+                        }
+                    }
                     return Ok(Some(Cow::Owned(bytes)));
                 }
             }
