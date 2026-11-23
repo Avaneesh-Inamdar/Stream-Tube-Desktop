@@ -195,6 +195,25 @@ fn find_browser() -> Option<(String, PathBuf)> {
     }
     #[cfg(not(windows))]
     {
+        #[cfg(target_os = "macos")]
+        {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let apps = [
+                ("Google Chrome", "Google Chrome.app/Contents/MacOS/Google Chrome"),
+                ("Microsoft Edge", "Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+                ("Brave", "Brave Browser.app/Contents/MacOS/Brave Browser"),
+                ("Chromium", "Chromium.app/Contents/MacOS/Chromium"),
+                ("Vivaldi", "Vivaldi.app/Contents/MacOS/Vivaldi"),
+            ];
+            for (n, rel) in apps {
+                for dir in ["/Applications".to_string(), format!("{home}/Applications")] {
+                    let p = PathBuf::from(&dir).join(rel);
+                    if p.is_file() {
+                        return Some((n.to_string(), p));
+                    }
+                }
+            }
+        }
         let names = [
             ("Google Chrome", "google-chrome"),
             ("Google Chrome", "google-chrome-stable"),
