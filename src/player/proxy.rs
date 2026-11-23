@@ -167,7 +167,7 @@ fn rewrite_master(p: &Proxy, text: &str, max_height: u32, audio_name: Option<&st
         let name_of = |m: &str| crate::api::streams::hls_media_name(m).unwrap_or_default();
         let audio = audio_name
             .and_then(|want| in_group.iter().find(|m| name_of(m) == want))
-            .or_else(|| in_group.iter().find(|m| name_of(m).to_lowercase().contains("original")))
+            .or_else(|| in_group.iter().find(|m| m.contains("acont=original") || m.contains("acont%3Doriginal") || crate::api::streams::is_original_audio_label(&name_of(m))))
             .or_else(|| in_group.iter().find(|m| hls_attr(m, "DEFAULT").as_deref() == Some("YES")))
             .or_else(|| in_group.first())
             .copied();

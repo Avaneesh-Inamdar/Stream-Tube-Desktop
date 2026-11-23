@@ -333,17 +333,20 @@ fn hls_variants(master_url: &str) -> Result<(Vec<StreamFormat>, Vec<StreamFormat
     let mut lines = text.lines();
     while let Some(l) = lines.next() {
         if l.starts_with("#EXT-X-MEDIA") && l.contains("TYPE=AUDIO") {
-            let lang_code = attr(l, "LANGUAGE").unwrap_or_default();
-            let is_orig = l.contains("acont=original") || l.contains("acont%3Doriginal");
+            let lang_code = attr(l, "LANGUAGE").and_then(|c| clean_lang(&c)).unwrap_or_default();
+            let media_name = hls_media_name(l);
+            let is_orig = l.contains("acont=original")
+                || l.contains("acont%3Doriginal")
+                || media_name.as_deref().map(is_original_audio_label).unwrap_or(false);
             if is_orig && !lang_code.is_empty() && hls_orig_lang.is_none() {
                 hls_orig_lang = Some(lang_code.clone());
             }
-            if let Some(name) = hls_media_name(l) {
+            if let Some(name) = media_name {
                 if !audio.iter().any(|a| a.audio_language.as_deref() == Some(name.as_str())) {
                     audio.push(StreamFormat {
                         mime: "audio/hls".into(),
                         is_audio: true,
-                        audio_default: is_orig || name.to_lowercase().contains("original"),
+                        audio_default: is_orig,
                         // the rendition's language code
                         quality_label: lang_code,
                         audio_language: Some(name),
@@ -496,12 +499,38 @@ fn parse_format(f: &Value) -> Option<StreamFormat> {
     })
 }
 
+/// Returns true if an audio track display name marks YouTube's original track
+/// across localized UI languages (English, Turkish, Russian, CJK, Arabic, etc.).
+pub fn is_original_audio_label(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.contains("original")
+        || lower.contains("orijinal")
+        || lower.contains("(orig)")
+        || lower.contains("оригинал")
+        || lower.contains("原声")
+        || lower.contains("オリジナル")
+        || lower.contains("원본")
+        || lower.contains("الأصلية")
+}
+
+/// Validates and normalizes an ISO language code, rejecting placeholders like `"und"` or `"zxx"`.
+fn clean_lang(code: &str) -> Option<String> {
+    let c = code.trim().trim_end_matches("-orig").trim();
+    if c.is_empty() {
+        return None;
+    }
+    let low = c.to_ascii_lowercase();
+    if matches!(low.as_str(), "und" | "zxx" | "mul" | "qaa" | "none" | "unknown") {
+        return None;
+    }
+    Some(c.to_string())
+}
+
 fn extract_xtag_lang(xtags: &str) -> Option<String> {
     xtags
         .split(':')
         .find_map(|part| part.strip_prefix("lang="))
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
+        .and_then(clean_lang)
 }
 
 fn extract_innertube_original_lang(r: &Value) -> Option<String> {
@@ -528,14 +557,13 @@ fn extract_innertube_original_lang(r: &Value) -> Option<String> {
             let lang = track_id
                 .split('.')
                 .next()
-                .filter(|l| !l.is_empty())
-                .map(str::to_string)
+                .and_then(clean_lang)
                 .or_else(|| extract_xtag_lang(xtags));
 
             let Some(lang) = lang else { continue };
 
             if xtags.contains("acont=original")
-                || display.to_lowercase().contains("original")
+                || is_original_audio_label(display)
                 || track_id.ends_with(".4")
             {
                 return Some(lang);
@@ -549,15 +577,29 @@ fn extract_innertube_original_lang(r: &Value) -> Option<String> {
         }
     }
 
-    let def_audio_idx = r
-        .pointer("/captions/playerCaptionsTracklistRenderer/defaultAudioTrackIndex")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
-    r.pointer(&format!("/captions/playerCaptionsTracklistRenderer/audioTracks/{def_audio_idx}/audioTrackId"))
-        .and_then(Value::as_str)
-        .and_then(|id| id.split('.').next())
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
+    if let Some(tracks) = r
+        .pointer("/captions/playerCaptionsTracklistRenderer/audioTracks")
+        .and_then(Value::as_array)
+    {
+        // Prefer canonical original audio track (suffix ".4") over localized defaultAudioTrackIndex
+        if let Some(lang) = tracks.iter().find_map(|tr| {
+            let id = tr.get("audioTrackId").and_then(Value::as_str)?;
+            id.ends_with(".4").then(|| id.split('.').next()).flatten().and_then(clean_lang)
+        }) {
+            return Some(lang);
+        }
+        if tracks.len() == 1 {
+            if let Some(lang) = tracks[0]
+                .get("audioTrackId")
+                .and_then(Value::as_str)
+                .and_then(|id| id.split('.').next())
+                .and_then(clean_lang)
+            {
+                return Some(lang);
+            }
+        }
+    }
+    None
 }
 
 fn parse_player(r: &Value) -> StreamInfo {
@@ -613,10 +655,30 @@ fn parse_player(r: &Value) -> StreamInfo {
         .and_then(Value::as_u64)
         .unwrap_or(0) as usize;
     info.default_caption_index = r
-        .pointer(&format!("/captions/playerCaptionsTracklistRenderer/audioTracks/{def_audio_idx}/defaultCaptionTrackIndex"))
-        .and_then(Value::as_u64)
-        .map(|i| i as usize)
-        .filter(|&i| i < info.captions.len());
+        .pointer("/captions/playerCaptionsTracklistRenderer/audioTracks")
+        .and_then(Value::as_array)
+        .and_then(|tracks| {
+            let orig_track = tracks
+                .iter()
+                .find(|tr| tr.get("audioTrackId").and_then(Value::as_str).map(|id| id.ends_with(".4")).unwrap_or(false))
+                .or_else(|| {
+                    info.original_language.as_deref().and_then(|orig| {
+                        tracks.iter().find(|tr| {
+                            tr.get("audioTrackId")
+                                .and_then(Value::as_str)
+                                .and_then(|id| id.split('.').next())
+                                .map(|l| l.eq_ignore_ascii_case(orig))
+                                .unwrap_or(false)
+                        })
+                    })
+                })
+                .or_else(|| tracks.get(def_audio_idx));
+            orig_track
+                .and_then(|tr| tr.get("defaultCaptionTrackIndex"))
+                .and_then(Value::as_u64)
+                .map(|i| i as usize)
+                .filter(|&i| i < info.captions.len())
+        });
     if let Some(spec) = r
         .pointer("/storyboards/playerStoryboardSpecRenderer/spec")
         .and_then(Value::as_str)
@@ -798,9 +860,15 @@ pub fn ytdlp_streams(video_id: &str) -> Result<StreamInfo> {
     for (lang, tracks, auto) in [("subtitles", &v["subtitles"], false), ("automatic_captions", &v["automatic_captions"], true)] {
         let _ = lang;
         if let Some(m) = tracks.as_object() {
+            let has_orig = auto && m.keys().any(|k| k.ends_with("-orig"));
             for (code, list) in m {
-                if auto && !code.ends_with("-orig") && info.captions.iter().any(|c| c.auto) {
-                    continue; // skip the huge list of auto-translations
+                if auto {
+                    if has_orig && !code.ends_with("-orig") {
+                        continue; // skip the huge list of auto-translations
+                    }
+                    if !has_orig && info.captions.iter().any(|c| c.auto) {
+                        continue;
+                    }
                 }
                 if let Some(vtt) = list.as_array().and_then(|a| a.iter().find(|x| s(x, "/ext").as_deref() == Some("vtt"))) {
                     info.captions.push(CaptionTrack {
@@ -814,7 +882,7 @@ pub fn ytdlp_streams(video_id: &str) -> Result<StreamInfo> {
         }
     }
     info.original_language = s(&v, "/language")
-        .filter(|l| !l.is_empty())
+        .and_then(|l| clean_lang(&l))
         .or_else(|| {
             v.get("formats")
                 .and_then(Value::as_array)
@@ -822,17 +890,18 @@ pub fn ytdlp_streams(video_id: &str) -> Result<StreamInfo> {
                     fmts.iter()
                         .filter(|f| {
                             s(f, "/vcodec").as_deref() == Some("none")
-                                && s(f, "/language").map(|l| !l.is_empty()).unwrap_or(false)
+                                && s(f, "/language").and_then(|l| clean_lang(&l)).is_some()
                         })
                         .max_by_key(|f| f.get("language_preference").and_then(Value::as_i64).unwrap_or(i64::MIN))
                         .and_then(|f| s(f, "/language"))
+                        .and_then(|l| clean_lang(&l))
                 })
         })
         .or_else(|| {
             info.captions
                 .iter()
                 .find(|c| c.auto && c.lang.ends_with("-orig"))
-                .map(|c| c.lang.trim_end_matches("-orig").to_string())
+                .and_then(|c| clean_lang(&c.lang))
         });
     sort_formats(&mut info);
     Ok(info)

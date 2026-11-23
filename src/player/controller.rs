@@ -1158,6 +1158,241 @@ fn pick_for_lang(captions: &[CaptionTrack], target: &str) -> Option<usize> {
         .or_else(|| captions.iter().position(|c| c.auto && lang_matches(&c.lang, target)))
 }
 
+fn base_lang(code: &str) -> String {
+    strip_orig_suffix(code)
+        .split('-')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+/// Strips URLs and handles from text so English links in descriptions don't bias language scoring.
+fn clean_for_lang_detect(text: &str) -> String {
+    let mut out = String::with_capacity(text.len().min(1024));
+    for token in text.split_whitespace().take(180) {
+        let low = token.to_ascii_lowercase();
+        if low.starts_with("http://")
+            || low.starts_with("https://")
+            || low.starts_with("www.")
+            || low.contains(".com")
+            || low.contains(".org")
+            || low.contains(".net")
+            || low.contains("youtu.be")
+            || token.starts_with('@')
+        {
+            continue;
+        }
+        out.push_str(token);
+        out.push(' ');
+    }
+    out
+}
+
+/// Scores how strongly `text` matches a given base ISO language code.
+fn score_text_for_lang(text: &str, base: &str) -> i32 {
+    let mut score = 0i32;
+
+    let mut hangul = 0i32;
+    let mut kana = 0i32;
+    let mut cjk = 0i32;
+    let mut cyrillic = 0i32;
+    let mut uk_chars = 0i32;
+    let mut arabic = 0i32;
+    let mut persian_chars = 0i32;
+    let mut urdu_chars = 0i32;
+    let mut greek = 0i32;
+    let mut hebrew = 0i32;
+    let mut devanagari = 0i32;
+    let mut thai = 0i32;
+    let mut tr_strong = 0i32;
+    let mut tr_soft = 0i32;
+    let mut az_chars = 0i32;
+    let mut es_chars = 0i32;
+    let mut de_chars = 0i32;
+    let mut pt_chars = 0i32;
+    let mut fr_chars = 0i32;
+    let mut pl_chars = 0i32;
+    let mut vi_chars = 0i32;
+
+    for ch in text.chars() {
+        match ch {
+            '\u{AC00}'..='\u{D7AF}' | '\u{1100}'..='\u{11FF}' => hangul += 1,
+            '\u{3040}'..='\u{30FF}' => kana += 1,
+            '\u{4E00}'..='\u{9FFF}' => cjk += 1,
+            '\u{0400}'..='\u{04FF}' => {
+                cyrillic += 1;
+                if matches!(ch, 'ї' | 'Ї' | 'є' | 'Є' | 'і' | 'І' | 'ґ' | 'Ґ') {
+                    uk_chars += 1;
+                }
+            }
+            '\u{0600}'..='\u{06FF}' => {
+                arabic += 1;
+                if matches!(ch, 'پ' | 'چ' | 'ژ' | 'گ' | 'ی' | 'ک') {
+                    persian_chars += 1;
+                }
+                if matches!(ch, 'ٹ' | 'ڈ' | 'ڑ' | 'ں' | 'ے') {
+                    urdu_chars += 1;
+                }
+            }
+            '\u{0370}'..='\u{03FF}' => greek += 1,
+            '\u{0590}'..='\u{05FF}' => hebrew += 1,
+            '\u{0900}'..='\u{097F}' => devanagari += 1,
+            '\u{0E00}'..='\u{0E7F}' => thai += 1,
+            'ğ' | 'Ğ' | 'ş' | 'Ş' | 'ı' | 'İ' => tr_strong += 1,
+            'ç' | 'Ç' | 'ö' | 'Ö' | 'ü' | 'Ü' => tr_soft += 1,
+            'ə' | 'Ə' => az_chars += 1,
+            'ñ' | 'Ñ' | '¿' | '¡' => es_chars += 1,
+            'ß' => de_chars += 2,
+            'ä' | 'Ä' => de_chars += 1,
+            'ã' | 'Ã' | 'õ' | 'Õ' => pt_chars += 1,
+            'é' | 'è' | 'ê' | 'ë' | 'à' | 'ù' | 'ô' | 'î' | 'œ' => fr_chars += 1,
+            'ł' | 'Ł' | 'ś' | 'Ś' | 'ź' | 'Ź' | 'ż' | 'Ż' | 'ć' | 'Ć' | 'ń' | 'Ń' | 'ą' | 'ę' => pl_chars += 1,
+            'ă' | 'đ' | 'ơ' | 'ư' | 'ệ' | 'ộ' | 'ữ' | 'ả' | 'ẻ' | 'ổ' | 'ớ' | 'ờ' | 'ứ' | 'ừ' => vi_chars += 1,
+            _ => {}
+        }
+    }
+
+    match base {
+        "ko" => return hangul * 4,
+        "ja" => return kana * 5 + if kana > 0 { cjk } else { 0 },
+        "zh" => return if kana == 0 && hangul == 0 { cjk * 3 } else { 0 },
+        "ru" => return if uk_chars == 0 { cyrillic * 3 } else { cyrillic },
+        "uk" => return uk_chars * 6 + if uk_chars > 0 { cyrillic } else { 0 },
+        "bg" | "sr" | "be" | "mk" | "kk" | "ky" | "mn" => return cyrillic * 2,
+        "ar" => return if persian_chars == 0 && urdu_chars == 0 { arabic * 3 } else { arabic },
+        "fa" => return persian_chars * 5 + if persian_chars > 0 { arabic } else { 0 },
+        "ur" => return urdu_chars * 5 + if urdu_chars > 0 { arabic } else { 0 },
+        "el" => return greek * 4,
+        "iw" | "he" => return hebrew * 4,
+        "hi" | "mr" | "ne" => return devanagari * 4,
+        "th" => return thai * 4,
+        "az" => score += az_chars * 8 + tr_strong * 2,
+        "tr" => score += tr_strong * 5 + tr_soft,
+        "es" => score += es_chars * 5,
+        "de" => score += de_chars * 4 + tr_soft,
+        "pt" => score += pt_chars * 5,
+        "fr" => score += fr_chars * 2,
+        "pl" => score += pl_chars * 5,
+        "vi" => score += vi_chars * 5,
+        _ => {}
+    }
+
+    let stopwords: &[&str] = match base {
+        "tr" => &[
+            "ve", "bir", "bu", "için", "icin", "ile", "ama", "değil", "degil", "nasıl", "nasil",
+            "nedir", "neden", "gibi", "daha", "çok", "cok", "var", "yok", "ben", "sen", "biz",
+            "siz", "olan", "olarak", "çünkü", "cunku", "kadar", "şimdi", "simdi", "yeni", "bölüm",
+            "bolum", "izle", "kanal", "her", "şey", "sey", "son", "böyle", "boyle", "şu", "su",
+            "benim", "senin", "bizim", "oldu", "olur", "olacak", "yapmak", "yaptım", "yaptim",
+        ],
+        "en" => &[
+            "the", "and", "you", "that", "this", "with", "for", "are", "was", "have", "from",
+            "your", "what", "how", "why", "when", "where", "about", "into", "just", "like",
+            "more", "will", "can", "all", "not", "but", "they", "their", "our", "out", "who",
+            "here", "there", "been", "were", "would", "could", "should", "every",
+        ],
+        "es" => &[
+            "que", "los", "las", "por", "para", "con", "una", "uno", "del", "como", "pero",
+            "más", "mas", "muy", "este", "esta", "todo", "porque", "cuando", "sobre", "desde",
+            "hasta", "donde", "sin", "sus", "ese", "esa", "esto", "qué", "cómo",
+        ],
+        "fr" => &[
+            "les", "des", "une", "pour", "dans", "avec", "pas", "que", "qui", "sur", "est",
+            "sont", "plus", "tout", "mais", "comme", "vous", "nous", "cette", "aussi", "bien",
+            "faire", "aux", "être", "avoir", "comment", "pourquoi",
+        ],
+        "de" => &[
+            "der", "die", "das", "und", "ist", "ein", "eine", "mit", "für", "fur", "auf",
+            "nicht", "von", "den", "dem", "sich", "des", "wie", "auch", "aber", "oder", "wenn",
+            "noch", "nur", "über", "uber", "nach", "wir", "ihr", "warum",
+        ],
+        "pt" => &[
+            "que", "não", "nao", "para", "com", "uma", "por", "mais", "como", "mas", "foi",
+            "são", "sao", "isso", "este", "esta", "você", "voce", "dos", "das", "tem", "muito",
+            "tudo", "pelo", "pela", "porque", "quando",
+        ],
+        "it" => &[
+            "che", "non", "per", "con", "una", "sono", "della", "delle", "degli", "questo",
+            "questa", "come", "più", "piu", "anche", "tutto", "nella", "essere", "stato",
+            "molto", "perché", "perche", "dove",
+        ],
+        "pl" => &[
+            "nie", "się", "sie", "jest", "jak", "tak", "ale", "czy", "dla", "przez", "tylko",
+            "bardzo", "ten", "tego", "tej", "wszystko", "może", "moze", "dlaczego",
+        ],
+        "nl" => &[
+            "het", "een", "van", "voor", "met", "niet", "dat", "zijn", "naar", "ook", "maar",
+            "nog", "wel", "deze", "over", "worden", "mijn", "wat", "waarom",
+        ],
+        "id" | "ms" => &[
+            "yang", "dan", "ini", "untuk", "dengan", "tidak", "dari", "pada", "akan", "bisa",
+            "saya", "kamu", "ada", "juga", "dalam", "atau", "tapi", "kenapa", "bagaimana",
+        ],
+        _ => &[],
+    };
+
+    if !stopwords.is_empty() {
+        for raw_word in text.split(|c: char| !c.is_alphabetic()) {
+            if raw_word.len() < 2 {
+                continue;
+            }
+            let w = raw_word.to_lowercase();
+            if stopwords.contains(&w.as_str()) {
+                score += 3;
+            }
+        }
+    }
+    score
+}
+
+/// Infers which of the available caption languages best matches the video's title and description.
+/// Only returns a language when the match is clear and unambiguous.
+fn infer_caption_lang_from_text(info: &StreamInfo) -> Option<String> {
+    let title = clean_for_lang_detect(&info.title);
+    let desc = clean_for_lang_detect(&info.description);
+    if title.is_empty() && desc.is_empty() {
+        return None;
+    }
+
+    let mut bases: Vec<String> = Vec::new();
+    for c in &info.captions {
+        let b = base_lang(&c.lang);
+        if !b.is_empty() && !bases.contains(&b) {
+            bases.push(b);
+        }
+    }
+    if bases.len() < 2 {
+        return None;
+    }
+
+    let mut best: Option<(String, i32)> = None;
+    let mut second_score = 0i32;
+
+    for b in bases {
+        // Weight title higher than description because descriptions often contain boilerplate/credits
+        let s = score_text_for_lang(&title, &b) * 2 + score_text_for_lang(&desc, &b);
+        match &best {
+            None => best = Some((b, s)),
+            Some((_, bs)) if s > *bs => {
+                second_score = *bs;
+                best = Some((b, s));
+            }
+            Some(_) => {
+                if s > second_score {
+                    second_score = s;
+                }
+            }
+        }
+    }
+
+    let (lang, best_score) = best?;
+    if best_score >= 6 && (best_score >= second_score * 2 || best_score >= second_score + 6) {
+        Some(lang)
+    } else {
+        None
+    }
+}
+
 /// Picks the best caption track index for `pref` (either a language code like `"en"`
 /// or `crate::locale::ORIGINAL_CAPTION_LANG` for the video's original language).
 pub fn pick_caption(info: &StreamInfo, pref: &str) -> Option<usize> {
@@ -1165,11 +1400,46 @@ pub fn pick_caption(info: &StreamInfo, pref: &str) -> Option<usize> {
         return None;
     }
     if pref.eq_ignore_ascii_case(crate::locale::ORIGINAL_CAPTION_LANG) {
+        let text_lang = infer_caption_lang_from_text(info);
+
+        // 1. Explicit original audio language from stream metadata
         if let Some(orig) = info.original_language.as_deref() {
             if let Some(i) = pick_for_lang(&info.captions, orig) {
+                // Guard against background-music misdetection: if `orig` only matched an auto (ASR)
+                // track while the video's title/description clearly matches a MANUAL caption track
+                // in a different language, prefer the manual track.
+                if info.captions[i].auto {
+                    if let Some(tl) = text_lang.as_deref() {
+                        if !lang_matches(orig, tl) {
+                            if let Some(manual_i) = info
+                                .captions
+                                .iter()
+                                .position(|c| !c.auto && lang_matches(&c.lang, tl))
+                            {
+                                return Some(manual_i);
+                            }
+                        }
+                    }
+                }
                 return Some(i);
             }
         }
+
+        // 2. When stream metadata doesn't specify an original language (most single-audio videos),
+        // use title/description language matching BEFORE blindly trusting auto-generated ASR
+        // (which YouTube often misdetects from background music).
+        if let Some(tl) = text_lang.as_deref() {
+            if let Some(i) = pick_for_lang(&info.captions, tl) {
+                return Some(i);
+            }
+        }
+
+        // 3. Uploader / YouTube default caption track for the original audio track
+        if let Some(i) = info.default_caption_index.filter(|&i| i < info.captions.len()) {
+            return Some(i);
+        }
+
+        // 4. Auto-generated original ASR track (preferring a manual caption of the same language)
         if let Some(asr) = info
             .captions
             .iter()
@@ -1180,9 +1450,7 @@ pub fn pick_caption(info: &StreamInfo, pref: &str) -> Option<usize> {
                 return Some(i);
             }
         }
-        if let Some(i) = info.default_caption_index.filter(|&i| i < info.captions.len()) {
-            return Some(i);
-        }
+
         return Some(0);
     }
     pick_for_lang(&info.captions, pref)
@@ -1216,11 +1484,40 @@ pub fn mpv_color(rgb: u32, opacity: u32) -> String {
 
 #[cfg(test)]
 mod caption_tests {
+    use crate::api::types::{CaptionTrack, StreamInfo};
+
     #[::core::prelude::v1::test]
     fn colors() {
         assert_eq!(super::mpv_color(0xFFFF00, 100), "#FFFFFF00");
         assert_eq!(super::mpv_color(0x000000, 75), "#BF000000");
         assert_eq!(super::mpv_color(0x123456, 0), "#00123456");
+    }
+
+    #[::core::prelude::v1::test]
+    fn original_prefers_spoken_over_music_asr() {
+        // Turkish video where background English song caused English ASR
+        let info = StreamInfo {
+            title: "Ev Genci Nedir? Gençler Neden Çalışmıyor?".into(),
+            description: "Bu bölümde yeni neslin sorunlarını konuşuyoruz. https://instagram.com/test".into(),
+            captions: vec![
+                CaptionTrack { lang: "en".into(), name: "English (auto-generated)".into(), url: String::new(), auto: true },
+                CaptionTrack { lang: "tr".into(), name: "Turkish".into(), url: String::new(), auto: false },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(super::pick_caption(&info, "original"), Some(1));
+
+        // English video with Turkish fan translation still picks English ASR
+        let en_info = StreamInfo {
+            title: "How Rockets Work and Why They Don't Fall".into(),
+            description: "In this video we explain how orbital mechanics work for beginners.".into(),
+            captions: vec![
+                CaptionTrack { lang: "en".into(), name: "English (auto-generated)".into(), url: String::new(), auto: true },
+                CaptionTrack { lang: "tr".into(), name: "Turkish".into(), url: String::new(), auto: false },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(super::pick_caption(&en_info, "original"), Some(0));
     }
 }
 
