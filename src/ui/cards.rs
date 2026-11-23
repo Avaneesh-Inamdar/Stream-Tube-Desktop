@@ -126,7 +126,10 @@ pub fn thumbnail(v: &VideoItem, url: String, w: Pixels, h: Pixels, radius: Pixel
         .rounded(radius * (store::settings_snapshot().thumb_radius / 12.0))
         .overflow_hidden()
         .bg(p.surface)
-        .child(img(SharedString::from(url)).size_full().object_fit(ObjectFit::Cover))
+        // the card's ratio: otherwise the image's own (4:3 for letterboxed
+        // sddefault/hqdefault) wins over the size, the image ends up taller than
+        // the card and shows top-aligned with the bottom cut off
+        .child(img(SharedString::from(url)).size_full().aspect_ratio(w / h).object_fit(ObjectFit::Cover))
         .child(crate::player::preview::slot_marker(&v.id, cx))
         .children(badge(v, cx))
         .when_some(progress.filter(|p| *p > 0.01), |d, pr| {
