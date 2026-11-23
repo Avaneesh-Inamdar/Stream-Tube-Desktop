@@ -2,7 +2,7 @@ name: macOS build
 
 on:
   push:
-    branches: [main, community/macos-apple-silicon]
+    branches: [main, community/macos-apple-silicon, codex/macos-0.7.1-alpha]
     paths: ["src/**", "Cargo.toml", "Cargo.lock", "build.rs", "assets/**", "packaging/macos/**", ".github/workflows/macos.yml"]
   pull_request:
   workflow_dispatch:
@@ -16,7 +16,7 @@ env:
 
 jobs:
   macos:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
