@@ -45,7 +45,9 @@
           openssl
           zstd
           sqlite
+          mpv
           glibc
+          noto-fonts
         ];
 
         # Package the binary directly
@@ -55,10 +57,12 @@
 
           src = extracted;
 
+          nativeBuildInputs = with pkgs; [ patchelf ];
+
           installPhase = ''
             mkdir -p $out/bin
-            cp StreamTube-${version}-linux-x86_64/streamtube $out/bin/streamtube
-            chmod +x $out/bin/streamtube
+            cp StreamTube-${version}-linux-x86_64/streamtube $out/bin/streamtube-bin
+            chmod +x $out/bin/streamtube-bin
 
             # Desktop file
             mkdir -p $out/share/applications
@@ -72,6 +76,35 @@
             mkdir -p $out/share/doc/streamtube
             cp StreamTube-${version}-linux-x86_64/LICENSE $out/share/doc/streamtube/
             cp StreamTube-${version}-linux-x86_64/README.md $out/share/doc/streamtube/
+
+            # Create fontconfig configuration that includes noto-fonts
+            mkdir -p $out/etc/fonts/conf.d
+            cat > $out/etc/fonts/fonts.conf << 'FONTCONF_EOF'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <description>Stream Tube font configuration</description>
+  <dir>${pkgs.noto-fonts}/share/fonts</dir>
+  <include ignore_missing="yes">${pkgs.fontconfig}/etc/fonts/conf.d</include>
+  <cachedir prefix="xdg">fontconfig</cachedir>
+</fontconfig>
+FONTCONF_EOF
+
+            # Create wrapper script with fontconfig environment
+            cat > $out/bin/streamtube << 'WRAPPER_EOF'
+#!/bin/sh
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+export FONTCONFIG_FILE="$SCRIPT_DIR/../etc/fonts/fonts.conf"
+export XDG_DATA_DIRS="@fontconfig_share@:@noto_fonts_share@"
+if [ -n "$XDG_DATA_DIRS" ]; then
+  export XDG_DATA_DIRS="$XDG_DATA_DIRS:$XDG_DATA_DIRS"
+fi
+exec "$SCRIPT_DIR/streamtube-bin" "$@"
+WRAPPER_EOF
+            # Substitute store paths
+            sed -i "s|@fontconfig_share@|${pkgs.fontconfig}/share|g" $out/bin/streamtube
+            sed -i "s|@noto_fonts_share@|${pkgs.noto-fonts}/share|g" $out/bin/streamtube
+            chmod +x $out/bin/streamtube
           '';
         };
 
@@ -114,9 +147,18 @@
           check = pkgs.runCommand "check-binary" {
             buildInputs = [ package ];
           } ''
-            # Verify binary exists and has correct permissions
+            # Verify wrapper script exists and binary is present
             test -x ${package}/bin/streamtube
-            echo "Binary installed correctly at ${package}/bin/streamtube" > "$out"
+            test -f ${package}/bin/streamtube-bin
+            # Verify it's a text wrapper (shebang present, not a raw ELF)
+            head -1 ${package}/bin/streamtube | grep -q "#!\(/bin/sh\|/nix/store.*bin/sh\)"
+            # Verify store paths are substituted (not placeholder strings)
+            ! grep -q "@fontconfig_share@" ${package}/bin/streamtube
+            ! grep -q "@noto_fonts_share@" ${package}/bin/streamtube
+            # Verify fonts.conf includes noto-fonts
+            test -f ${package}/etc/fonts/fonts.conf
+            grep -q "noto-fonts" ${package}/etc/fonts/fonts.conf
+            echo "All checks passed" > "$out"
           '';
         };
       }
