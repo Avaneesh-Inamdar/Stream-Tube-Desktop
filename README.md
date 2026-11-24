@@ -164,7 +164,8 @@ These screenshots show Stream Tube running on Apple Silicon macOS. The
 [Stream Tube 0.7.2-alpha macOS branch](https://github.com/wwessex/Stream-Tube-Desktop/tree/codex/macos-0.7.2-alpha)
 contains the community port. Follow the
 [macOS build instructions](https://github.com/wwessex/Stream-Tube-Desktop/blob/codex/macos-0.7.2-alpha/README.md#macos-local-build)
-to build it locally.
+to build it locally. For the verification results, see the
+[macOS release checklist](https://github.com/wwessex/Stream-Tube-Desktop/blob/codex/macos-0.7.2-alpha/README.md#macos-release-checklist).
 
 <p align="center">
   <a href="docs/screenshots/macos-picture-in-picture.png"><img src="docs/screenshots/macos-picture-in-picture.png" alt="Stream Tube on macOS playing Big Buck Bunny in a floating PiP panel while the main window shows Return to player" width="900"></a>
