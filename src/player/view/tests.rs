@@ -1,5 +1,8 @@
 use super::PlayerView;
-use crate::{player::controller, ui::Pal};
+use crate::{
+    player::controller,
+    ui::{Pal, app::UiState},
+};
 use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px, size};
 
 fn open_player(
@@ -11,6 +14,7 @@ fn open_player(
 ) {
     let player = cx.update(|cx| {
         cx.set_global(Pal::new(true, 0x3ea6ff));
+        cx.set_global(UiState::default());
         controller::init(cx);
         let player = controller::player(cx);
         player.update(cx, |player, _| player.duration = 160.0);
