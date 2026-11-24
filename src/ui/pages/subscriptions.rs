@@ -136,7 +136,7 @@ impl Render for FeedPage {
                                 .flex()
                                 .gap_3()
                                 .child(pill("go-signin", Some("circle-user"), "Sign in", cx).on_click(|_, window, cx| crate::ui::app::open_sign_in(window, cx)))
-                                .child(pill("go-import", Some("upload"), "Import subscriptions", cx).on_click(|_, window, cx| navigate(Route::Settings, window, cx))),
+                                .child(pill("go-import", Some("upload"), "Import subscriptions", cx).on_click(|_, window, cx| navigate(Route::settings(), window, cx))),
                         ),
                 )
                 .into_any_element();

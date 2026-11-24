@@ -117,7 +117,7 @@ pub fn start(video: VideoItem, format: Option<String>, cx: &mut App) {
             "Higher quality downloads use yt-dlp",
             vec![
                 (
-                    format!("Get yt-dlp ({YTDLP_SIZE})").into(),
+                    GET_YTDLP.into(),
                     Arc::new(move |_, cx: &mut App| {
                         PENDING.lock().push((video.clone(), Some(fmt.clone())));
                         fetch_ytdlp(cx);
@@ -136,20 +136,15 @@ pub fn start(video: VideoItem, format: Option<String>, cx: &mut App) {
             return;
         }
         let v2 = video.clone();
-        crate::ui::toast_with_actions(
-            cx,
-            "Videos above 360p need FFmpeg to join video and audio",
-            vec![
-                (
-                    format!("Get FFmpeg ({FFMPEG_SIZE})").into(),
-                    Arc::new(move |_, cx: &mut App| {
-                        PENDING.lock().push((video.clone(), Some(fmt.clone())));
-                        fetch_ffmpeg(cx);
-                    }),
-                ),
-                ("Download 360p".into(), Arc::new(move |_, cx: &mut App| start(v2.clone(), Some("single".into()), cx))),
-            ],
-        );
+        let mut actions: Vec<(SharedString, Arc<dyn Fn(&mut Window, &mut App)>)> = Vec::new();
+        if let Some(label) = GET_FFMPEG {
+            actions.push((label.into(), Arc::new(move |_, cx| {
+                PENDING.lock().push((video.clone(), Some(fmt.clone())));
+                fetch_ffmpeg(cx);
+            })));
+        }
+        actions.push(("Download 360p".into(), Arc::new(move |_, cx| start(v2.clone(), Some("single".into()), cx))));
+        crate::ui::toast_with_actions(cx, GET_FFMPEG_HELP, actions);
         return;
     }
     let d = cx.default_global::<Downloads>();
@@ -708,15 +703,35 @@ static PENDING: Mutex<Vec<(VideoItem, Option<String>)>> = Mutex::new(Vec::new())
 
 /// yt-dlp's FFmpeg builds: (repository, release, file). The Linux one is static,
 /// so it runs on any distribution.
-const FFMPEG_ASSET: (&str, &str, &str) = (
-    "yt-dlp/FFmpeg-Builds",
-    "tags/latest",
-    if cfg!(windows) { "ffmpeg-master-latest-win64-gpl-shared.zip" } else { "ffmpeg-master-latest-linux64-gpl.tar.xz" },
-);
+const FFMPEG_ASSET: Option<(&str, &str, &str)> = if cfg!(target_os = "macos") {
+    None
+} else {
+    Some((
+        "yt-dlp/FFmpeg-Builds",
+        "tags/latest",
+        if cfg!(windows) { "ffmpeg-master-latest-win64-gpl-shared.zip" } else { "ffmpeg-master-latest-linux64-gpl.tar.xz" },
+    ))
+};
 
-/// Download sizes shown on the buttons that fetch the tools.
-pub const FFMPEG_SIZE: &str = if cfg!(windows) { "91 MB" } else { "158 MB" };
-pub const YTDLP_SIZE: &str = if cfg!(windows) { "24 MB" } else { "41 MB" };
+pub const GET_FFMPEG: Option<&str> = if cfg!(target_os = "macos") {
+    None
+} else if cfg!(windows) {
+    Some("Get FFmpeg (91 MB)")
+} else {
+    Some("Get FFmpeg (158 MB)")
+};
+pub const GET_FFMPEG_HELP: &str = if cfg!(target_os = "macos") {
+    "Videos above 360p need FFmpeg. Run brew install ffmpeg, then restart Stream Tube."
+} else {
+    "Videos above 360p need FFmpeg to join video and audio"
+};
+pub const GET_YTDLP: &str = if cfg!(target_os = "macos") {
+    "Get yt-dlp"
+} else if cfg!(windows) {
+    "Get yt-dlp (24 MB)"
+} else {
+    "Get yt-dlp (41 MB)"
+};
 
 /// Downloads a file from a GitHub release into `dest`, and keeps it only if it
 /// matches the SHA-256 GitHub lists for it. `release` is "latest" or "tags/<tag>".
@@ -827,6 +842,7 @@ pub fn ffmpeg_path() -> Option<String> {
 
 /// Downloads FFmpeg into the data folder, then starts the downloads waiting for it.
 pub fn fetch_ffmpeg(cx: &mut App) {
+    let Some(asset) = FFMPEG_ASSET else { return };
     if FFMPEG_FETCHING.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -834,13 +850,13 @@ pub fn fetch_ffmpeg(cx: &mut App) {
     toast(cx, "Downloading FFmpeg…");
     repaint_while(&FFMPEG_FETCHING, cx);
     cx.spawn(async move |cx| {
-        let res = crate::ui::blocking(|| -> anyhow::Result<()> {
+        let res = crate::ui::blocking(move || -> anyhow::Result<()> {
             let dir = ffmpeg_dir();
             let tmp = store::data_dir().join("ffmpeg-download");
             let _ = std::fs::remove_dir_all(&tmp);
             std::fs::create_dir_all(&tmp)?;
-            let archive = tmp.join(FFMPEG_ASSET.2);
-            download_github_asset_progress(FFMPEG_ASSET, &archive, Some(&FFMPEG_PCT))?;
+            let archive = tmp.join(asset.2);
+            download_github_asset_progress(asset, &archive, Some(&FFMPEG_PCT))?;
             FFMPEG_PCT.store(UNPACKING, Ordering::SeqCst);
             // Windows 10+ ships bsdtar, which reads zip files; GNU tar unpacks .tar.xz
             let mut c = Command::new("tar");
@@ -898,7 +914,11 @@ pub fn fetch_ffmpeg(cx: &mut App) {
 
 static YTDLP_FETCHING: AtomicBool = AtomicBool::new(false);
 
-const YTDLP_ASSET: (&str, &str, &str) = ("yt-dlp/yt-dlp", "latest", if cfg!(windows) { "yt-dlp.exe" } else { "yt-dlp_linux" });
+const YTDLP_ASSET: (&str, &str, &str) = (
+    "yt-dlp/yt-dlp",
+    "latest",
+    if cfg!(windows) { "yt-dlp.exe" } else if cfg!(target_os = "macos") { "yt-dlp_macos" } else { "yt-dlp_linux" },
+);
 
 /// Downloads yt-dlp into the data folder, then starts the downloads waiting for it.
 pub fn fetch_ytdlp(cx: &mut App) {

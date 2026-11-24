@@ -57,8 +57,6 @@ pub fn forward_to_running(arg: &str) -> bool {
         }
         unsafe { AllowSetForegroundWindow(pid) };
     }
-    #[cfg(not(windows))]
-    let _ = pid;
     if stream.write_all(format!("STREAMTUBE {}\n", arg.replace('\n', " ")).as_bytes()).is_err() {
         return false;
     }
@@ -116,18 +114,24 @@ fn process_alive(pid: u32) -> bool {
             !ok || code == STILL_ACTIVE
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(pid) = i32::try_from(pid) else { return false };
+        // SAFETY: signal 0 queries a positive PID without sending a signal.
+        pid > 0 && (unsafe { libc::kill(pid, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         std::path::Path::new(&format!("/proc/{pid}")).exists() || !std::path::Path::new("/proc/self").exists()
     }
 }
 
 /// Listens for links from later launches; each arrives on the returned channel.
-pub fn listen() -> Option<futures::channel::mpsc::UnboundedReceiver<String>> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).ok()?;
-    let port = listener.local_addr().ok()?.port();
-    std::fs::write(port_file(), format!("{port} {}", std::process::id())).ok()?;
-    let (tx, rx) = futures::channel::mpsc::unbounded();
+pub fn listen(tx: futures::channel::mpsc::UnboundedSender<String>) -> std::io::Result<()> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    std::fs::write(port_file(), format!("{port} {}", std::process::id()))?;
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
@@ -137,14 +141,14 @@ pub fn listen() -> Option<futures::channel::mpsc::UnboundedReceiver<String>> {
                 continue;
             }
             // only our own launches speak this
-            let Some(arg) = line.trim_end().strip_prefix("STREAMTUBE ") else { continue };
+            let Some(arg) = line.trim_end_matches(['\r', '\n']).strip_prefix("STREAMTUBE ") else { continue };
             let _ = (&stream).write_all(b"ok\n");
             if tx.unbounded_send(arg.to_string()).is_err() {
                 break;
             }
         }
     });
-    Some(rx)
+    Ok(())
 }
 
 #[cfg(test)]

@@ -5,17 +5,27 @@
 <h1 align="center">Stream Tube</h1>
 
 <p align="center">
-  A native YouTube client for Windows and Linux, written in Rust.<br>
+  A native YouTube client for Windows, Linux and Apple Silicon Macs, written in Rust.<br>
   No browser, no ads, no tracking. SponsorBlock, DeArrow and Return YouTube Dislike built in.
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-0078D6" alt="Windows and Linux">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D6" alt="Windows, Linux and macOS">
   <img src="https://img.shields.io/github/v/release/Avaneesh-Inamdar/Stream-Tube-Desktop?include_prereleases&sort=semver&label=release" alt="Latest release">
   <a href="https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop/releases"><img src="https://img.shields.io/github/downloads/Avaneesh-Inamdar/Stream-Tube-Desktop/total?label=downloads&color=FF0033&cacheSeconds=3600" alt="Total downloads"></a>
   <img src="https://img.shields.io/badge/built%20with-Rust-B7410E" alt="Rust">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
 </p>
+
+> [!WARNING]
+> **Community branch — not maintained or tested by the project owner.**
+> The macOS (Apple Silicon) support on this branch was contributed by
+> [William Wessex](https://github.com/wwessex) ([pull request #22](https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop/pull/22)).
+> The maintainer doesn't have a Mac, so keeping this branch up to date with each
+> release and packaging it was done with the help of AI.
+> It has not been built, run or reviewed on a Mac by the maintainer, it is not part
+> of any official release, and it may lag behind `main`. Use it at your own risk.
+> Official builds are Windows and Linux only.
 
 <p align="center">
   <a href="#macos-preview">See Stream Tube running on Apple Silicon macOS</a>
@@ -87,8 +97,10 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 **Your data stays yours**
 - Subscriptions can live locally. The feed is built by fetching each channel directly, no account needed
 - Or sign in with your Google account to get your own Home feed, subscriptions, playlists, likes and subscribe button
+- The top-bar **Sign in** label and icon follow your selected accent. Their shade adjusts to maintain at least **4.5:1** contrast at rest and on hover in Light and Dark modes
 - Watch history and search history from your other devices sync in, with resume positions, and single entries can be removed
 - Connect your YouTube history (*Settings → General*) and it works the other way too: videos you watch in Stream Tube show up in your YouTube history, and your phone or TV resumes them where you stopped. You sign in once in a browser window with a fresh profile (Chrome, Edge, Brave or Chromium) that closes and is deleted afterwards, or load a `cookies.txt` file instead
+- On Apple Silicon, this branch also offers an [experimental Safari watch-history connection](#safari-watch-history-prototype) for a signed-in YouTube tab
 - History, watch later, favourites and playlists are stored in a local SQLite database, and you can pause or clear history at any time
 - Import from YouTube Takeout, NewPipe, FreeTube or OPML. Export to NewPipe JSON, YouTube CSV, OPML or a full backup
 
@@ -131,8 +143,9 @@ every process involved, after browsing a few pages.
 Stream Tube uses less than half the RAM of the browser, and it stays flat as you
 browse: thumbnails are kept at the size they're drawn and the ones you've scrolled
 past are freed. While playing, part of the memory is a read-ahead buffer that keeps
-seeking instant. Turn on *Settings → Player → Hardware decoding* to decode video on
-the GPU like the browser does. Results depend on the video, resolution and hardware.
+seeking instant. Enable *Settings → Player → Hardware decoding* and restart the app
+to use the system video decoder when available. Results depend on the video,
+resolution and hardware.
 
 ## Screenshots
 
@@ -251,6 +264,13 @@ Downloads above 360p need yt-dlp and FFmpeg. The app offers to fetch both the fi
 time you need them, on Windows and Linux, or get them any time from *Settings → Downloads*.
 You can also install them with your package manager instead.
 
+**macOS (Apple Silicon preview).** Install mpv with `brew install mpv`, then
+extract `StreamTube-<version>-macos-arm64.zip` if it is available for the release.
+The bundle uses Homebrew's libmpv at runtime. GitHub builds are ad hoc signed.
+Standard Gatekeeper acceptance of a downloaded app requires
+[Developer ID signing and notarisation](https://developer.apple.com/developer-id/).
+The [local build instructions](#macos-local-build) also produce a runnable bundle.
+
 ### Verifying a download
 
 Every file on a release is built by the public [Release workflow](.github/workflows/release.yml)
@@ -297,10 +317,80 @@ ISCC.exe /DAppVersion=0.7.2-alpha installer\streamtube.iss
 It lands in `dist\`. On Linux, install the packages listed in
 [`.github/workflows/linux.yml`](.github/workflows/linux.yml) and run `cargo build --release`.
 
+### macOS local build
+
+Install Xcode and the Homebrew `mpv` formula. The formula also supplies FFmpeg and
+yt-dlp. Use Rust 1.100.0, or a newer stable toolchain compatible with `Cargo.lock`.
+
+```sh
+brew install mpv
+rustup toolchain install 1.100.0 --profile minimal
+RUSTUP_TOOLCHAIN=1.100.0 bash packaging/macos/build-app.sh
+```
+
+Run these commands from the repository root in a native Apple Silicon shell.
+The script prints the path to the ad hoc-signed `Stream Tube.app` under
+`dist/macos/`. The app uses Homebrew's libmpv on the Mac where it runs.
+Rebuild from source to update a local build.
+For a checkout in a synchronised folder, you can pass a local output directory
+as the script's first argument, for example `"$HOME/Downloads/StreamTube-builds"`.
+
+The [macOS build workflow](.github/workflows/macos.yml) builds and tests the
+Apple Silicon bundle on GitHub. It uploads a ZIP as a workflow artifact. Tagged
+release builds collect that ZIP in the project's draft release.
+
+#### Safari watch-history prototype
+
+For Safari-only watch-history sync, build the separate **Stream Tube Safari
+Prototype.app** with its embedded extension and follow the [build and connection
+instructions](packaging/macos/safari-history/README.md). You grant the extension
+access to `www.youtube.com` and choose when to connect a signed-in tab. The app
+keeps the Safari session in memory until you disconnect or quit.
+
+The player queues a final watch-time report when you close it or exit Stream
+Tube. [Opt-in playback diagnostics](packaging/macos/safari-history/README.md#playback-diagnostics)
+show playback timing, state and HTTP status. In the [verified quit and resume
+test](packaging/macos/safari-history/README.md#verified-quit-and-resume), Safari
+opened the video directly from YouTube Watch History at the reported position
+to the whole second.
+
+#### macOS release checklist
+
+The following foreground checks passed on Apple Silicon for **0.7.2-alpha**
+(`c48a333`). [GitHub Actions build](https://github.com/wwessex/Stream-Tube-Desktop/actions/runs/45294866908)
+and [Apple Silicon ZIP](https://github.com/wwessex/Stream-Tube-Desktop/actions/runs/45294866908/artifacts/14875972585).
+
+- [x] Open **Settings** from the **Stream Tube** menu and with **⌘,**. Both open
+  General settings. **About** opens the About section directly.
+- [x] Open picture-in-picture (PiP) while playing a YouTube video. The main
+  window shows the PiP placeholder. **Return to player** restores the main
+  video at the PiP position and preserves both playing and paused states.
+- [x] With PiP open, enter and exit native fullscreen in TextEdit. PiP is visible
+  above TextEdit before fullscreen, in its fullscreen Space, and after returning
+  to the original Space.
+
+#### Check hardware decoding
+
+Enable *Settings → Player → Hardware decoding*, restart Stream Tube, and play a
+video. Open *Stats for nerds* from the right-click menu or press Shift+I. A
+**Hardware decoding** value of `videotoolbox-copy` means libmpv is using Apple's
+VideoToolbox decoder. libmpv copies the decoded frames into system memory for
+the app's software render path. If a codec or format is unavailable in hardware,
+libmpv falls back to software decoding.
+
+To check the same render path without opening a window, use a local H.264 video
+and run the opt-in software and VideoToolbox tests:
+
+```sh
+STREAMTUBE_MPV_TEST_VIDEO="/absolute/path/to/video.mp4" \
+  cargo +1.100.0 test --release --locked player::mpv::tests:: -- --ignored --nocapture
+```
+
 ## Where things are stored
 
 History and subscriptions go in `%APPDATA%\StreamTube\streamtube.db` on
-Windows and `~/.local/share/StreamTube/streamtube.db` on Linux. Settings (content
+Windows, `~/.local/share/StreamTube/streamtube.db` on Linux and
+`~/Library/Application Support/StreamTube/streamtube.db` on macOS. Settings (content
 filters, SponsorBlock choices and everything else) are kept in `settings.json` in the
 same folder, so they survive updates and signing out. If the database is ever
 damaged, it is rebuilt from what can still be read at the next start, and the
@@ -325,7 +415,7 @@ src/
 
 - YouTube sometimes answers with "Sign in to confirm you're not a bot". When that
   happens, signing in inside the app or updating yt-dlp usually fixes it.
-- Windows is the main platform. The Linux build is new and less tested; macOS isn't built yet.
+- Windows is the main platform. The Linux build is new and less tested. macOS has a local build path.
 
 ## Contributing
 

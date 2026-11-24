@@ -15,6 +15,8 @@ cargo build --release
 cargo test --release
 ```
 
+For Apple Silicon, see the [macOS build and playback checks](README.md#macos-local-build).
+
 ## Making a change
 
 - **One change per pull request.** A bug fix and an unrelated feature are two PRs.
@@ -40,9 +42,9 @@ cargo test --release
 
 ## Pull request checks
 
-Every pull request is built and tested on Windows and Linux. The Linux check also
-builds the `.deb`, `.rpm` and AppImage. A PR needs both checks to pass before it
-can be merged.
+Pull requests are built and tested on Windows, Linux and Apple Silicon macOS.
+The Linux check builds the `.deb`, `.rpm` and AppImage. The macOS check uploads
+an ad hoc-signed ZIP of the app bundle.
 
 ## Reporting bugs
 

@@ -24,11 +24,15 @@ pub enum Route {
     Search(String),
     Channel(String),
     Watch { id: String, playlist: Option<String>, start: Option<f64> },
-    Settings,
+    Settings(settings::Section),
     Downloads,
 }
 
 impl Route {
+    pub fn settings() -> Self {
+        Self::Settings(settings::Section::General)
+    }
+
     fn title(&self) -> String {
         match self {
             Route::Home => "Home".into(),
@@ -42,7 +46,7 @@ impl Route {
             Route::Search(q) => q.clone(),
             Route::Channel(_) => "Channel".into(),
             Route::Watch { .. } => "Watch".into(),
-            Route::Settings => "Settings".into(),
+            Route::Settings(_) => "Settings".into(),
             Route::Downloads => "Downloads".into(),
         }
     }
@@ -51,7 +55,8 @@ impl Route {
 #[derive(Clone, Copy, Default)]
 pub struct UiState {
     pub theater: bool,
-    pub fullscreen: bool,
+    #[cfg(not(target_os = "macos"))]
+    fullscreen: bool,
     pub sidebar_open: bool,
     pub content_width: Pixels,
     pub viewport: Size<Pixels>,
@@ -133,6 +138,10 @@ pub fn navigate(route: Route, window: &mut Window, cx: &mut App) {
         open_in_new_tab(route, false, window, cx);
         return;
     }
+    navigate_in_current_tab(route, window, cx);
+}
+
+pub(crate) fn navigate_in_current_tab(route: Route, window: &mut Window, cx: &mut App) {
     if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
         app.update(cx, |a, cx| a.go(route, window, cx));
     }
@@ -153,25 +162,42 @@ pub fn go_back(window: &mut Window, cx: &mut App) {
 
 /// Leaves the watch page while keeping playback (mini player).
 pub fn go_back_keep_playing(window: &mut Window, cx: &mut App) {
-    if cx.global::<UiState>().fullscreen {
-        toggle_fullscreen(window, cx);
-    }
     if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
         app.update(cx, |a, cx| {
-            if a.history.is_empty() {
-                a.go(Route::Home, window, cx);
-            } else {
+            if let Some((previous, _)) = a.history.last() {
+                if matches!(previous, Route::Watch { .. }) && is_fullscreen(window, cx) {
+                    toggle_fullscreen(window, cx);
+                }
                 a.back(window, cx);
+            } else {
+                a.go(Route::Home, window, cx);
             }
         });
     }
 }
 
+pub fn is_fullscreen(_window: &Window, _cx: &App) -> bool {
+    // The green traffic light can change fullscreen without a player action.
+    #[cfg(target_os = "macos")]
+    return _window.is_fullscreen();
+    #[cfg(not(target_os = "macos"))]
+    return _cx.global::<UiState>().fullscreen;
+}
+
 pub fn toggle_fullscreen(window: &mut Window, cx: &mut App) {
     window.toggle_fullscreen();
-    let ui = cx.global_mut::<UiState>();
-    ui.fullscreen = !ui.fullscreen;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let ui = cx.global_mut::<UiState>();
+        ui.fullscreen = !ui.fullscreen;
+    }
     cx.refresh_windows();
+}
+
+pub fn is_current_page(id: EntityId, cx: &App) -> bool {
+    cx.try_global::<AppHandle>()
+        .and_then(|handle| handle.0.upgrade())
+        .is_some_and(|app| app.read(cx).page.entity_id() == id)
 }
 
 /// Called by the player when the queue advances so the watch page follows.
@@ -310,7 +336,7 @@ pub fn import_web_cookies(cx: &mut App) {
                 });
             }
             match res {
-                Ok(name) => toast(cx, format!("Connected as {name}. What you watch now shows in your YouTube history.")),
+                Ok(name) => toast(cx, format!("Watch history connected as {name}.")),
                 Err(e) => toast(cx, crate::ui::friendly_error(&format!("{e:#}"))),
             }
             cx.refresh_windows();
@@ -716,37 +742,94 @@ impl AppView {
     }
 
     fn start_web_sign_in(&mut self, cx: &mut Context<Self>) {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        if let Some(c) = self.web_login.cancel.take() {
-            c.store(true, Ordering::Relaxed);
+        self.reset_web_sign_in();
+        let Some((browser, executable)) = crate::api::web::find_browser() else {
+            #[cfg(target_os = "macos")]
+            if crate::api::safari::available() {
+                self.start_safari_sign_in(cx);
+                return;
+            }
+            self.web_login.error = Some(
+                "YouTube watch history sign-in requires Chrome, Edge, Brave or Chromium. Install a supported browser, then choose Try again."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        };
+        self.run_web_sign_in(browser, move |cancel| crate::api::web::browser_sign_in(executable, cancel), || {}, cx);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn start_safari_sign_in(&mut self, cx: &mut Context<Self>) {
+        use crate::api::safari::Pending;
+
+        self.reset_web_sign_in();
+        let pending = match Pending::new() {
+            Ok(pending) => pending,
+            Err(_) => {
+                self.web_login.error = Some("Couldn't start the Safari connection. Please try again.".into());
+                cx.notify();
+                return;
+            }
+        };
+        let request = pending.request();
+        self.run_web_sign_in(
+            "Safari".into(),
+            move |cancel| {
+                Pending::open_safari()?;
+                pending.wait(&cancel)
+            },
+            move || request.notify_extension(),
+            cx,
+        );
+    }
+
+    fn reset_web_sign_in(&mut self) {
+        if let Some(cancel) = self.web_login.cancel.take() {
+            cancel.store(true, std::sync::atomic::Ordering::Release);
         }
         self.web_login.attempt += 1;
+        self.dialog = Some(Dialog::WebSignIn);
+        self.web_login.error = None;
+        self.web_login.browser = None;
+    }
+
+    fn run_web_sign_in(
+        &mut self,
+        browser: String,
+        connect: impl FnOnce(Arc<std::sync::atomic::AtomicBool>) -> anyhow::Result<String> + Send + 'static,
+        heartbeat: impl Fn() + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
         let attempt = self.web_login.attempt;
         let cancel = Arc::new(AtomicBool::new(false));
         self.web_login.cancel = Some(cancel.clone());
-        self.web_login.error = None;
-        self.web_login.browser = crate::api::web::browser_name();
-        self.dialog = Some(Dialog::WebSignIn);
+        self.web_login.browser = Some(browser);
         cx.notify();
-        // closing the dialog any way at all stops the sign-in and closes the browser
+        // Closing the dialog ends the connection attempt.
         let watch = cancel.clone();
         cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(std::time::Duration::from_millis(700)).await;
             if watch.load(Ordering::Relaxed) {
                 return;
             }
-            let open = this.update(cx, |t, _| t.web_login.attempt == attempt && matches!(t.dialog, Some(Dialog::WebSignIn))).unwrap_or(false);
+            let open = this.update(cx, |t, _| {
+                t.web_login.attempt == attempt && t.web_login.cancel.is_some() && matches!(t.dialog, Some(Dialog::WebSignIn))
+            }).unwrap_or(false);
             if !open {
-                watch.store(true, Ordering::Relaxed);
+                watch.store(true, Ordering::Release);
                 return;
             }
+            heartbeat();
         })
         .detach();
         cx.spawn(async move |this, cx| {
             let c2 = cancel.clone();
-            let res = blocking(move || crate::api::web::browser_sign_in(c2)).await;
+            let res = blocking(move || connect(c2)).await;
             let _ = this.update(cx, |t, cx| {
-                if t.web_login.attempt != attempt {
+                if t.web_login.attempt != attempt || cancel.load(Ordering::Acquire) {
                     return;
                 }
                 t.web_login.cancel = None;
@@ -755,14 +838,10 @@ impl AppView {
                         if matches!(t.dialog, Some(Dialog::WebSignIn)) {
                             t.dialog = None;
                         }
-                        toast(cx, format!("Connected as {name}. What you watch now shows in your YouTube history."));
+                        toast(cx, format!("Watch history connected as {name}."));
                         cx.refresh_windows();
                     }
-                    Err(e) => {
-                        if !cancel.load(Ordering::Relaxed) {
-                            t.web_login.error = Some(crate::ui::friendly_error(&format!("{e:#}")));
-                        }
-                    }
+                    Err(e) => t.web_login.error = Some(crate::ui::friendly_error(&format!("{e:#}"))),
                 }
                 cx.notify();
             });
@@ -772,7 +851,8 @@ impl AppView {
 
     fn render_web_sign_in(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = pal(cx);
-        let browser = self.web_login.browser.clone().unwrap_or_else(|| "browser".into());
+        let browser = self.web_login.browser.as_deref().unwrap_or("browser");
+        let safari = browser == "Safari";
         let mut col = div().flex().flex_col().gap_4().child(
             div()
                 .flex()
@@ -797,20 +877,28 @@ impl AppView {
             cx.notify();
         }));
         if let Some(err) = &self.web_login.error {
-            col = col.child(div().text_sm().text_color(p.text2).child(err.clone())).child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(cookies_link)
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(cancel)
-                            .child(pill("wsi-retry", Some("refresh-cw"), "Try again", cx).on_click(cx.listener(|this, _, _, cx| this.start_web_sign_in(cx)))),
-                    ),
-            );
+            col = col
+                .child(div().text_sm().text_color(p.text2).child(err.clone()))
+                .when(self.web_login.browser.is_none() && !safari, |d| {
+                    d.child(div().flex().child(
+                        pill("wsi-chrome", Some("external-link"), "Get Chrome", cx)
+                            .on_click(|_, _, _| open_web("https://www.google.com/chrome/")),
+                    ))
+                })
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(cookies_link)
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(cancel)
+                                .child(pill("wsi-retry", Some("refresh-cw"), "Try again", cx).on_click(cx.listener(|this, _, _, cx| this.start_web_sign_in(cx)))),
+                        ),
+                );
         } else {
             col = col
                 .child(
@@ -820,12 +908,20 @@ impl AppView {
                         .gap_2()
                         .text_sm()
                         .text_color(p.text2)
-                        .child(format!("Sign in to YouTube in the {browser} window that opened. It closes by itself when you're done."))
+                        .child(if safari {
+                            "In Safari, sign in to YouTube. Open the Stream Tube Watch History extension on the YouTube tab and choose Connect this YouTube session.".into()
+                        } else {
+                            format!("Sign in to YouTube in the {browser} window that opened. It closes by itself when you're done.")
+                        })
                         .child(
                             div()
                                 .text_xs()
                                 .text_color(p.text3)
-                                .child("Videos you watch in Stream Tube then show in your YouTube history, and your phone and TV resume them where you stopped. The window uses its own empty profile, which is deleted afterwards."),
+                                .child(if safari {
+                                    "Enable the extension in Safari and grant it access to YouTube. The connection lasts until you quit Stream Tube or disconnect."
+                                } else {
+                                    "Videos you watch in Stream Tube then show in your YouTube history, and your phone and TV resume them where you stopped. The window uses its own empty profile, which is deleted afterwards."
+                                }),
                         ),
                 )
                 .child(
@@ -837,6 +933,13 @@ impl AppView {
                         .child(cancel),
                 )
                 .child(cookies_link);
+        }
+        #[cfg(target_os = "macos")]
+        if !safari && crate::api::safari::available() {
+            col = col.child(div().flex().child(
+                pill("wsi-safari", Some("globe"), "Use Safari", cx)
+                    .on_click(cx.listener(|this, _, _, cx| this.start_safari_sign_in(cx))),
+            ));
         }
         col.into_any_element()
     }
@@ -964,10 +1067,10 @@ impl AppView {
                 .border_color(p.border)
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(p.link)
+                .text_color(p.accent_text)
                 .cursor_pointer()
                 .hover(move |s| s.bg(p.hover))
-                .child(icon("circle-user").size_5().text_color(p.link))
+                .child(icon("circle-user").size_5().text_color(p.accent_text))
                 .child("Sign in")
                 .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx)))
                 .into_any_element();
@@ -1015,7 +1118,7 @@ impl AppView {
                     MenuItem::new("history", "History", |window, cx| navigate(Route::History, window, cx)),
                     MenuItem::new("list-video", "Playlists", |window, cx| navigate(Route::Library, window, cx)),
                     MenuItem::new("download", "Downloads", |window, cx| navigate(Route::Downloads, window, cx)),
-                    MenuItem::new("settings", "Settings", |window, cx| navigate(Route::Settings, window, cx)),
+                    MenuItem::new("settings", "Settings", |window, cx| navigate(Route::settings(), window, cx)),
                     MenuItem::new("refresh-cw", "Sync subscriptions", |_, cx| {
                         cx.spawn(async move |cx| {
                             let res = blocking(crate::api::auth::sync_subscriptions).await;
@@ -1061,9 +1164,7 @@ impl AppView {
             }
             return;
         }
-        if cx.global::<UiState>().fullscreen && !matches!(route, Route::Watch { .. }) {
-            toggle_fullscreen(window, cx);
-        }
+        self.leave_watch_fullscreen(&route, window, cx);
         let page = build_page(&route, window, cx);
         let old_route = std::mem::replace(&mut self.route, route);
         let old_page = std::mem::replace(&mut self.page, page);
@@ -1120,6 +1221,7 @@ impl AppView {
         // and show the other one
         self.active_tab = index;
         let next = self.tabs[index].clone();
+        self.leave_watch_fullscreen(&next.route, window, cx);
         self.route = next.route;
         self.history = next.history;
         self.forward = next.forward;
@@ -1131,9 +1233,6 @@ impl AppView {
             Some(p) if !stale => p,
             _ => build_page(&self.route.clone(), window, cx),
         };
-        if cx.global::<UiState>().fullscreen && !matches!(self.route, Route::Watch { .. }) {
-            toggle_fullscreen(window, cx);
-        }
         window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
         window.focus(&self.focus, cx);
         cx.notify();
@@ -1185,7 +1284,7 @@ impl AppView {
             Route::Search(_) => "search",
             Route::Channel(_) => "circle-user",
             Route::Watch { .. } => "play",
-            Route::Settings => "settings",
+            Route::Settings(_) => "settings",
             Route::Downloads => "download",
         }
     }
@@ -1292,6 +1391,7 @@ impl AppView {
 
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((r, p)) = self.history.pop() {
+            self.leave_watch_fullscreen(&r, window, cx);
             let cur_r = std::mem::replace(&mut self.route, r);
             let cur_p = std::mem::replace(&mut self.page, p);
             self.forward.push((cur_r, cur_p));
@@ -1309,11 +1409,18 @@ impl AppView {
 
     pub fn forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((r, p)) = self.forward.pop() {
+            self.leave_watch_fullscreen(&r, window, cx);
             let cur_r = std::mem::replace(&mut self.route, r);
             let cur_p = std::mem::replace(&mut self.page, p);
             self.history.push((cur_r, cur_p));
             window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
             cx.notify();
+        }
+    }
+
+    fn leave_watch_fullscreen(&self, next: &Route, window: &mut Window, cx: &mut App) {
+        if matches!(self.route, Route::Watch { .. }) && !matches!(next, Route::Watch { .. }) && is_fullscreen(window, cx) {
+            toggle_fullscreen(window, cx);
         }
     }
 
@@ -1703,12 +1810,13 @@ impl AppView {
         let dialog_focused = self.dialog_input.read(cx).focus_handle(cx).is_focused(window);
         let k = ev.keystroke.key.as_str();
         let m = &ev.keystroke.modifiers;
-        if k == "f5" || (m.control && k == "r" && !search_focused && !dialog_focused) {
+        let primary = if cfg!(target_os = "macos") { m.platform } else { m.control };
+        if k == "f5" || (primary && k == "r" && !search_focused && !dialog_focused) {
             self.refresh(window, cx);
             return;
         }
-        // tabs: Ctrl+T new, Ctrl+W close, Ctrl+Tab / Ctrl+Shift+Tab next / previous, Ctrl+1..9 pick
-        if m.control && !m.alt {
+        // Use Command for tab shortcuts on macOS, with Control+Tab for cycling.
+        if (primary || (m.control && k == "tab")) && !m.alt {
             match k {
                 "t" if !m.shift => {
                     self.new_tab(Route::Home, true, window, cx);
@@ -1716,6 +1824,11 @@ impl AppView {
                 }
                 "w" if !m.shift && self.tabs.len() > 1 => {
                     self.close_tab(self.active_tab, window, cx);
+                    return;
+                }
+                "w" if cfg!(target_os = "macos") && !m.shift => {
+                    crate::save_window_bounds(window);
+                    window.remove_window();
                     return;
                 }
                 "tab" => {
@@ -1728,7 +1841,7 @@ impl AppView {
                 }
                 d if self.tabs.len() > 1 && matches!(d, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9") => {
                     let n: usize = d.parse().unwrap_or(1);
-                    // Ctrl+9 is the last tab, as in browsers
+                    // As in browsers, the 9 shortcut selects the last tab.
                     let i = if n == 9 { self.tabs.len() - 1 } else { (n - 1).min(self.tabs.len() - 1) };
                     self.switch_tab(i, window, cx);
                     return;
@@ -1758,7 +1871,7 @@ impl AppView {
                 cx.notify();
                 return;
             }
-            if cx.global::<UiState>().fullscreen {
+            if is_fullscreen(window, cx) {
                 toggle_fullscreen(window, cx);
                 return;
             }
@@ -1786,7 +1899,7 @@ impl AppView {
             self.forward(window, cx);
             return;
         }
-        if m.control && (k == "l" || k == "k") || k == "/" {
+        if primary && (k == "l" || k == "k") || k == "/" {
             let fh = self.search.read(cx).focus_handle(cx);
             window.focus(&fh, cx);
             return;
@@ -2131,10 +2244,10 @@ impl AppView {
                     .items_center()
                     .gap_1()
                     .child(self.render_dl_button(cx))
-                    .child(icon_button("settings", "settings", cx).on_click(cx.listener(|this, _, window, cx| this.go(Route::Settings, window, cx))))
+                    .child(icon_button("settings", "settings", cx).on_click(cx.listener(|this, _, window, cx| this.go(Route::settings(), window, cx))))
                     .child(self.account_button(cx))
                     .child(div().id("drag-c").w_3().h(px(56.)).window_control_area(WindowControlArea::Drag))
-                    .child(window_controls(maximized, cx)),
+                    .when(!cfg!(target_os = "macos"), |d| d.child(window_controls(maximized, cx))),
             )
     }
 
@@ -2314,7 +2427,7 @@ impl AppView {
         }
         col = col
             .child(sep())
-            .child(entry("s-set", "settings", "Settings", Route::Settings, route == Route::Settings, cx));
+            .child(entry("s-set", "settings", "Settings", Route::settings(), matches!(route, Route::Settings(_)), cx));
         col.into_any_element()
     }
 
@@ -2973,7 +3086,7 @@ impl Render for AppView {
             u.viewport = vp;
             u.content_width = vp.width - px(sidebar_w) - px(48.);
         }
-        let fullscreen = ui.fullscreen && is_watch;
+        let fullscreen = is_watch && is_fullscreen(window, cx);
         let mut root = div()
             .image_cache(self.images.clone())
             .id("app-root")
@@ -2997,6 +3110,7 @@ impl Render for AppView {
                 cx.listener(|this, _, window, cx| this.forward(window, cx)),
             );
         let has_slot = matches!(self.route, Route::Watch { .. } | Route::Shorts(_));
+        let pip_open = crate::ui::pip::handle(cx).is_some();
         let page_area = div()
             .relative()
             .overflow_hidden()
@@ -3011,14 +3125,14 @@ impl Render for AppView {
                         |d, t| d.opacity(0.35 + 0.65 * t),
                     ),
             )
-            .when(has_slot, |d| d.child(crate::ui::slot::SlotFollower::new(cx, self.main_view.clone().into())))
+            .when(has_slot, |d| d.child(crate::ui::pip::main_surface(&self.main_view, cx)))
             // only over a thumbnail drawn on this page (the slot is cleared when a
             // preview stops or moves to another video)
             .when(
                 crate::player::preview::showing(cx).is_some() && cx.global::<crate::player::preview::PreviewSlot>().0.get().is_some(),
                 |d| {
                     let slot = cx.global::<crate::player::preview::PreviewSlot>().0.clone();
-                    d.child(crate::ui::slot::SlotFollower::with_slot(slot, self.preview_view.clone().into()))
+                    d.child(crate::ui::slot::SlotFollower::with_slot(slot, self.preview_view.clone()))
                 },
             );
         if fullscreen {
@@ -3043,7 +3157,9 @@ impl Render for AppView {
                 let vp = window.viewport_size();
                 self.mini_geom = clamp_mini(self.mini_geom, vp.width.into(), vp.height.into());
             }
-            root = root.children(self.render_mini_player(cx)).children(self.render_mini_drag(cx));
+            if !pip_open {
+                root = root.children(self.render_mini_player(cx)).children(self.render_mini_drag(cx));
+            }
             root = root.children(self.render_drawer(cx));
         }
         root = root.children(self.render_dl_panel(cx));
@@ -3093,6 +3209,10 @@ fn strip_download_section(notes: &str) -> String {
 pub fn restore_window(window: &mut Window) {
     if !window_minimized(window) {
         return;
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(window) = crate::macos::native_window(window) {
+        window.deminiaturize(None);
     }
     #[cfg(windows)]
     {
@@ -3174,7 +3294,7 @@ fn build_page(route: &Route, window: &mut Window, cx: &mut App) -> AnyView {
         Route::Watch { id, playlist, start } => {
             cx.new(|cx| watch::WatchPage::new(id.clone(), playlist.clone(), *start, window, cx)).into()
         }
-        Route::Settings => cx.new(|cx| settings::SettingsPage::new(window, cx)).into(),
+        Route::Settings(section) => cx.new(|cx| settings::SettingsPage::new(*section, window, cx)).into(),
         Route::Downloads => cx.new(|cx| downloads::DownloadsPage::new(window, cx)).into(),
     }
 }
@@ -3232,7 +3352,11 @@ fn window_minimized(window: &Window) -> bool {
         }
         false
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        crate::macos::native_window(window).is_some_and(|window| window.isMiniaturized())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = window;
         true

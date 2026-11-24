@@ -193,7 +193,7 @@ pub fn check_now(manual: bool, cx: &mut App) {
 
 /// Startup check, a few seconds after launch.
 pub fn check_on_startup(cx: &mut App) {
-    if !store::settings_snapshot().check_updates {
+    if cfg!(target_os = "macos") || !store::settings_snapshot().check_updates {
         return;
     }
     cx.spawn(async move |cx| {

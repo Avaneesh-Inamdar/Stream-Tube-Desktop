@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod api;
 mod assets;
 mod display;
@@ -9,12 +9,39 @@ mod feed;
 mod import;
 mod links;
 mod locale;
+#[cfg(target_os = "macos")]
+mod macos;
 mod player;
 mod store;
 mod ui;
 mod updater;
 
 use gpui_kit::*;
+use std::time::Duration;
+
+struct QuitRequested;
+impl Global for QuitRequested {}
+
+pub(crate) fn request_quit(cx: &mut App) {
+    if cx.try_global::<QuitRequested>().is_some() {
+        return;
+    }
+    cx.set_global(QuitRequested);
+    player::controller::player(cx).update(cx, |player, cx| player.stop(cx));
+
+    let Some(flushed) = api::web::flush_watch_reports() else {
+        cx.quit();
+        return;
+    };
+    // Wait before starting platform shutdown, whose quit observers have a
+    // shorter deadline than an ordinary network round trip.
+    cx.spawn(async move |cx| {
+        let deadline = cx.background_executor().timer(Duration::from_secs(3));
+        let _ = futures::future::select(flushed, deadline).await;
+        let _ = cx.update(|cx| cx.quit());
+    })
+    .detach();
+}
 
 /// Window placement from the last session (size, position, maximized), or a
 /// centered default sized to the screen.
@@ -62,6 +89,11 @@ fn main() {
         std::env::set_var("no_proxy", "127.0.0.1,localhost,::1");
         std::env::set_var("NO_PROXY", "127.0.0.1,localhost,::1");
     }
+    #[cfg(target_os = "macos")]
+    if let Some(path) = macos::path_with_homebrew() {
+        // SAFETY: this still runs before any other thread starts.
+        unsafe { std::env::set_var("PATH", path) };
+    }
     perf::init();
     store::init();
     perf::mark("store");
@@ -72,63 +104,80 @@ fn main() {
     if !display::relaunched() && links::forward_to_running(&arg) {
         return;
     }
-    let incoming = links::listen();
+    let (incoming_tx, mut incoming_rx) = futures::channel::mpsc::unbounded();
+    let _ = links::listen(incoming_tx.clone());
     perf::mark("links");
-    gpui_kit::application()
+    let application = gpui_kit::application()
         .with_assets(assets::Assets)
-        .with_http_client(ui::UreqHttp::new())
-        .run(|cx: &mut App| {
-            perf::mark("gpui running");
-            gpui_kit::init(cx);
-            perf::mark("gpui_kit init");
-            player::preview::init(cx);
-            perf::mark("preview init");
-            cx.set_global(ui::Pal::new(true, store::settings_snapshot().accent));
-            ui::apply_theme(None, cx);
-            player::controller::init(cx);
-            perf::mark("player init");
-            let opts = WindowOptions {
-                window_bounds: Some(saved_window_bounds(cx)),
-                titlebar: Some(TitlebarOptions { title: Some("Stream Tube".into()), appears_transparent: true, ..Default::default() }),
-                window_min_size: Some(size(px(720.), px(480.))),
-                ..Default::default()
-            };
-            gpui_kit::open_window(opts, cx, |window, cx| {
-                ui::apply_theme(Some(window), cx);
-                cx.new(|cx| ui::app::AppView::new(window, cx))
-            })
-            .expect("failed to open window");
-            perf::mark("window open");
-            ui::app_icon::apply(cx);
-            links::register_scheme();
-            perf::mark("icon");
-            if let Some(mut rx) = incoming {
-                cx.spawn(async move |cx| {
-                    use futures::StreamExt;
-                    while let Some(arg) = rx.next().await {
-                        let _ = cx.update(|cx| {
-                            let pip = ui::pip::handle(cx);
-                            let Some(main) = cx.windows().into_iter().find(|w| Some(*w) != pip) else { return };
-                            let _ = main.update(cx, |_, window, cx| {
-                                ui::app::restore_window(window);
-                                window.activate_window();
-                                if let Some(route) = ui::app::route_from_link(&arg) {
-                                    ui::app::navigate(route, window, cx);
-                                }
-                            });
-                        });
-                    }
-                })
-                .detach();
+        .with_http_client(ui::UreqHttp::new());
+    #[cfg(target_os = "macos")]
+    {
+        let urls_tx = incoming_tx.clone();
+        application.on_open_urls(move |urls| {
+            for url in urls {
+                let _ = urls_tx.unbounded_send(url);
             }
-            cx.on_window_closed(|cx, _| {
-                // the picture-in-picture window alone doesn't keep the app running
-                let pip = ui::pip::handle(cx);
-                if cx.windows().iter().all(|w| Some(*w) == pip) {
-                    player::controller::player(cx).update(cx, |p, _| p.save_progress(true));
-                    cx.quit();
-                }
-            })
-            .detach();
         });
+        let reopen_tx = incoming_tx.clone();
+        application.on_reopen(move |_| {
+            let _ = reopen_tx.unbounded_send(String::new());
+        });
+    }
+    drop(incoming_tx);
+    application.run(move |cx: &mut App| {
+        perf::mark("gpui running");
+        gpui_kit::init(cx);
+        perf::mark("gpui_kit init");
+        player::preview::init(cx);
+        perf::mark("preview init");
+        cx.set_global(ui::Pal::new(true, store::settings_snapshot().accent));
+        ui::apply_theme(None, cx);
+        player::controller::init(cx);
+        perf::mark("player init");
+        let opts = WindowOptions {
+            window_bounds: Some(saved_window_bounds(cx)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Stream Tube".into()),
+                appears_transparent: !cfg!(target_os = "macos"),
+                ..Default::default()
+            }),
+            window_min_size: Some(size(px(720.), px(480.))),
+            ..Default::default()
+        };
+        let (main_window, _) = gpui_kit::open_window(opts, cx, |window, cx| {
+            ui::apply_theme(Some(window), cx);
+            cx.new(|cx| ui::app::AppView::new(window, cx))
+        })
+        .expect("failed to open window");
+        #[cfg(target_os = "macos")]
+        macos::init_menu(main_window, cx);
+        perf::mark("window open");
+        ui::app_icon::apply(cx);
+        links::register_scheme();
+        perf::mark("icon");
+        cx.spawn(async move |cx| {
+            use futures::StreamExt;
+            while let Some(arg) = incoming_rx.next().await {
+                let _ = cx.update(|cx| {
+                    let _ = main_window.update(cx, |_, window, cx| {
+                        ui::app::restore_window(window);
+                        window.activate_window();
+                        if let Some(route) = ui::app::route_from_link(&arg) {
+                            ui::app::navigate(route, window, cx);
+                        }
+                    });
+                });
+            }
+        })
+        .detach();
+        cx.on_window_closed(|cx, id| {
+            ui::pip::window_closed(id, cx);
+            // the picture-in-picture window alone doesn't keep the app running
+            let pip = ui::pip::handle(cx);
+            if cx.windows().iter().all(|w| Some(*w) == pip) {
+                request_quit(cx);
+            }
+        })
+        .detach();
+    });
 }
