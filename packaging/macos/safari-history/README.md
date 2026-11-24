@@ -71,3 +71,20 @@ played [CHARGE](https://www.youtube.com/watch?v=UXqq0ZvbOnk) from the beginning.
 
 The preceding periodic report was at `0:40`. The History entry resumed at the
 final quit position to the whole second.
+
+## Verified main-window close and resume
+
+On Apple Silicon, the Safari prototype built from the fork’s `main` at
+[commit `6b88ee4`](https://github.com/wwessex/Stream-Tube-Desktop/commit/6b88ee46e9e6b84a2e575d18795cbb8bc9e8b3fd)
+played [Coffee Run](https://www.youtube.com/watch?v=PVGeM40dABA) from the beginning.
+Selecting **Close Window** from the main window’s native controls saved the
+position, sent the final watch-time report and exited Stream Tube.
+
+| Check | Observed result |
+| --- | --- |
+| Saved position when the main window closed | 35.041 seconds |
+| Final watch-time report | `cmt=35.041`, `final=1`, HTTP `204` |
+| Opened directly from YouTube Watch History in Safari | YouTube opened the video with `t=35s`, and playback advanced from `0:35` to `0:37`. |
+
+The preceding periodic report was at `0:25`. The History entry resumed at the
+final position to the whole second.
