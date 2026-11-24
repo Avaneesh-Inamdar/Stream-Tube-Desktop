@@ -168,18 +168,26 @@ to build it locally. For the verification results, see the
 [macOS release checklist](https://github.com/wwessex/Stream-Tube-Desktop/tree/codex/macos-0.7.2-alpha#macos-release-checklist).
 
 <p align="center">
-  <a href="docs/screenshots/macos-picture-in-picture.png"><img src="docs/screenshots/macos-picture-in-picture.png" alt="Big Buck Bunny paused in a floating picture-in-picture window, with a “Return to player” button in the main Stream Tube window." width="900"></a>
-  <br>Picture-in-picture
+  <a href="docs/screenshots/macos-picture-in-picture.png">
+    <img src="docs/screenshots/macos-picture-in-picture.png" alt="Big Buck Bunny paused in a floating picture-in-picture window, with a “Return to player” button in the main Stream Tube window." width="900">
+    <br>Open full-size picture-in-picture screenshot
+  </a>
 </p>
 
 <table>
   <tr>
-    <td><a href="docs/screenshots/macos-playback.png"><img src="docs/screenshots/macos-playback.png" alt="Big Buck Bunny in Stream Tube on macOS with recommended videos alongside the player"></a></td>
-    <td><a href="docs/screenshots/macos-theatre.png"><img src="docs/screenshots/macos-theatre.png" alt="Stream Tube on macOS in theatre mode with a wider video player"></a></td>
-  </tr>
-  <tr>
-    <td align="center">Standard playback</td>
-    <td align="center">Theatre mode</td>
+    <td align="center">
+      <a href="docs/screenshots/macos-playback.png">
+        <img src="docs/screenshots/macos-playback.png" alt="Big Buck Bunny in Stream Tube on macOS with recommended videos alongside the player">
+        <br>Open full-size standard playback screenshot
+      </a>
+    </td>
+    <td align="center">
+      <a href="docs/screenshots/macos-theatre.png">
+        <img src="docs/screenshots/macos-theatre.png" alt="Stream Tube on macOS in theatre mode with a wider video player">
+        <br>Open full-size theatre mode screenshot
+      </a>
+    </td>
   </tr>
 </table>
 
