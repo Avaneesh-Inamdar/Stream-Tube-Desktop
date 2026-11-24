@@ -168,7 +168,7 @@ to build it locally. For the verification results, see the
 [macOS release checklist](https://github.com/wwessex/Stream-Tube-Desktop/tree/codex/macos-0.7.2-alpha#macos-release-checklist).
 
 <p align="center">
-  <a href="docs/screenshots/macos-picture-in-picture.png"><img src="docs/screenshots/macos-picture-in-picture.png" alt="Stream Tube on macOS playing Big Buck Bunny in a floating PiP panel while the main window shows Return to player" width="900"></a>
+  <a href="docs/screenshots/macos-picture-in-picture.png"><img src="docs/screenshots/macos-picture-in-picture.png" alt="Big Buck Bunny paused in a floating picture-in-picture window, with a “Return to player” button in the main Stream Tube window." width="900"></a>
   <br>Picture-in-picture
 </p>
 
