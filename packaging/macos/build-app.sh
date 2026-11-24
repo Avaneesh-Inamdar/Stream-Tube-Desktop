@@ -21,6 +21,9 @@ mkdir -p "$output_root"
 output_root=$(cd "$output_root" && pwd -P)
 output=$(mktemp -d "$output_root/StreamTube-$version-$(uname -m).XXXXXXXX")
 app="$output/Stream Tube.app"
+if [[ ${STREAMTUBE_SAFARI_PROTOTYPE:-0} == 1 ]]; then
+    app="$output/Stream Tube Safari Prototype.app"
+fi
 iconset="$output/StreamTube.iconset"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$iconset"
 install -m 755 "$binary" "$app/Contents/MacOS/streamtube"
@@ -71,7 +74,12 @@ cat > "$app/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
+signing_identity=-
+if [[ ${STREAMTUBE_SAFARI_PROTOTYPE:-0} == 1 ]]; then
+    signing_identity=${STREAMTUBE_SAFARI_SIGNING_IDENTITY:--}
+    bash packaging/macos/safari-history/embed-extension.sh "$app" "$signing_identity"
+fi
 plutil -lint "$app/Contents/Info.plist" >&2
-codesign --force --sign - "$app" >&2
+codesign --force --sign "$signing_identity" "$app" >&2
 codesign --verify --strict "$app"
 printf '%s\n' "$app"

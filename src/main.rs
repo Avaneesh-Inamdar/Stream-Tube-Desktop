@@ -17,6 +17,31 @@ mod ui;
 mod updater;
 
 use gpui_kit::*;
+use std::time::Duration;
+
+struct QuitRequested;
+impl Global for QuitRequested {}
+
+pub(crate) fn request_quit(cx: &mut App) {
+    if cx.try_global::<QuitRequested>().is_some() {
+        return;
+    }
+    cx.set_global(QuitRequested);
+    player::controller::player(cx).update(cx, |player, cx| player.stop(cx));
+
+    let Some(flushed) = api::web::flush_watch_reports() else {
+        cx.quit();
+        return;
+    };
+    // Wait before starting platform shutdown, whose quit observers have a
+    // shorter deadline than an ordinary network round trip.
+    cx.spawn(async move |cx| {
+        let deadline = cx.background_executor().timer(Duration::from_secs(3));
+        let _ = futures::future::select(flushed, deadline).await;
+        let _ = cx.update(|cx| cx.quit());
+    })
+    .detach();
+}
 
 /// Window placement from the last session (size, position, maximized), or a
 /// centered default sized to the screen.
@@ -150,8 +175,7 @@ fn main() {
             // the picture-in-picture window alone doesn't keep the app running
             let pip = ui::pip::handle(cx);
             if cx.windows().iter().all(|w| Some(*w) == pip) {
-                player::controller::player(cx).update(cx, |p, _| p.save_progress(true));
-                cx.quit();
+                request_quit(cx);
             }
         })
         .detach();

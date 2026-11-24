@@ -93,8 +93,10 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 **Your data stays yours**
 - Subscriptions can live locally. The feed is built by fetching each channel directly, no account needed
 - Or sign in with your Google account to get your own Home feed, subscriptions, playlists, likes and subscribe button
+- The top-bar **Sign in** label and icon follow your selected accent. Their shade adjusts to maintain at least **4.5:1** contrast at rest and on hover in Light and Dark modes
 - Watch history and search history from your other devices sync in, with resume positions, and single entries can be removed
 - Connect your YouTube history (*Settings → General*) and it works the other way too: videos you watch in Stream Tube show up in your YouTube history, and your phone or TV resumes them where you stopped. You sign in once in a browser window with a fresh profile (Chrome, Edge, Brave or Chromium) that closes and is deleted afterwards, or load a `cookies.txt` file instead
+- On Apple Silicon, this branch also offers an [experimental Safari watch-history connection](#safari-watch-history-prototype) for a signed-in YouTube tab
 - History, watch later, favourites and playlists are stored in a local SQLite database, and you can pause or clear history at any time
 - Import from YouTube Takeout, NewPipe, FreeTube or OPML. Export to NewPipe JSON, YouTube CSV, OPML or a full backup
 
@@ -295,6 +297,20 @@ as the script's first argument, for example `"$HOME/Downloads/StreamTube-builds"
 The [macOS build workflow](.github/workflows/macos.yml) builds and tests the
 Apple Silicon bundle on GitHub. It uploads a ZIP as a workflow artifact. Tagged
 release builds collect that ZIP in the project's draft release.
+
+#### Safari watch-history prototype
+
+For Safari-only watch-history sync, build the separate **Stream Tube Safari
+Prototype.app** with its embedded extension and follow the [build and connection
+instructions](packaging/macos/safari-history/README.md). You grant the extension
+access to `www.youtube.com` and choose when to connect a signed-in tab. The app
+keeps the Safari session in memory until you disconnect or quit.
+
+The player queues a final watch-time report when you close it or exit Stream
+Tube. [Opt-in playback diagnostics](packaging/macos/safari-history/README.md#playback-diagnostics)
+show playback timing, state and HTTP status. Videos played through the prototype
+have appeared in YouTube History. The exact resume position when opening a video
+from YouTube History is still being validated.
 
 #### macOS release checklist
 

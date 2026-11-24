@@ -1,0 +1,58 @@
+# Safari watch-history prototype
+
+Build the prototype from the repository root on Apple Silicon with Xcode and the
+[macOS build dependencies](../../../README.md#macos-local-build). Node.js is
+needed to run the extension tests.
+
+```bash
+STREAMTUBE_SAFARI_PROTOTYPE=1 RUSTUP_TOOLCHAIN=1.100.0 bash packaging/macos/build-app.sh
+node --test packaging/macos/safari-history/connect.test.cjs
+```
+
+The build produces a separately identified **Stream Tube Safari Prototype.app**
+with an embedded Safari extension. Its default data directory is
+`~/Library/Application Support/StreamTube Safari Prototype`. Set
+`STREAMTUBE_SAFARI_SIGNING_IDENTITY` to a development signing identity to use it
+for both bundles. With the default local ad hoc signing, Safari requires its
+documented developer approval before it will load the extension.
+[Running a Safari web extension](https://developer.apple.com/documentation/safariservices/running-your-safari-web-extension)
+
+1. Open the prototype, then enable **Stream Tube Watch History** in Safari.
+2. In Stream Tube, select **Settings → General → YouTube watch history → Connect**.
+   Choose **Use Safari** if the dialog also shows a Chromium browser.
+3. In the YouTube tab, sign in and open **Stream Tube Watch History** from
+   the Safari toolbar. Grant access to YouTube when Safari asks, then reopen the
+   extension if needed and choose **Connect this YouTube session**.
+4. Return to Stream Tube and check that Settings shows **Connected as**. Play a
+   video in the native player with watch history enabled. Let it play for at
+   least 30 seconds, then close the player and note the position.
+5. In the same signed-in account, confirm the video appears in YouTube history.
+   Open it from history and verify the position near where playback stopped.
+
+The extension requests access to `www.youtube.com`. After you choose to connect,
+it sends the YouTube session cookies from the active Safari profile to Stream
+Tube over a one-time loopback connection tied to the open dialog. Stream Tube
+uses the session for playback reporting and keeps it in memory until disconnect
+or quit. Reconnect after restarting the prototype.
+
+## Playback diagnostics
+
+Quit the running prototype and launch it with diagnostics enabled. Replace the
+app path with the path printed by the build script.
+
+```bash
+open -a "/path/to/Stream Tube Safari Prototype.app" \
+  --env STREAMTUBE_WATCH_HISTORY_DIAGNOSTICS=1 --stderr /path/to/streamtube-watch.log
+```
+
+Lines beginning with `Watch history:` show the timing and state fields sent
+in each playback and watch-time request, alongside the HTTP status. A report
+with `final=1` marks the end of playback. `http=unavailable` means no HTTP
+response was received. The diagnostic lines exclude request URLs, headers,
+session identifiers and video IDs. HTTP success confirms receipt of the request.
+
+To check shutdown reporting, repeat the playback test once using **Quit Stream
+Tube** from the app menu and once by closing the main window. Compare the final
+report's `cmt` field with the saved playback position. On normal exit, Stream
+Tube gives queued reports up to three seconds to finish. Check the video directly
+in YouTube History to verify the resume position there.
