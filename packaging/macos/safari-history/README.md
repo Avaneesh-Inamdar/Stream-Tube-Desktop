@@ -56,3 +56,18 @@ Tube** from the app menu and once by closing the main window. Compare the final
 report's `cmt` field with the saved playback position. On normal exit, Stream
 Tube gives queued reports up to three seconds to finish. Check the video directly
 in YouTube History to verify the resume position there.
+
+## Verified quit and resume
+
+On Apple Silicon, the Safari prototype at [commit `1302fee`](https://github.com/wwessex/Stream-Tube-Desktop/commit/1302fee903c4aecc07076b6bf55645344118c709)
+played [CHARGE](https://www.youtube.com/watch?v=UXqq0ZvbOnk) from the beginning.
+**Quit Stream Tube** saved the position and sent the final watch-time report.
+
+| Check | Observed result |
+| --- | --- |
+| Saved position on quit | 57.208 seconds |
+| Final watch-time report | `cmt=57.208`, `final=1`, HTTP `204` |
+| Opened directly from YouTube Watch History in Safari | YouTube opened the video with `t=57s`, and playback advanced from `0:57` to `0:59`. |
+
+The preceding periodic report was at `0:40`. The History entry resumed at the
+final quit position to the whole second.

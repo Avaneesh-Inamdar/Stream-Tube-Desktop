@@ -308,9 +308,10 @@ keeps the Safari session in memory until you disconnect or quit.
 
 The player queues a final watch-time report when you close it or exit Stream
 Tube. [Opt-in playback diagnostics](packaging/macos/safari-history/README.md#playback-diagnostics)
-show playback timing, state and HTTP status. Videos played through the prototype
-have appeared in YouTube History. The exact resume position when opening a video
-from YouTube History is still being validated.
+show playback timing, state and HTTP status. In the [verified quit and resume
+test](packaging/macos/safari-history/README.md#verified-quit-and-resume), Safari
+opened the video directly from YouTube Watch History at the reported position
+to the whole second.
 
 #### macOS release checklist
 
