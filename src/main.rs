@@ -43,6 +43,18 @@ pub(crate) fn request_quit(cx: &mut App) {
     .detach();
 }
 
+fn register_window_close_handler(cx: &mut App) {
+    cx.on_window_closed(|cx, id| {
+        ui::pip::window_closed(id, cx);
+        // The picture-in-picture window alone doesn't keep the app running.
+        let pip = ui::pip::handle(cx);
+        if cx.windows().iter().all(|w| Some(*w) == pip) {
+            request_quit(cx);
+        }
+    })
+    .detach();
+}
+
 /// Window placement from the last session (size, position, maximized), or a
 /// centered default sized to the screen.
 fn saved_window_bounds(cx: &App) -> WindowBounds {
@@ -170,14 +182,6 @@ fn main() {
             }
         })
         .detach();
-        cx.on_window_closed(|cx, id| {
-            ui::pip::window_closed(id, cx);
-            // the picture-in-picture window alone doesn't keep the app running
-            let pip = ui::pip::handle(cx);
-            if cx.windows().iter().all(|w| Some(*w) == pip) {
-                request_quit(cx);
-            }
-        })
-        .detach();
+        register_window_close_handler(cx);
     });
 }

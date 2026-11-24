@@ -739,7 +739,7 @@ mod playback_tests {
     use super::{Event, TEST_POSITION_REPORTS, Watch, stats_url, watch_report_summary};
     use crate::api::types::VideoItem;
     use crate::player::controller;
-    use gpui::TestAppContext;
+    use gpui::{Empty, TestAppContext};
 
     #[test]
     fn watch_report_summary_uses_only_allowlisted_fields_and_status() {
@@ -831,6 +831,53 @@ mod playback_tests {
         assert!(reports.try_recv().is_err());
         flushed.send(()).unwrap();
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn closing_last_main_window_enqueues_one_final_position_before_flushing(cx: &mut TestAppContext) {
+        let video_id = "test-watch-history-last-main-window";
+        let position = 85.375;
+        let duration = 464.0;
+        let (sender, reports) = std::sync::mpsc::channel();
+        TEST_POSITION_REPORTS.with(|slot| slot.replace(Some(sender)));
+        cx.on_quit(|| {
+            TEST_POSITION_REPORTS.with(|slot| slot.take());
+        });
+
+        let video = VideoItem { id: video_id.into(), ..Default::default() };
+        crate::store::history_add(&video);
+        crate::store::history_progress(video_id, 80.0, duration);
+        cx.update(|cx| {
+            controller::init(cx);
+            controller::player(cx).update(cx, |player, _| {
+                player.video = Some(video);
+                player.time = position;
+                player.duration = duration;
+                player.paused = false;
+            });
+            crate::register_window_close_handler(cx);
+        });
+
+        let main = cx.add_window(|_, _| Empty);
+        let other = cx.add_window(|_, _| Empty);
+        // GPUI's native close callback also goes through Window::remove_window.
+        other.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        assert!(reports.try_recv().is_err(), "closing a non-final window must leave reporting active");
+
+        main.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        assert!(cx.read(|cx| cx.windows().is_empty()));
+        let saved = crate::store::progress_map()[video_id];
+        assert_eq!(saved, (position, duration));
+        assert!(matches!(reports.try_recv(),
+            Ok(Event::Stop { id, t }) if id == video_id && t == saved.0));
+        let Ok(Event::Flush(flushed)) = reports.try_recv() else {
+            panic!("closing the last main window must flush after the final report");
+        };
+        flushed.send(()).unwrap();
+        cx.run_until_parked();
+        assert!(reports.try_recv().is_err(), "expected exactly one final report followed by one flush");
     }
 }
 
