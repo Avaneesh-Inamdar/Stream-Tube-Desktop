@@ -8,7 +8,7 @@
 //!
 //! Signing in happens in a real browser (Edge, Chrome, Brave or Chromium) started
 //! with its own empty profile. The app reads that profile's youtube.com cookies over
-//! the browser's local debugging port once sign-in is done, then closes the browser
+//! the browser's local debugging pipe once sign-in is done, then closes the browser
 //! and deletes the profile. Nothing else from the user's browsers is read.
 use super::http;
 use anyhow::{Context, Result, anyhow};
@@ -28,6 +28,10 @@ const SIGN_IN_URL: &str = "https://accounts.google.com/ServiceLogin?service=yout
 struct Session {
     cookies: BTreeMap<String, String>,
     account: Option<String>,
+    #[serde(default)]
+    page_id: Option<String>,
+    #[serde(skip)]
+    identity: Arc<()>,
 }
 
 fn session() -> &'static Mutex<Option<Session>> {
@@ -63,25 +67,15 @@ pub fn disconnect() {
 }
 
 /// Stores a set of youtube.com cookies and checks they belong to a signed-in account.
-fn connect(cookies: BTreeMap<String, String>) -> Result<String> {
+fn connect(cookies: BTreeMap<String, String>, page_id: Option<String>) -> Result<String> {
     if !has_login(&cookies) {
         return Err(anyhow!("These cookies aren't from a signed-in YouTube session."));
     }
-    {
-        let mut s = session().lock();
-        *s = Some(Session { cookies, account: None });
-    }
-    let name = match fetch_account_name() {
-        Ok(n) => n,
-        Err(e) => {
-            *session().lock() = None;
-            return Err(e.context("YouTube didn't accept the session"));
-        }
-    };
+    let mut connected = Session { cookies, page_id, ..Default::default() };
+    let name = fetch_account_name(&connected).context("YouTube didn't accept the session")?;
+    connected.account = Some(name.clone());
     let mut s = session().lock();
-    if let Some(st) = s.as_mut() {
-        st.account = Some(name.clone());
-    }
+    *s = Some(connected);
     save(&s);
     Ok(name)
 }
@@ -115,10 +109,8 @@ pub fn write_cookies_file() -> Option<PathBuf> {
     Some(path)
 }
 
-fn cookie_header() -> Option<String> {
-    let s = session().lock();
-    let s = s.as_ref()?;
-    Some(s.cookies.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; "))
+fn cookie_header(session: &Session) -> String {
+    session.cookies.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ")
 }
 
 fn sha1_hex(s: &str) -> String {
@@ -127,9 +119,8 @@ fn sha1_hex(s: &str) -> String {
 }
 
 /// The `Authorization` header youtube.com sends with its API calls.
-fn sapisid_auth() -> Option<String> {
-    let s = session().lock();
-    let c = &s.as_ref()?.cookies;
+fn sapisid_auth(session: &Session) -> Option<String> {
+    let c = &session.cookies;
     let ts = chrono::Utc::now().timestamp();
     let parts: Vec<String> = [("SAPISIDHASH", "SAPISID"), ("SAPISID1PHASH", "__Secure-1PAPISID"), ("SAPISID3PHASH", "__Secure-3PAPISID")]
         .iter()
@@ -142,25 +133,30 @@ fn sapisid_auth() -> Option<String> {
 }
 
 /// A call to the YouTube website's API as the signed-in user.
-pub fn web_call(endpoint: &str, mut body: Value) -> Result<Value> {
-    let cookie = cookie_header().ok_or_else(|| anyhow!("browser sign-in not connected"))?;
-    let auth = sapisid_auth().ok_or_else(|| anyhow!("browser sign-in not connected"))?;
+pub fn web_call(endpoint: &str, body: Value) -> Result<Value> {
+    let connected = session().lock().clone().ok_or_else(|| anyhow!("browser sign-in not connected"))?;
+    web_call_with_session(&connected, endpoint, body)
+}
+
+fn web_call_with_session(session: &Session, endpoint: &str, mut body: Value) -> Result<Value> {
+    let cookie = cookie_header(session);
+    let auth = sapisid_auth(session).ok_or_else(|| anyhow!("browser sign-in not connected"))?;
     let st = crate::store::settings_snapshot();
     body["context"] = json!({ "client": { "clientName": "WEB", "clientVersion": WEB_VERSION, "hl": st.language, "gl": st.region } });
+    let mut headers: Vec<(&str, &str)> = vec![
+        ("Cookie", &cookie),
+        ("Authorization", &auth),
+        ("Origin", ORIGIN),
+        ("X-Origin", ORIGIN),
+        ("Referer", "https://www.youtube.com/"),
+        ("X-Goog-AuthUser", "0"),
+        ("X-Youtube-Bootstrap-Logged-In", "true"),
+        ("X-Youtube-Client-Name", "1"),
+        ("X-Youtube-Client-Version", WEB_VERSION),
+    ];
+    add_page_id(&mut headers, session);
     let (status, v) = http::post_json_status(
-        &format!("https://www.youtube.com/youtubei/v1/{endpoint}?prettyPrint=false"),
-        &body,
-        &[
-            ("Cookie", &cookie),
-            ("Authorization", &auth),
-            ("Origin", ORIGIN),
-            ("X-Origin", ORIGIN),
-            ("Referer", "https://www.youtube.com/"),
-            ("X-Goog-AuthUser", "0"),
-            ("X-Youtube-Bootstrap-Logged-In", "true"),
-            ("X-Youtube-Client-Name", "1"),
-            ("X-Youtube-Client-Version", WEB_VERSION),
-        ],
+        &format!("https://www.youtube.com/youtubei/v1/{endpoint}?prettyPrint=false"), &body, &headers,
     )?;
     if status == 401 || status == 403 {
         return Err(anyhow!("YouTube refused the browser session (HTTP {status}). Connect it again."));
@@ -171,8 +167,18 @@ pub fn web_call(endpoint: &str, mut body: Value) -> Result<Value> {
     Ok(v)
 }
 
-fn fetch_account_name() -> Result<String> {
-    let r = web_call("account/account_menu", json!({}))?;
+fn valid_page_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 32 && id.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn add_page_id<'a>(headers: &mut Vec<(&'static str, &'a str)>, session: &'a Session) {
+    if let Some(id) = session.page_id.as_deref().filter(|id| valid_page_id(id)) {
+        headers.push(("X-Goog-PageId", id));
+    }
+}
+
+fn fetch_account_name(session: &Session) -> Result<String> {
+    let r = web_call_with_session(session, "account/account_menu", json!({}))?;
     let header = crate::api::json::find(&r, "activeAccountHeaderRenderer").ok_or_else(|| anyhow!("not signed in"))?;
     let name = header.get("accountName").map(crate::api::json::text).filter(|s| !s.is_empty());
     let handle = header.get("channelHandle").map(crate::api::json::text).filter(|s| !s.is_empty());
@@ -344,10 +350,18 @@ impl Cdp {
     }
 
     fn call(&mut self, method: &str) -> Result<Value> {
+        self.request(method, json!({}), None)
+    }
+
+    fn request(&mut self, method: &str, params: Value, session_id: Option<&str>) -> Result<Value> {
         use std::io::Write;
         self.next_id += 1;
         let id = self.next_id;
-        let mut msg = json!({ "id": id, "method": method }).to_string().into_bytes();
+        let mut message = json!({ "id": id, "method": method, "params": params });
+        if let Some(session_id) = session_id {
+            message["sessionId"] = json!(session_id);
+        }
+        let mut msg = message.to_string().into_bytes();
         msg.push(0);
         self.to_browser.write_all(&msg)?;
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -355,6 +369,7 @@ impl Cdp {
             let left = deadline.checked_duration_since(Instant::now()).ok_or_else(|| anyhow!("devtools: no reply"))?;
             let v = self.replies.recv_timeout(left).map_err(|_| anyhow!("devtools: no reply"))?;
             if v.get("id").and_then(Value::as_i64) == Some(id) {
+                anyhow::ensure!(v.get("error").is_none(), "DevTools rejected {method}");
                 return Ok(v);
             }
         }
@@ -364,6 +379,30 @@ impl Cdp {
     fn cookies(&mut self) -> Result<Vec<Value>> {
         let v = self.call("Storage.getCookies")?;
         Ok(v.pointer("/result/cookies").and_then(Value::as_array).cloned().unwrap_or_default())
+    }
+
+    /// The selected channel comes from the YouTube page in this temporary profile.
+    fn selected_page_id(&mut self) -> Result<Option<String>> {
+        let tabs = self.call("Target.getTargets")?;
+        let target = tabs.pointer("/result/targetInfos").and_then(Value::as_array)
+            .and_then(|tabs| tabs.iter().find(|tab| {
+                tab.get("type").and_then(Value::as_str) == Some("page")
+                    && tab.get("url").and_then(Value::as_str).is_some_and(|url| url == ORIGIN || url.starts_with("https://www.youtube.com/"))
+            }))
+            .and_then(|tab| tab.get("targetId")).and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("Waiting for the YouTube page"))?;
+        let attached = self.request("Target.attachToTarget", json!({ "targetId": target, "flatten": true }), None)?;
+        let target_session = attached.pointer("/result/sessionId").and_then(Value::as_str).ok_or_else(|| anyhow!("YouTube page closed"))?;
+        let evaluated = self.request("Runtime.evaluate", json!({
+            "expression": "(location.origin === 'https://www.youtube.com' && window.ytcfg?.get('LOGGED_IN') === true) ? (window.ytcfg.get('DELEGATED_SESSION_ID') || '') : null",
+            "returnByValue": true,
+        }), Some(target_session));
+        let _ = self.request("Target.detachFromTarget", json!({ "sessionId": target_session }), None);
+        let evaluated = evaluated?;
+        let id = evaluated.pointer("/result/result/value").and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("Waiting for the signed-in YouTube page"))?;
+        anyhow::ensure!(id.is_empty() || valid_page_id(id), "Invalid YouTube page ID");
+        Ok((!id.is_empty()).then(|| id.to_string()))
     }
 
     fn close_browser(&mut self) {
@@ -391,7 +430,7 @@ fn youtube_cookies(list: &[Value]) -> BTreeMap<String, String> {
 
 /// Opens a browser window for the user to sign in to YouTube and waits until they
 /// have. Returns the account name. `cancel` stops waiting and closes the browser.
-pub fn browser_sign_in(cancel: Arc<AtomicBool>) -> Result<String> {
+pub fn browser_sign_in(cancel: Arc<AtomicBool>, ready: Arc<AtomicBool>, confirmed: Arc<AtomicBool>) -> Result<String> {
     let (_, exe) = find_browser().ok_or_else(|| {
         anyhow!("No supported browser found. Install Google Chrome, Microsoft Edge, Brave or Chromium, or import a cookies.txt file instead.")
     })?;
@@ -425,7 +464,16 @@ pub fn browser_sign_in(cancel: Arc<AtomicBool>) -> Result<String> {
         let Ok(list) = cdp.cookies() else { continue };
         let cookies = youtube_cookies(&list);
         if has_login(&cookies) && cookies.contains_key("LOGIN_INFO") {
-            break Ok(cookies);
+            let Ok(page_id) = cdp.selected_page_id() else { continue };
+            ready.store(true, Ordering::Relaxed);
+            if !confirmed.load(Ordering::Relaxed) {
+                continue;
+            }
+            let Ok(list) = cdp.cookies() else { continue };
+            let cookies = youtube_cookies(&list);
+            if has_login(&cookies) && cookies.contains_key("LOGIN_INFO") && cdp.selected_page_id().is_ok_and(|current| current == page_id) {
+                break Ok((cookies, page_id));
+            }
         }
     };
     cdp.close_browser();
@@ -443,7 +491,9 @@ pub fn browser_sign_in(cancel: Arc<AtomicBool>) -> Result<String> {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    connect(result?)
+    let (cookies, page_id) = result?;
+    anyhow::ensure!(!cancel.load(Ordering::Relaxed), "cancelled");
+    connect(cookies, page_id)
 }
 
 /// Reads a Netscape-format cookies.txt (as saved by "Get cookies.txt" style
@@ -468,7 +518,7 @@ pub fn import_cookies_txt(path: &std::path::Path) -> Result<String> {
     if cookies.is_empty() {
         return Err(anyhow!("No youtube.com cookies in that file."));
     }
-    connect(cookies)
+    connect(cookies, None)
 }
 
 // ───────────── reporting what is watched ─────────────
@@ -507,6 +557,7 @@ struct Watch {
     last_cmt: f64,
     pings: u32,
     playing: bool,
+    session: Session,
 }
 
 impl Watch {
@@ -515,7 +566,8 @@ impl Watch {
         if let Some(sts) = sts() {
             body["playbackContext"] = json!({ "contentPlaybackContext": { "signatureTimestamp": sts, "html5Preference": "HTML5_PREF_WANTS" } });
         }
-        let r = web_call("player", body)?;
+        let connected = session().lock().clone().ok_or_else(|| anyhow!("browser sign-in not connected"))?;
+        let r = web_call_with_session(&connected, "player", body)?;
         let url = |k: &str| r.pointer(&format!("/playbackTracking/{k}/baseUrl")).and_then(Value::as_str).map(str::to_string);
         let playback = url("videostatsPlaybackUrl").ok_or_else(|| anyhow!("no playback tracking"))?;
         let watchtime = url("videostatsWatchtimeUrl").ok_or_else(|| anyhow!("no watchtime tracking"))?;
@@ -531,7 +583,7 @@ impl Watch {
             let mut rng = rand::rng();
             (0..16).map(|_| A[rng.random_range(0..A.len())] as char).collect()
         };
-        let w = Watch { id: id.to_string(), playback, watchtime, cpn, len, started: Instant::now(), last_ping: Instant::now(), last_cmt: 0.0, pings: 0, playing: true };
+        let w = Watch { id: id.to_string(), playback, watchtime, cpn, len, started: Instant::now(), last_ping: Instant::now(), last_cmt: 0.0, pings: 0, playing: true, session: connected };
         w.get(&w.playback, &[("cmt", "0".into()), ("rtn", "0".into()), ("state", "playing".into())])?;
         Ok(w)
     }
@@ -544,6 +596,10 @@ impl Watch {
         if !is_youtube_https(base) {
             return Err(anyhow!("unexpected stats host"));
         }
+        anyhow::ensure!(
+            session().lock().as_ref().is_some_and(|connected| Arc::ptr_eq(&connected.identity, &self.session.identity)),
+            "browser session changed",
+        );
         let rt = self.started.elapsed().as_secs_f64();
         let mut add: Vec<(&str, String)> = vec![
             ("ver", "2".into()),
@@ -580,9 +636,11 @@ impl Watch {
             }
         }
         let url = format!("{path}?{}", pairs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&"));
-        let cookie = cookie_header().unwrap_or_default();
+        let cookie = cookie_header(&self.session);
         let referer = format!("https://www.youtube.com/watch?v={}", self.id);
-        http::get_bytes(&url, &[("Cookie", &cookie), ("Referer", &referer), ("Origin", ORIGIN)])?;
+        let mut headers: Vec<(&str, &str)> = vec![("Cookie", &cookie), ("Referer", &referer), ("Origin", ORIGIN)];
+        add_page_id(&mut headers, &self.session);
+        http::get_bytes(&url, &headers)?;
         Ok(())
     }
 
@@ -699,7 +757,7 @@ fn is_youtube_https(url: &str) -> bool {
 
 #[cfg(test)]
 mod host_tests {
-    use super::is_youtube_https;
+    use super::*;
 
     #[::core::prelude::v1::test]
     fn only_youtube() {
@@ -709,6 +767,62 @@ mod host_tests {
         assert!(!is_youtube_https("https://youtube.com.evil.example/api"));
         assert!(!is_youtube_https("https://www.youtube.com@evil.example/api"));
         assert!(!is_youtube_https("https://evilyoutube.com/api"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn devtools_uses_the_youtube_tab_and_keeps_its_page_id() {
+        use std::io::{BufRead, BufReader};
+
+        let (input, output) = std::io::pipe().unwrap();
+        let (send, replies) = mpsc::channel();
+        let mut cdp = Cdp { to_browser: output, replies, next_id: 0 };
+        let browser = std::thread::spawn(move || {
+            let mut reader = BufReader::new(input);
+            for step in 0..4 {
+                let mut bytes = Vec::new();
+                reader.read_until(0, &mut bytes).unwrap();
+                assert_eq!(bytes.pop(), Some(0));
+                let request: Value = serde_json::from_slice(&bytes).unwrap();
+                let result = match step {
+                    0 => {
+                        assert_eq!(request["method"], "Target.getTargets");
+                        json!({"targetInfos": [
+                            {"type": "page", "url": "https://www.youtube.com.example.org/", "targetId": "unrelated"},
+                            {"type": "page", "url": "https://www.youtube.com/", "targetId": "youtube"}
+                        ]})
+                    }
+                    1 => {
+                        assert_eq!(request["params"]["targetId"], "youtube");
+                        json!({"sessionId": "tube-tab"})
+                    }
+                    2 => {
+                        assert_eq!(request["sessionId"], "tube-tab");
+                        let expression = request["params"]["expression"].as_str().unwrap();
+                        assert!(expression.contains("DELEGATED_SESSION_ID"));
+                        json!({"result": { "value": "12345678901234567890" }})
+                    }
+                    _ => {
+                        assert_eq!(request["method"], "Target.detachFromTarget");
+                        json!({})
+                    }
+                };
+                send.send(json!({"id": request["id"], "result": result})).unwrap();
+            }
+        });
+        let page_id = cdp.selected_page_id().unwrap();
+        let connected = Session { page_id, ..Default::default() };
+        let mut headers = Vec::new();
+        add_page_id(&mut headers, &connected);
+        assert_eq!(headers, vec![("X-Goog-PageId", "12345678901234567890")]);
+        browser.join().unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn old_session_without_a_page_id_remains_valid() {
+        let old: Session = serde_json::from_value(json!({"cookies": {}, "account": "Test"})).unwrap();
+        let mut headers = Vec::new();
+        add_page_id(&mut headers, &old);
+        assert!(headers.is_empty());
     }
 }
 
