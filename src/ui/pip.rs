@@ -42,6 +42,8 @@ pub fn open(cx: &mut App) {
         is_resizable: true,
         is_minimizable: false,
         window_min_size: Some(gpui_kit::size(px(256.), px(144.))),
+        // never the active window on macOS (see focus), which GPUI otherwise limits to ~30 fps
+        inactive_frame_interval: None,
         ..Default::default()
     };
     let res = gpui_kit::open_window(opts, cx, |_window, cx| {
