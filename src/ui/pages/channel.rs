@@ -208,7 +208,7 @@ impl Render for ChannelPage {
             .flex_col()
             .gap_4()
             .when_some(d.banner.clone(), |el, b| {
-                el.child(div().w_full().h(width / 6.2).rounded_2xl().overflow_hidden().bg(p.surface).child(img(SharedString::from(b)).size_full().object_fit(ObjectFit::Cover)))
+                el.child(div().w_full().h(width / 6.2).rounded_2xl().overflow_hidden().bg(p.surface).child(img(SharedString::from(b)).size_full().rounded_2xl().object_fit(ObjectFit::Cover)))
             })
             .child(
                 div()

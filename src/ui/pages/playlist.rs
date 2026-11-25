@@ -318,7 +318,7 @@ impl Render for PlaylistPage {
                     .rounded_xl()
                     .overflow_hidden()
                     .bg(p.surface)
-                    .when_some(thumb, |d, t| d.child(img(SharedString::from(t)).size_full().object_fit(ObjectFit::Cover))),
+                    .when_some(thumb, |d, t| d.child(img(SharedString::from(t)).size_full().rounded_xl().object_fit(ObjectFit::Cover))),
             )
             .child(div().text_2xl().font_weight(FontWeight::BOLD).text_color(p.text).child(
                 if self.protected || (local_id.is_none() && self.info.is_none()) {
