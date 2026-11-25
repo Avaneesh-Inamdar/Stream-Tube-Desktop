@@ -379,6 +379,7 @@
   "Downvote": "Voter contre",
   "Thanks for voting": "Merci pour votre vote",
   "No playable stream found": "Aucun flux compatible trouvé",
+  "The video decoder stopped producing frames.": "Le décodeur vidéo ne produit plus d’images.",
   "Video ID": "ID de vidéo",
   "Resolution": "Résolution",
   "Frames": "Frames",

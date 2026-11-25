@@ -379,6 +379,7 @@
   "Downvote": "Против",
   "Thanks for voting": "Голос учтён",
   "No playable stream found": "Не найден поток для воспроизведения",
+  "The video decoder stopped producing frames.": "Видеодекодер перестал выдавать кадры.",
   "Video ID": "Идентификатор видео",
   "Resolution": "Разрешение",
   "Frames": "Кадры",

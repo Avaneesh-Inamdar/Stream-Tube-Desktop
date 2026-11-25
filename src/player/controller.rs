@@ -9,6 +9,20 @@ use crate::ui::{blocking, toast};
 use gpui_kit::*;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+struct FrameProgress {
+    presented: u64,
+    position: f64,
+    since: Instant,
+    min_advance: f64,
+}
+
+impl FrameProgress {
+    fn new(presented: u64, position: f64) -> Self {
+        Self { presented, position, since: Instant::now(), min_advance: 3.0 }
+    }
+}
 
 pub enum PlayerEvent {
     Ended,
@@ -73,6 +87,10 @@ pub struct Player {
     pub storyboard: Option<Storyboard>,
     last_prop_notify: std::time::Instant,
     fallback_tried: bool,
+    frame_progress: Option<FrameProgress>,
+    hold_picture: Option<u64>,
+    playback_timing: Option<(&'static str, Instant)>,
+    recovering_picture: bool,
     pub channel_id: Option<String>,
     pub last_activity: std::time::Instant,
     pub audio_track: Option<String>,
@@ -161,6 +179,10 @@ impl Player {
             storyboard: None,
             last_prop_notify: std::time::Instant::now(),
             fallback_tried: false,
+            frame_progress: None,
+            hold_picture: None,
+            playback_timing: None,
+            recovering_picture: false,
             channel_id: None,
             last_activity: std::time::Instant::now(),
             audio_track: None,
@@ -287,6 +309,12 @@ impl Player {
                 let _g = scopeguard(move || crate::perf::add(&crate::perf::UI_HANDLE_US, t0.elapsed().as_micros() as u64));
                 if let Some(m) = &self.mpv {
                     if let Some(f) = m.take_frame() {
+                        // A seek or reload can redraw an empty surface before
+                        // the first decoded picture at the new position arrives.
+                        if self.hold_picture == Some(f.picture_serial) {
+                            return;
+                        }
+                        self.hold_picture = None;
                         self.ambient_tick += 1;
                         if self.ambient_tick % 12 == 1 && store::settings_snapshot().ambient_mode {
                             if let Some(c) = average_color(&f.data, f.width, f.height) {
@@ -327,7 +355,11 @@ impl Player {
                 cx.notify();
             }
             MpvEvent::PlaybackRestart => {
-                if !self.loading && !self.buffering && self.streams.is_some() {
+                self.frame_progress = None;
+                if !self.loading && !self.buffering && self.error.is_none() && self.streams.is_some() {
+                    if let Some((action, started)) = self.playback_timing.take() {
+                        eprintln!("[player] {action} to playback restart: {} ms", started.elapsed().as_millis());
+                    }
                     self.set_playback_ready(true, cx);
                 }
                 self.seeking = false;
@@ -360,13 +392,18 @@ impl Player {
                 match (name, val) {
                     ("time-pos", PropValue::Double(t)) => {
                         self.time = t;
-                        if t > 0. && !self.loading && !self.buffering && !self.paused && !self.playback_ready {
+                        if t > 0. && self.error.is_none() && !self.loading && !self.buffering && !self.paused && !self.playback_ready {
                             self.set_playback_ready(true, cx);
                         }
-                        self.on_time(cx);
+                        if !self.recover_stalled_picture(cx) {
+                            self.on_time(cx);
+                        }
                     }
                     ("duration", PropValue::Double(d)) => self.duration = d,
-                    ("pause", PropValue::Flag(b)) => self.paused = b,
+                    ("pause", PropValue::Flag(b)) => {
+                        self.paused = b;
+                        self.frame_progress = None;
+                    }
                     ("eof-reached", PropValue::Flag(b)) => {
                         if b {
                             self.on_ended(cx);
@@ -377,10 +414,14 @@ impl Player {
                     ("paused-for-cache", PropValue::Flag(b)) => {
                         self.buffering = b;
                         if b {
+                            self.frame_progress = None;
                             self.set_playback_ready(false, cx);
                         }
                     }
-                    ("seeking", PropValue::Flag(b)) => self.seeking = b,
+                    ("seeking", PropValue::Flag(b)) => {
+                        self.seeking = b;
+                        self.frame_progress = None;
+                    }
                     ("demuxer-cache-time", PropValue::Double(c)) => self.cache_time = c,
                     ("speed", PropValue::Double(s)) => self.speed = s,
                     ("volume", PropValue::Double(v)) => self.volume = v,
@@ -434,6 +475,51 @@ impl Player {
             self.play(v, None, cx);
             crate::ui::app::sync_watch_route(id, cx);
         }
+    }
+
+    /// A failed video decoder can leave mpv playing the audio indefinitely
+    /// without an EndFile event. Compare rendered pictures with the media clock.
+    fn recover_stalled_picture(&mut self, cx: &mut Context<Self>) -> bool {
+        let (Some(mpv), Some(info)) = (&self.mpv, &self.streams) else { return false };
+        if self.audio_only || self.loading || self.paused || self.buffering || self.seeking || self.eof || self.error.is_some()
+            || info.is_live || (!info.hls_only && info.video.is_empty() && info.muxed.is_empty())
+            || (self.duration > 0.0 && self.duration - self.time < 2.0)
+        {
+            self.frame_progress = None;
+            return false;
+        }
+        let presented = mpv.presented_frames();
+        let progress = self.frame_progress.get_or_insert_with(|| FrameProgress::new(presented, self.time));
+        if progress.presented != presented || self.time < progress.position {
+            *progress = FrameProgress::new(presented, self.time);
+            return false;
+        }
+        let advanced = self.time - progress.position;
+        if progress.since.elapsed() < Duration::from_secs(5) || advanced < progress.min_advance {
+            return false;
+        }
+        // Still-image tracks and very low frame rates have legitimate gaps.
+        let fps = mpv.get_f64("container-fps").unwrap_or(0.0);
+        if fps > 0.0 && advanced < 2.0 / fps {
+            progress.min_advance = 2.0 / fps;
+            return false;
+        }
+        if ["current-tracks/video/image", "current-tracks/video/albumart"].iter().any(|p| mpv.get_string(p).as_deref() == Some("yes")) {
+            self.frame_progress = None;
+            return false;
+        }
+        self.frame_progress = None;
+        if self.recovering_picture {
+            self.set_paused(true);
+            self.set_playback_ready(false, cx);
+            self.error = Some(translate("The video decoder stopped producing frames.").into());
+            cx.notify();
+        } else {
+            self.recovering_picture = true;
+            eprintln!("[player] Video frames stalled while playback advanced. Reopening at {:.1}s with software decoding.", self.time);
+            self.load_current(Some(self.time), true, cx);
+        }
+        true
     }
 
     fn on_time(&mut self, cx: &mut Context<Self>) {
@@ -546,6 +632,7 @@ impl Player {
     }
 
     pub fn play(&mut self, video: VideoItem, start: Option<f64>, cx: &mut Context<Self>) {
+        self.playback_timing = std::env::var_os("STREAMTUBE_PLAYBACK_TIMING").map(|_| ("open", Instant::now()));
         self.keyboard_feedback = None;
         self.preloaded_until = 0.0;
         self.set_playback_ready(false, cx);
@@ -560,6 +647,8 @@ impl Player {
         };
         self.load_serial += 1;
         self.fallback_tried = false;
+        self.recovering_picture = false;
+        self.frame_progress = None;
         let serial = self.load_serial;
         self.video = Some(video.clone());
         self.loading = true;
@@ -733,8 +822,13 @@ impl Player {
     /// (Re)loads current streams into mpv with current quality/audio settings.
     fn load_current(&mut self, start: Option<f64>, keep_pause: bool, cx: &mut Context<Self>) {
         self.preloaded_until = 0.0;
+        self.frame_progress = None;
         self.set_playback_ready(false, cx);
         let (Some(mpv), Some(info)) = (self.mpv.clone(), self.streams.clone()) else { return };
+        if let Some(("open", started)) = self.playback_timing {
+            eprintln!("[player] open to stream selection: {} ms ({})", started.elapsed().as_millis(), info.source);
+        }
+        self.hold_picture = Some(mpv.presented_frames());
         let s = store::settings_snapshot();
         let is_short = self.video.as_ref().is_some_and(|v| v.is_short) && !info.is_live;
         let selection = streams::playback_stream(
@@ -743,13 +837,14 @@ impl Player {
             &s.codec_pref,
             self.audio_track.as_deref(),
             self.audio_only,
+            self.recovering_picture,
         );
         let mut opening = 0.0;
         let src = match selection {
             Some(streams::PlaybackStream::Hls(url)) if info.hls_only || is_short => {
                 let audio = streams::hls_audio_choice(&info, self.audio_track.as_deref());
-                let source = super::proxy::local_hls(url, self.quality, audio.as_deref());
-                if is_short && source != url && start.unwrap_or(0.0) == 0.0 {
+                let source = super::proxy::playback_hls(url, self.quality, audio.as_deref(), self.recovering_picture);
+                if is_short && !self.recovering_picture && source != url && start.unwrap_or(0.0) == 0.0 {
                     opening = super::shorts_preload::hls_opening_seconds(
                         url,
                         self.quality,
@@ -784,7 +879,9 @@ impl Player {
         };
         let was_paused = self.paused;
         let mut opts = vec![format!("speed={}", self.speed)];
-        if info.hls_only && !info.is_live {
+        if self.recovering_picture {
+            opts.push("hwdec=no".into());
+        } else if info.hls_only && !info.is_live {
             // The proxy already selects one HLS rendition. Limit how much of its
             // opening segments libavformat reads before it can start or resume.
             opts.push("demuxer-lavf-analyzeduration=0.8".into());
@@ -1092,17 +1189,33 @@ impl Player {
     }
 
     pub fn seek_to(&mut self, t: f64) {
+        self.seek(t, "absolute+exact");
+    }
+
+    pub fn seek_interactive(&mut self, t: f64) {
+        // Landing on a keyframe avoids fetching and decoding an extra GOP
+        // before showing the picture after a large jump through an HLS VOD.
+        let buffered = t >= self.time && t <= self.cache_time;
+        let remote_jump = (t - self.time).abs() >= 8.0 && !buffered
+            && self.streams.as_ref().is_some_and(|s| s.hls_only && !s.is_live);
+        self.seek(t, if remote_jump { "absolute+keyframes" } else { "absolute+exact" });
+    }
+
+    fn seek(&mut self, t: f64, mode: &str) {
+        self.playback_timing = std::env::var_os("STREAMTUBE_PLAYBACK_TIMING").map(|_| ("seek", Instant::now()));
+        self.frame_progress = None;
         self.preloaded_until = 0.0;
         let t = if self.duration > 0.0 { t.clamp(0.0, (self.duration - 0.1).max(0.0)) } else { t.max(0.0) };
         self.time = t;
         if let Some(m) = &self.mpv {
-            let _ = m.command(&["seek", &format!("{t}"), "absolute+exact"]);
+            self.hold_picture = Some(m.presented_frames());
+            let _ = m.command(&["seek", &format!("{t}"), mode]);
         }
     }
 
     pub fn seek_by(&mut self, d: f64) {
         let t = self.time + d;
-        self.seek_to(t);
+        self.seek_interactive(t);
     }
 
     pub fn keyboard_feedback(&self) -> Option<KeyboardFeedback> {
@@ -1208,6 +1321,7 @@ impl Player {
     }
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {
+        self.playback_timing = None;
         self.keyboard_feedback = None;
         self.preloaded_until = 0.0;
         self.set_playback_ready(false, cx);

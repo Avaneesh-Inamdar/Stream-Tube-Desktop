@@ -379,6 +379,7 @@
   "Downvote": "投反对票",
   "Thanks for voting": "感谢投票",
   "No playable stream found": "未找到可播放的视频流",
+  "The video decoder stopped producing frames.": "视频解码器已停止输出画面。",
   "Video ID": "视频ID",
   "Resolution": "分辨率",
   "Frames": "框架",

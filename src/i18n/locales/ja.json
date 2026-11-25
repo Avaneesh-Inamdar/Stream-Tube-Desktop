@@ -379,6 +379,7 @@
   "Downvote": "反対票を投じる",
   "Thanks for voting": "投票ありがとうございます",
   "No playable stream found": "再生できるストリームがありません",
+  "The video decoder stopped producing frames.": "映像デコーダーからフレームが出力されなくなりました。",
   "Video ID": "動画ID",
   "Resolution": "解像度",
   "Frames": "フレーム",

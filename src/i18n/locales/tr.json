@@ -379,6 +379,7 @@
   "Downvote": "Olumsuz oy ver",
   "Thanks for voting": "Oy verdiğiniz için teşekkürler",
   "No playable stream found": "Oynatılabilir akış bulunamadı",
+  "The video decoder stopped producing frames.": "Video kod çözücüsü artık kare üretmiyor.",
   "Video ID": "Video kimliği",
   "Resolution": "Çözünürlük",
   "Frames": "Kareler",

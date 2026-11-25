@@ -379,6 +379,7 @@
   "Downvote": "Қарсы дауыс беру",
   "Thanks for voting": "Дауыс бергеніңізге рақмет",
   "No playable stream found": "Ойнатуға болатын ағын табылмады",
+  "The video decoder stopped producing frames.": "Бейне декодері кадр шығаруды тоқтатты.",
   "Video ID": "Видео ID",
   "Resolution": "Ажыратымдылық",
   "Frames": "Фреймдер",
