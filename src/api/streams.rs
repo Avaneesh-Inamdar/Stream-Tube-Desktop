@@ -845,7 +845,9 @@ fn with_sign_in_fallback(video_id: &str, res: Result<StreamInfo>) -> Result<Stre
 fn ytdlp_streams_with(video_id: &str, cookies: Option<&std::path::Path>) -> Result<StreamInfo> {
     let bin = ytdlp_path().ok_or_else(|| anyhow!("yt-dlp not found (install it or set its path in Settings)"))?;
     let mut cmd = Command::new(bin);
-    cmd.args(["-J", "--no-warnings", "--no-playlist"]);
+    // The app chooses its own tracks. Request the inventory even when
+    // yt-dlp cannot choose a default download format.
+    cmd.args(["-J", "--ignore-no-formats-error", "--no-playlist"]);
     if let Some(c) = cookies {
         cmd.arg("--cookies").arg(c);
     }
@@ -857,20 +859,25 @@ fn ytdlp_streams_with(video_id: &str, cookies: Option<&std::path::Path>) -> Resu
     }
     cmd.arg(format!("https://www.youtube.com/watch?v={video_id}"));
     hide_window(&mut cmd);
-    let mut out = cmd.output()?;
-    if !out.status.success() && crate::downloads::retry_with_ios(&String::from_utf8_lossy(&out.stderr)) {
-        // videos made for kids: yt-dlp's default clients refuse them, its iOS client doesn't
-        let mut retry = Command::new(ytdlp_path().unwrap_or_default());
+    let out = cmd.output()?;
+    let result = ytdlp_inventory(video_id, &out);
+    if result.is_err() && crate::downloads::retry_with_ios(&String::from_utf8_lossy(&out.stderr)) {
+        let mut retry = Command::new(cmd.get_program());
         retry.args(cmd.get_args()).arg("--extractor-args").arg(crate::downloads::YTDLP_IOS);
         hide_window(&mut retry);
         if let Ok(o) = retry.output() {
-            if o.status.success() {
-                out = o;
+            if let Ok(info) = ytdlp_inventory(video_id, &o) {
+                return Ok(info);
             }
         }
     }
+    result
+}
+
+fn ytdlp_inventory(video_id: &str, out: &std::process::Output) -> Result<StreamInfo> {
+    let stderr = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() {
-        return Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("yt-dlp failed")));
+        return Err(anyhow!("{}", stderr.lines().last().unwrap_or("yt-dlp failed")));
     }
     let v: Value = serde_json::from_slice(&out.stdout)?;
     let mut info = StreamInfo {
@@ -890,6 +897,9 @@ fn ytdlp_streams_with(video_id: &str, cookies: Option<&std::path::Path>) -> Resu
         let proto = s(f, "/protocol").unwrap_or_default();
         let vcodec = s(f, "/vcodec").unwrap_or_else(|| "none".into());
         let acodec = s(f, "/acodec").unwrap_or_else(|| "none".into());
+        if (vcodec == "none" && acodec == "none") || f.get("has_drm").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
         if proto.contains("m3u8") {
             if info.hls_url.is_none() {
                 info.hls_url = s(f, "/manifest_url").or(Some(url.clone()));
@@ -923,6 +933,12 @@ fn ytdlp_streams_with(video_id: &str, cookies: Option<&std::path::Path>) -> Resu
         } else {
             info.video.push(sf);
         }
+    }
+    if info.video.is_empty() && info.muxed.is_empty() && info.audio.is_empty() && info.hls_url.is_none() {
+        if let Some(reason) = stderr.lines().rev().find(|line| needs_sign_in(line)) {
+            return Err(anyhow!("{reason}"));
+        }
+        return Err(anyhow!("No playable stream found"));
     }
     for (tracks, auto) in [(&v["subtitles"], false), (&v["automatic_captions"], true)] {
         if let Some(m) = tracks.as_object() {
