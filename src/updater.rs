@@ -165,7 +165,7 @@ fn set_status(st: Status, cx: &mut App) {
 /// Checks GitHub. `manual` reports "up to date" and errors; the startup check stays
 /// quiet unless there is something new (and not skipped).
 pub fn check_now(manual: bool, cx: &mut App) {
-    if BUSY.swap(true, Ordering::SeqCst) {
+    if matches!(cx.default_global::<Updates>().status, Status::Downloading(_, _)) || BUSY.swap(true, Ordering::SeqCst) {
         return;
     }
     set_status(Status::Checking, cx);
@@ -280,7 +280,7 @@ pub fn install(cx: &mut App) {
             cx.update(|cx| set_status(Status::Downloading(rel2, p), cx));
         };
         cx.update(|cx| match res {
-            Ok(path) => run_installer(&path, cx),
+            Ok(path) => run_installer(&path, rel, cx),
             Err(e) => {
                 set_status(Status::Available(rel), cx);
                 toast(cx, tf!("Update failed: {0}", e));
@@ -290,21 +290,61 @@ pub fn install(cx: &mut App) {
     .detach();
 }
 
-fn run_installer(path: &std::path::Path, cx: &mut App) {
-    let mut c = std::process::Command::new(path);
-    c.args(["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"]);
-    match c.spawn() {
+fn installer_command(path: &std::path::Path, executable: Option<&std::path::Path>) -> std::process::Command {
+    let mut command = std::process::Command::new(path);
+    command.args(["/SP-", "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"]);
+    if let Some(dir) = executable.and_then(portable_dir) {
+        let mut destination = std::ffi::OsString::from("/DIR=");
+        destination.push(dir);
+        command.arg("/PORTABLEUPDATE=1").arg(destination);
+    }
+    command
+}
+
+fn portable_dir(executable: &std::path::Path) -> Option<&std::path::Path> {
+    let dir = executable.parent()?;
+    let name = executable.file_name()?.to_str()?;
+    let portable = dir.join("streamtube.portable").is_file() || dir.join("README.md").is_file();
+    (name.eq_ignore_ascii_case("streamtube.exe") && portable && dir.join("libmpv-2.dll").is_file()).then_some(dir)
+}
+
+fn run_installer(path: &std::path::Path, rel: Release, cx: &mut App) {
+    let executable = std::env::current_exe().ok();
+    let mut command = installer_command(path, executable.as_deref());
+    crate::player::controller::player(cx).update(cx, |player, _| player.save_progress(true));
+    match command.spawn() {
         Ok(_) => {
             store::kv_set("update_skip", "");
             cx.quit();
         }
-        Err(e) => toast(cx, tf!("Could not start the installer: {0}", e)),
+        Err(e) => {
+            set_status(Status::Available(rel), cx);
+            toast(cx, tf!("Could not start the installer: {0}", e));
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_newer, pick_asset};
+    use super::{installer_command, is_newer, pick_asset};
+
+    #[test]
+    fn portable_update_targets_the_running_copy() {
+        let dir = crate::store::data_dir().join("Папка Stream Tube");
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("streamtube.exe");
+        let setup = std::path::Path::new("update-setup.exe");
+        std::fs::write(dir.join("libmpv-2.dll"), []).unwrap();
+        assert!(!installer_command(setup, Some(&executable)).get_args().any(|arg| arg == "/PORTABLEUPDATE=1"));
+
+        // ZIPs released before the marker shipped include the README.
+        std::fs::write(dir.join("README.md"), []).unwrap();
+        let command = installer_command(setup, Some(&executable));
+        let mut destination = std::ffi::OsString::from("/DIR=");
+        destination.push(dir);
+        assert!(command.get_args().any(|arg| arg == "/PORTABLEUPDATE=1"));
+        assert!(command.get_args().any(|arg| arg == destination));
+    }
     #[test]
     fn versions() {
         assert!(is_newer("v0.1.0", "0.1.0-alpha"));
