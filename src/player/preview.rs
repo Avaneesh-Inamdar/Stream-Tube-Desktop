@@ -206,7 +206,7 @@ impl Preview {
             ("osc", "no"),
             ("osd-level", "0"),
             ("cache", "yes"),
-            ("demuxer-max-bytes", "24MiB"),
+            ("demuxer-max-bytes", "12MiB"),
             ("network-timeout", "15"),
             ("hls-bitrate", "min"),
             ("user-agent", ua),

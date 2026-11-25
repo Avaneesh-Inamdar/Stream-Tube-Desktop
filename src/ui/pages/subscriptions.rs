@@ -280,6 +280,13 @@ impl Render for FeedPage {
         } else if kind == Kind::Shorts {
             let (_, w) = grid_columns(width, 200.0, window.rem_size());
             grid(vids.iter().take(self.shown).map(|v| shorts_card(v, w, cx)).collect(), width).into_any_element()
+        } else if !store::settings_snapshot().feed_group_by_day {
+            let cards: Vec<AnyElement> = vids.iter().take(self.shown).map(|v| video_card(v, card_w, true, cx)).collect();
+            let mut col = div().flex().flex_col().gap_8().child(grid(cards, width));
+            if self.shown < total_vids {
+                col = col.child(spinner(cx));
+            }
+            col.into_any_element()
         } else {
             // group by day buckets like YouTube
             let now = crate::api::json::now();

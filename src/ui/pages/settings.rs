@@ -671,12 +671,8 @@ impl SettingsPage {
     fn player(&self, cx: &mut Context<Self>) -> Div {
         let s = store::settings_snapshot();
         card(cx)
-            .child(row(
-                "Theater mode",
-                "Use the wider player layout when opening a video",
-                switch("theater-mode", s.theater_mode, |s, v| s.theater_mode = v, cx),
-                cx,
-            ))
+            .child(row("Theater mode", "Use the wider player layout when opening a video", switch("theater-mode", s.theater_mode, |s, v| s.theater_mode = v, cx), cx))
+            .child(row("Show video title in player", "Display the title in the upper-left corner of the player", switch("spt", s.show_player_title, |s, v| s.show_player_title = v, cx), cx))
             .child(row(
                 "Default quality",
                 "Maximum resolution to start videos at",
@@ -982,6 +978,7 @@ impl SettingsPage {
             ))
             .child(row("Include Shorts in feed", "Extra request per channel", switch("fis", s.feed_include_shorts, |s, v| s.feed_include_shorts = v, cx), cx))
             .child(row("Include live streams in feed", "", switch("fil", s.feed_include_live, |s, v| s.feed_include_live = v, cx), cx))
+            .child(row("Group videos by day", "", switch("fgd", s.feed_group_by_day, |s, v| s.feed_group_by_day = v, cx), cx))
     }
 
     fn privacy(&self, cx: &mut Context<Self>) -> Div {

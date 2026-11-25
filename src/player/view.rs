@@ -688,6 +688,26 @@ impl Render for PlayerView {
             self.vol_hover = false;
         }
         if show {
+            if !self.mini && !self.pip && store::settings_snapshot().show_player_title {
+                if let Some(v) = &self.player.read(cx).video {
+                    root = root.child(
+                        div()
+                            .absolute()
+                            .top_3()
+                            .left_3()
+                            .max_w(relative(0.65))
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(hsla(0., 0., 0., 0.55))
+                            .text_color(white())
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .truncate()
+                            .child(v.title.clone()),
+                    );
+                }
+            }
             root = root.child(self.render_controls(time, duration, ui, window, cx));
         }
         if let Some(m) = self.menu {

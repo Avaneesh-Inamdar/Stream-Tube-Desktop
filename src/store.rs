@@ -135,6 +135,10 @@ pub struct Settings {
     pub aspect_mode: String,
     /// keep page scrollbars on screen instead of showing them on hover
     pub always_scrollbars: bool,
+    /// show the video title in the upper-left corner of the player when controls are visible
+    pub show_player_title: bool,
+    /// group subscriptions feed videos into day buckets (Today, Yesterday, ...)
+    pub feed_group_by_day: bool,
 }
 
 impl Default for Settings {
@@ -205,6 +209,8 @@ impl Default for Settings {
             feed_source: "full".into(),
             feed_include_shorts: false,
             feed_include_live: true,
+            feed_group_by_day: true,
+            show_player_title: false,
             download_dir: dirs::download_dir()
                 .map(|d| d.join("Stream Tube").to_string_lossy().into_owned())
                 .unwrap_or_default(),
