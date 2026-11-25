@@ -2082,7 +2082,7 @@ impl AppView {
                 (d, false) if d.len() == 1 && d.chars().all(|c| c.is_ascii_digit()) => {
                     let n: f64 = d.parse().unwrap();
                     let dur = pl.duration;
-                    pl.seek_to(dur * n / 10.0);
+                    pl.seek_interactive(dur * n / 10.0);
                     true
                 }
                 ("p", true) => {

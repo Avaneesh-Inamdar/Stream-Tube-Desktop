@@ -210,7 +210,7 @@ impl Render for PlayerView {
         let time = self.drag_seek.map(|f| f as f64 * pl.duration).unwrap_or(pl.time);
         let duration = pl.duration;
         let frame = pl.frame.clone();
-        let loading = pl.loading || pl.buffering || (pl.seeking && pl.paused == false && frame.is_none());
+        let loading = pl.loading || pl.buffering || (pl.seeking && !pl.paused);
         let error = pl.error.clone().or(pl.init_error.clone());
         let audio_only = pl.audio_only;
         let video = pl.video.clone();
@@ -1438,7 +1438,7 @@ impl PlayerView {
         if let Some(f) = self.drag_seek.take() {
             self.player.update(cx, |p, _| {
                 let d = p.duration;
-                p.seek_to(f as f64 * d)
+                p.seek_interactive(f as f64 * d)
             });
         }
         self.drag_vol = false;

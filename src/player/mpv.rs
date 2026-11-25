@@ -51,12 +51,23 @@ const EV_PROPERTY_CHANGE: c_int = 22;
 const EV_PLAYBACK_RESTART: c_int = 21;
 
 const RP_API_TYPE: c_int = 1;
+const RP_NEXT_FRAME_INFO: c_int = 11;
 const RP_BLOCK_FOR_TARGET_TIME: c_int = 12;
 const RP_SW_SIZE: c_int = 17;
 const RP_SW_FORMAT: c_int = 18;
 const RP_SW_STRIDE: c_int = 19;
 const RP_SW_POINTER: c_int = 20;
 const RENDER_UPDATE_FRAME: u64 = 1;
+const FRAME_PRESENT: u64 = 1;
+const FRAME_REDRAW: u64 = 2;
+const FRAME_REPEAT: u64 = 4;
+
+#[repr(C)]
+#[derive(Default)]
+struct RenderFrameInfo {
+    flags: u64,
+    target_time: i64,
+}
 
 struct Fns {
     create: unsafe extern "C" fn() -> *mut mpv_handle,
@@ -77,6 +88,7 @@ struct Fns {
     rc_set_update_callback:
         unsafe extern "C" fn(*mut mpv_render_context, Option<unsafe extern "C" fn(*mut c_void)>, *mut c_void),
     rc_update: unsafe extern "C" fn(*mut mpv_render_context) -> u64,
+    rc_get_info: unsafe extern "C" fn(*mut mpv_render_context, mpv_render_param) -> c_int,
     rc_render: unsafe extern "C" fn(*mut mpv_render_context, *mut mpv_render_param) -> c_int,
     rc_free: unsafe extern "C" fn(*mut mpv_render_context),
 }
@@ -156,6 +168,7 @@ fn open_library(candidates: impl IntoIterator<Item = PathBuf>) -> Result<(Librar
                         rc_create: sym!("mpv_render_context_create"),
                         rc_set_update_callback: sym!("mpv_render_context_set_update_callback"),
                         rc_update: sym!("mpv_render_context_update"),
+                        rc_get_info: sym!("mpv_render_context_get_info"),
                         rc_render: sym!("mpv_render_context_render"),
                         rc_free: sym!("mpv_render_context_free"),
                     };
@@ -303,7 +316,7 @@ pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
     pub data: Vec<u8>,
-    pub serial: u64,
+    pub picture_serial: u64,
 }
 
 struct RenderShared {
@@ -311,7 +324,7 @@ struct RenderShared {
     cv: Condvar,
     target: Mutex<(u32, u32)>,
     frame: Mutex<Option<VideoFrame>>,
-    serial: AtomicU64,
+    presented_frames: AtomicU64,
     stop: AtomicBool,
     force: AtomicBool,
 }
@@ -361,7 +374,7 @@ impl Mpv {
                 cv: Condvar::new(),
                 target: Mutex::new((640, 360)),
                 frame: Mutex::new(None),
-                serial: AtomicU64::new(0),
+                presented_frames: AtomicU64::new(0),
                 stop: AtomicBool::new(false),
                 force: AtomicBool::new(false),
             });
@@ -504,6 +517,9 @@ impl Mpv {
                         mpv_render_param { kind: 0, data: std::ptr::null_mut() },
                     ];
                     let t0 = std::time::Instant::now();
+                    let mut info = RenderFrameInfo::default();
+                    let param = mpv_render_param { kind: RP_NEXT_FRAME_INFO, data: (&mut info as *mut RenderFrameInfo).cast() };
+                    let info_result = (f.rc_get_info)(rc_ptr.0, param);
                     let rc = (f.rc_render)(rc_ptr.0, params.as_mut_ptr());
                     crate::perf::add(&crate::perf::MPV_RENDER_US, t0.elapsed().as_micros() as u64);
                     crate::perf::add(&crate::perf::MPV_FRAMES, 1);
@@ -526,8 +542,19 @@ impl Mpv {
                     }
                     // SAFETY: the loop above wrote all `bytes` bytes (bytes is w*h*4, src has w*h pixels)
                     data.set_len(bytes);
-                    let serial = r.serial.fetch_add(1, Ordering::Relaxed) + 1;
-                    *r.frame.lock() = Some(VideoFrame { width: w, height: h, data, serial });
+                    // Resizing the window and redrawing subtitles can both
+                    // repaint the last picture while the decoder is stuck.
+                    let new_picture = if info_result >= 0 {
+                        info.flags & (FRAME_PRESENT | FRAME_REDRAW | FRAME_REPEAT) == FRAME_PRESENT
+                    } else {
+                        flags & RENDER_UPDATE_FRAME != 0
+                    };
+                    let picture_serial = if new_picture {
+                        r.presented_frames.fetch_add(1, Ordering::Relaxed) + 1
+                    } else {
+                        r.presented_frames.load(Ordering::Relaxed)
+                    };
+                    *r.frame.lock() = Some(VideoFrame { width: w, height: h, data, picture_serial });
                     frame_cb(MpvEvent::Frame);
                 }
                 (f.rc_free)(rc_ptr.0);
@@ -554,6 +581,10 @@ impl Mpv {
         let mut w = self.render.wake.lock();
         *w = true;
         self.render.cv.notify_one();
+    }
+
+    pub fn presented_frames(&self) -> u64 {
+        self.render.presented_frames.load(Ordering::Relaxed)
     }
 
     pub fn take_frame(&self) -> Option<VideoFrame> {

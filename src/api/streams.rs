@@ -306,7 +306,7 @@ fn hls_client(video_id: &str, c: HlsClient) -> Result<StreamInfo> {
     // adaptive URLs from this client need a PO token; only the HLS path is usable
     info.audio.clear();
     info.muxed.clear();
-    let (video, audio, hls_orig_lang) = hls_variants(video_id, &hls).unwrap_or_default();
+    let (video, audio, hls_orig_lang) = hls_variants(video_id, &hls, !info.is_live).unwrap_or_default();
     info.video = video;
     // audio renditions (dubbed tracks): only names, the proxy picks the playlist
     info.audio = audio;
@@ -320,8 +320,11 @@ fn hls_client(video_id: &str, c: HlsClient) -> Result<StreamInfo> {
 
 /// The variants of an HLS master playlist, as formats for the quality menu,
 /// plus its audio renditions (one per language, `audio_language` = display name).
-fn hls_variants(video_id: &str, master_url: &str) -> Result<(Vec<StreamFormat>, Vec<StreamFormat>, Option<String>)> {
+fn hls_variants(video_id: &str, master_url: &str, vod: bool) -> Result<(Vec<StreamFormat>, Vec<StreamFormat>, Option<String>)> {
     let text = http::get_text(master_url)?;
+    if vod && text.contains("#EXT-X-STREAM-INF:") {
+        crate::player::proxy::remember_vod_playlist(master_url, text.as_str().into());
+    }
     crate::player::shorts_preload::remember_master(video_id, master_url, &text);
     let attr = |l: &str, k: &str| -> Option<String> {
         let rest = l.split(&format!("{k}=")).nth(1)?;
@@ -985,6 +988,10 @@ pub fn fmt_class(f: &StreamFormat) -> u32 {
     quality_class(f.width, f.height)
 }
 
+pub fn is_avc(codecs: &str) -> bool {
+    codecs.to_ascii_lowercase().split(',').map(str::trim).any(|c| c.starts_with("avc1") || c.starts_with("avc3") || c == "h264")
+}
+
 /// Whether a codecs string (one codec or an HLS `CODECS` list) is HDR video:
 /// VP9 profile 2 or 10-bit AV1. These look washed out here because the software
 /// render path converts them to RGB without tone mapping, so SDR is preferred.
@@ -1057,14 +1064,24 @@ pub fn playback_stream<'a>(
     codec: &str,
     language: Option<&str>,
     audio_only: bool,
+    prefer_avc: bool,
 ) -> Option<PlaybackStream<'a>> {
     if info.hls_only || info.is_live || (info.video.is_empty() && info.muxed.is_empty()) {
         return info.hls_url.as_deref().map(PlaybackStream::Hls);
     }
     let (video, audio) = pick_formats(info, quality, codec, language);
+    let best_variant = |formats: &'a [StreamFormat]| {
+        formats.iter()
+            .filter(|f| quality == 0 || fmt_class(f) <= quality)
+            .max_by_key(|f| (prefer_avc && is_avc(&f.codecs), fmt_class(f), f.fps, f.bitrate))
+    };
+    let video = if prefer_avc { best_variant(&info.video).or(video) } else { video };
     let video = video.filter(|_| !audio_only);
-    if video.is_none() && audio.is_none() {
-        return info.muxed.last().map(PlaybackStream::Muxed);
+    if video.is_none() && (!audio_only || audio.is_none()) {
+        // Some responses have separate audio and muxed video, with no video-only track.
+        return best_variant(&info.muxed)
+            .or_else(|| info.muxed.iter().min_by_key(|f| fmt_class(f)))
+            .map(PlaybackStream::Muxed);
     }
     Some(PlaybackStream::Adaptive(video, audio))
 }
