@@ -1303,16 +1303,35 @@ impl WatchPage {
         }
         for (i, v) in queue.iter().enumerate() {
             let plc = pl.clone();
+            // the playing video stays: removing it would leave the queue without a position
+            let extra = if pos == Some(i) {
+                Vec::new()
+            } else {
+                let plr = pl.clone();
+                vec![crate::ui::app::MenuItem::new("list-x", translate("Remove from queue"), move |_, cx| {
+                    plr.update(cx, |p, cx| {
+                        if i < p.queue.len() {
+                            p.queue.remove(i);
+                            if let Some(cur) = p.queue_pos.filter(|c| *c > i) {
+                                p.queue_pos = Some(cur - 1);
+                            }
+                            cx.notify();
+                        }
+                    })
+                })]
+            };
             list = list.child(
                 div()
                     .flex()
                     .items_center()
                     .gap_1()
+                    .px_2()
                     .child(div().w_5().text_xs().text_color(p.text2).text_center().child(if pos == Some(i) { "▶".to_string() } else { (i + 1).to_string() }))
-                    .child(compact_row(
+                    .child(compact_row_with(
                         v,
                         pos == Some(i),
                         Some(Arc::new(move |_, cx: &mut App| plc.update(cx, |p, cx| p.play_queue_index(i, cx)))),
+                        extra,
                         cx,
                     )),
             );
