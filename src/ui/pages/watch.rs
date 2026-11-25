@@ -1261,6 +1261,8 @@ impl WatchPage {
                         .items_center()
                         .justify_between()
                         .p_3()
+                        // the panel's overflow_hidden clips to a rectangle, so the header rounds its own top corners
+                        .rounded_t_xl()
                         .bg(p.surface)
                         .child(
                             div()
@@ -1334,6 +1336,8 @@ impl WatchPage {
                         .items_center()
                         .justify_between()
                         .p_3()
+                        // the panel's overflow_hidden clips to a rectangle, so the header rounds its own top corners
+                        .rounded_t_xl()
                         .bg(p.surface)
                         .child(
                             div()

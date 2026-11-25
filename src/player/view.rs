@@ -218,9 +218,13 @@ impl Render for PlayerView {
         let picture = frame.clone().filter(|_| !audio_only);
 
         // ── video surface ──
+        // the mini player's card only clips to a rectangle, so its video rounds the top corners itself
+        let radius = px(12.);
+        let corners = if mini { Corners { top_left: radius, top_right: radius, bottom_left: px(0.), bottom_right: px(0.) } } else { Corners::default() };
         let surface = div()
             .absolute()
             .inset_0()
+            .when(mini, |d| d.rounded_t_xl())
             .bg(black())
             .child(
                 canvas(
@@ -248,7 +252,7 @@ impl Render for PlayerView {
                             let (region, fit) = aspect::resolve(aspect, fsize, (vsize.0 as f32, vsize.1 as f32), auto_trim);
                             let (x, y, w, h) = aspect::layout((f32::from(bounds.size.width), f32::from(bounds.size.height)), fsize, region, fit);
                             let image = Bounds::new(bounds.origin + point(px(x), px(y)), size(px(w), px(h)));
-                            let _ = window.paint_image(bounds, image, Corners::default(), f, 0, false);
+                            let _ = window.paint_image(bounds, image, corners, f, 0, false);
                         }
                         window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
