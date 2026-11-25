@@ -20,6 +20,19 @@ pub enum VideoImage {
     Surface(super::mpv::gl_macos::SurfaceFrame),
 }
 
+impl VideoImage {
+    pub fn size(&self) -> (f32, f32) {
+        match self {
+            Self::Image(f) => {
+                let dims = f.size(0);
+                (i32::from(dims.width) as f32, i32::from(dims.height) as f32)
+            }
+            #[cfg(target_os = "macos")]
+            Self::Surface(s) => s.size(),
+        }
+    }
+}
+
 /// mpv's `hwdec` value. The GL path keeps decoded frames on the GPU; the software
 /// path needs them copied back to memory.
 fn hwdec_option(hwdec: bool, gl: bool) -> &'static str {
@@ -343,6 +356,9 @@ impl Player {
                         let ambient = self.ambient_tick % 12 == 1 && store::settings_snapshot().ambient_mode;
                         #[cfg(target_os = "macos")]
                         if let Some(s) = f.surface {
+                            if self.ambient_tick % 10 == 0 && store::settings_snapshot().aspect_mode == "auto" {
+                                self.auto_crop.feed(s.detect_bars());
+                            }
                             // GL path: GPUI draws the pixel buffer itself; the ambient colour
                             // reads ~200 pixels straight from the IOSurface
                             if ambient {

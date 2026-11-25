@@ -207,6 +207,21 @@ impl SurfaceFrame {
         CFRetained::as_ptr(&self.0).as_ptr() as *const c_void
     }
 
+    pub fn size(&self) -> (f32, f32) {
+        unsafe { (CVPixelBufferGetWidthOfPlane(self.raw(), 0) as f32, CVPixelBufferGetHeightOfPlane(self.raw(), 0) as f32) }
+    }
+
+    /// Detect bars on a small grid; the full video stays on the GPU.
+    pub fn detect_bars(&self) -> Option<(f32, f32)> {
+        const GRID: usize = 96;
+        let pixels = self.sample_grid(GRID, GRID)?;
+        let mut bgra = Vec::with_capacity(GRID * GRID * 4);
+        for [r, g, b] in pixels {
+            bgra.extend_from_slice(&[b, g, r, 255]);
+        }
+        crate::player::aspect::detect_bars(&bgra, GRID as u32, GRID as u32)
+    }
+
     /// RGB (0..=255) at `nx * ny` grid points spread over the frame, converted with
     /// GPUI's matrix. Reads a few hundred bytes of the IOSurface: cheap enough for
     /// the ambient glow every few frames.
@@ -713,6 +728,30 @@ unsafe fn program(fs: &str) -> Result<GLuint> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_bars_in_a_pixel_buffer() {
+        unsafe {
+            let mut pb = std::ptr::null_mut();
+            assert_eq!(CVPixelBufferCreate(std::ptr::null(), 256, 144, PIXEL_FORMAT_420F, std::ptr::null(), &mut pb), 0);
+            let frame = SurfaceFrame(CFRetained::from_raw(NonNull::new(pb.cast()).unwrap()));
+            assert_eq!(frame.size(), (256.0, 144.0));
+            assert_eq!(CVPixelBufferLockBaseAddress(pb, 0), 0);
+            for plane in 0..2 {
+                let stride = CVPixelBufferGetBytesPerRowOfPlane(pb, plane);
+                let rows = CVPixelBufferGetHeightOfPlane(pb, plane);
+                let data = CVPixelBufferGetBaseAddressOfPlane(pb, plane).cast_mut();
+                for y in 0..rows {
+                    let value = if plane == 1 { 128 } else if (18..126).contains(&y) { 200 } else { 0 };
+                    std::ptr::write_bytes(data.add(y * stride), value, stride);
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(pb, 0);
+            let (x, y) = frame.detect_bars().expect("letterbox bars");
+            assert_eq!(x, 0.0);
+            assert!((y - 0.125).abs() < 0.015, "{y}");
+        }
+    }
 
     #[test]
     fn inverse_matrix_round_trips_gpui_transform() {

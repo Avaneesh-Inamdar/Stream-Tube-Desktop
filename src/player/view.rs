@@ -217,10 +217,7 @@ impl Render for PlayerView {
         let view = cx.entity().downgrade();
         let aspect = aspect::Mode::parse(&store::settings_snapshot().aspect_mode);
         let auto_trim = pl.auto_crop.trim;
-        let picture = match frame.clone().filter(|_| !audio_only) {
-            Some(VideoImage::Image(f)) => Some(f),
-            _ => None,
-        };
+        let picture = frame.filter(|_| !audio_only);
 
         // ── video surface ──
         let surface = div()
@@ -245,15 +242,18 @@ impl Render for PlayerView {
                         }
                     },
                     move |bounds, _, window, _| {
-                        // the frame, cropped / zoomed for the aspect mode; what falls
-                        // outside the player is clipped by paint_image
                         if let Some(f) = picture {
-                            let dims = f.size(0);
-                            let fsize = (i32::from(dims.width) as f32, i32::from(dims.height) as f32);
+                            let fsize = f.size();
                             let (region, fit) = aspect::resolve(aspect, fsize, (vsize.0 as f32, vsize.1 as f32), auto_trim);
                             let (x, y, w, h) = aspect::layout((f32::from(bounds.size.width), f32::from(bounds.size.height)), fsize, region, fit);
                             let image = Bounds::new(bounds.origin + point(px(x), px(y)), size(px(w), px(h)));
-                            let _ = window.paint_image(bounds, image, Corners::default(), f, 0, false);
+                            window.with_content_mask(Some(ContentMask { bounds }), |window| match f {
+                                VideoImage::Image(f) => {
+                                    let _ = window.paint_image(bounds, image, Corners::default(), f, 0, false);
+                                }
+                                #[cfg(target_os = "macos")]
+                                VideoImage::Surface(s) => window.paint_surface(image, s.0),
+                            });
                         }
                         window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
@@ -265,12 +265,6 @@ impl Render for PlayerView {
                 .absolute()
                 .size_full(),
             )
-            // GL path: the IOSurface goes straight to GPUI's Metal renderer (no aspect modes)
-            .when_some(frame.filter(|_| !audio_only), |d, f| match f {
-                VideoImage::Image(_) => d,
-                #[cfg(target_os = "macos")]
-                VideoImage::Surface(s) => d.child(gpui_kit::surface(s.0).absolute().size_full().object_fit(ObjectFit::Contain)),
-            })
             .when(audio_only, |d| {
                 d.when_some(video.as_ref().map(|v| v.thumbnail.clone()), |d, t| {
                     d.child(
@@ -660,11 +654,7 @@ impl PlayerView {
         let video = if vsize.0 > 0.0 && vsize.1 > 0.0 { (vsize.0 as f32, vsize.1 as f32) } else { (16.0, 9.0) };
         let (fsize, trim) = {
             let pl = self.player.read(cx);
-            let dims = match pl.frame.as_ref() {
-                Some(VideoImage::Image(f)) => Some(f.size(0)),
-                _ => None,
-            };
-            (dims.map(|d| (i32::from(d.width) as f32, i32::from(d.height) as f32)).unwrap_or(video), pl.auto_crop.trim)
+            (pl.frame.as_ref().map(VideoImage::size).unwrap_or(video), pl.auto_crop.trim)
         };
         let mode = aspect::Mode::parse(&store::settings_snapshot().aspect_mode);
         let (region, fit) = aspect::resolve(mode, fsize, video, trim);
