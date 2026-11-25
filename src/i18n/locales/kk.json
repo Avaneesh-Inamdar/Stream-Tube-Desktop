@@ -395,6 +395,8 @@
 "Playback stopped before the end of the video.": "Ойнату бейне аяқталмай тоқтады.",
   "The video decoder stopped producing frames.": "Бейне декодері кадр шығаруды тоқтатты.",
   "Video ID": "Видео ID",
+  "YouTube requested verification again when opening this video with your account.": "Бұл бейнені есептік жазбаңызбен ашқанда YouTube растауды қайта сұрады.",
+  "YouTube requested verification before providing a video stream.": "YouTube бейне ағынын бермес бұрын растауды сұрады.",
   "Resolution": "Ажыратымдылық",
   "Frames": "Фреймдер",
   "Video codec": "Бейне кодегі",

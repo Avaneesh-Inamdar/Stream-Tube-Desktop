@@ -395,6 +395,8 @@
 "Playback stopped before the end of the video.": "播放在影片結束前停止了。",
   "The video decoder stopped producing frames.": "視訊解碼器已停止輸出畫面。",
   "Video ID": "影片 ID",
+  "YouTube requested verification again when opening this video with your account.": "使用你的帳戶開啟這部影片時，YouTube 再次要求驗證。",
+  "YouTube requested verification before providing a video stream.": "YouTube 要求先完成驗證才能提供影片串流。",
   "Resolution": "解析度",
   "Frames": "框架",
   "Video codec": "視訊編碼",

@@ -395,6 +395,8 @@
 "Playback stopped before the end of the video.": "Воспроизведение остановилось до конца видео.",
   "The video decoder stopped producing frames.": "Видеодекодер перестал выдавать кадры.",
   "Video ID": "Идентификатор видео",
+  "YouTube requested verification again when opening this video with your account.": "YouTube снова запросил подтверждение при открытии этого видео с вашим аккаунтом.",
+  "YouTube requested verification before providing a video stream.": "YouTube запросил подтверждение перед выдачей видеопотока.",
   "Resolution": "Разрешение",
   "Frames": "Кадры",
   "Video codec": "Видеокодек",

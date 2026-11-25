@@ -395,6 +395,8 @@
 "Playback stopped before the end of the video.": "La lecture s'est arrêtée avant la fin de la vidéo.",
   "The video decoder stopped producing frames.": "Le décodeur vidéo ne produit plus d’images.",
   "Video ID": "ID de vidéo",
+  "YouTube requested verification again when opening this video with your account.": "YouTube a de nouveau demandé une vérification à l’ouverture de cette vidéo avec votre compte.",
+  "YouTube requested verification before providing a video stream.": "YouTube a demandé une vérification avant de fournir le flux vidéo.",
   "Resolution": "Résolution",
   "Frames": "Frames",
   "Video codec": "Codec vidéo",

@@ -395,6 +395,8 @@
 "Playback stopped before the end of the video.": "Oxutma video bitmədən dayandı.",
   "The video decoder stopped producing frames.": "Video dekoderi artıq kadr çıxarmır.",
   "Video ID": "Video ID",
+  "YouTube requested verification again when opening this video with your account.": "Bu video hesabınızla açılarkən YouTube yenidən təsdiqləmə istədi.",
+  "YouTube requested verification before providing a video stream.": "YouTube video axınını təqdim etməzdən əvvəl təsdiqləmə istədi.",
   "Resolution": "Ayırdetmə qabiliyyəti",
   "Frames": "Çərçivə",
   "Video codec": "Video kodeki",
