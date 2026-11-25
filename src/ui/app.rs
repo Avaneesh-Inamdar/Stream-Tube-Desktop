@@ -329,12 +329,18 @@ impl MenuItem {
     }
 }
 
+#[derive(Clone)]
+pub enum MenuContent {
+    Items(Vec<MenuItem>),
+    View(AnyView),
+}
+
 #[derive(Default)]
-pub struct OpenMenu(pub Option<(Point<Pixels>, Vec<MenuItem>)>);
+pub struct OpenMenu(pub Option<(Point<Pixels>, MenuContent)>);
 impl Global for OpenMenu {}
 
 pub fn open_menu(pos: Point<Pixels>, items: Vec<MenuItem>, _window: &mut Window, cx: &mut App) {
-    cx.set_global(OpenMenu(Some((pos, items))));
+    cx.set_global(OpenMenu(Some((pos, MenuContent::Items(items)))));
     cx.refresh_windows();
 }
 
@@ -2640,7 +2646,33 @@ impl AppView {
 
     fn render_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = pal(cx);
-        let (pos, items) = cx.global::<OpenMenu>().0.clone()?;
+        let (pos, content) = cx.global::<OpenMenu>().0.clone()?;
+        let body = match content {
+            MenuContent::View(view) => view.into_any_element(),
+            MenuContent::Items(items) => div()
+                .children(items.into_iter().enumerate().map(|(i, it)| {
+                    let act = it.action.clone();
+                    div()
+                        .id(SharedString::from(format!("mi-{i}")))
+                        .flex()
+                        .items_center()
+                        .gap_4()
+                        .px_4()
+                        .h_9()
+                        .cursor_pointer()
+                        .text_sm()
+                        .text_color(p.text)
+                        .hover(move |s| s.bg(p.hover))
+                        .child(icon(it.icon).size_5().text_color(p.text))
+                        .child(it.label.clone())
+                        .on_click(move |_, window, cx| {
+                            cx.set_global(OpenMenu(None));
+                            act(window, cx);
+                            cx.refresh_windows();
+                        })
+                }))
+                .into_any_element(),
+        };
         Some(
             deferred(
                 anchored().position(pos).snap_to_window_with_margin(px(8.)).child(
@@ -2658,27 +2690,7 @@ impl AppView {
                             cx.set_global(OpenMenu(None));
                             cx.refresh_windows();
                         })
-                        .children(items.into_iter().enumerate().map(|(i, it)| {
-                            let act = it.action.clone();
-                            div()
-                                .id(SharedString::from(format!("mi-{i}")))
-                                .flex()
-                                .items_center()
-                                .gap_4()
-                                .px_4()
-                                .h_9()
-                                .cursor_pointer()
-                                .text_sm()
-                                .text_color(p.text)
-                                .hover(move |s| s.bg(p.hover))
-                                .child(icon(it.icon).size_5().text_color(p.text))
-                                .child(it.label.clone())
-                                .on_click(move |_, window, cx| {
-                                    cx.set_global(OpenMenu(None));
-                                    act(window, cx);
-                                    cx.refresh_windows();
-                                })
-                        })),
+                        .child(body),
                 ),
             )
             .with_priority(3)

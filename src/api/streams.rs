@@ -664,6 +664,7 @@ fn parse_player(r: &Value) -> StreamInfo {
         info.captions.push(CaptionTrack {
             lang: s(t, "/languageCode").unwrap_or_default(),
             name: t.get("name").map(text).unwrap_or_default(),
+            json3_url: Some(format!("{}&fmt=json3", url.replace("&fmt=srv3", ""))),
             url: format!("{}&fmt=vtt", url.replace("&fmt=srv3", "")),
             auto: t.get("kind").and_then(Value::as_str) == Some("asr"),
         });
@@ -920,24 +921,24 @@ fn ytdlp_streams_with(video_id: &str, cookies: Option<&std::path::Path>) -> Resu
             info.video.push(sf);
         }
     }
-    for (lang, tracks, auto) in [("subtitles", &v["subtitles"], false), ("automatic_captions", &v["automatic_captions"], true)] {
-        let _ = lang;
+    for (tracks, auto) in [(&v["subtitles"], false), (&v["automatic_captions"], true)] {
         if let Some(m) = tracks.as_object() {
-            let has_orig = auto && m.keys().any(|k| k.ends_with("-orig"));
             for (code, list) in m {
-                if auto {
-                    if has_orig && !code.ends_with("-orig") {
-                        continue; // skip the huge list of auto-translations
-                    }
-                    if !has_orig && info.captions.iter().any(|c| c.auto) {
+                if let Some(vtt) = list.as_array().and_then(|a| a.iter().find(|x| s(x, "/ext").as_deref() == Some("vtt"))) {
+                    // Keep actual tracks, including multiple ASR languages. A timedtext
+                    // URL with tlang requests an on-demand translation of another track.
+                    let url = s(vtt, "/url").unwrap_or_default();
+                    if auto && url.split(['?', '&']).any(|p| p.starts_with("tlang=")) {
                         continue;
                     }
-                }
-                if let Some(vtt) = list.as_array().and_then(|a| a.iter().find(|x| s(x, "/ext").as_deref() == Some("vtt"))) {
+                    if auto && !code.ends_with("-orig") && m.contains_key(&format!("{code}-orig")) {
+                        continue;
+                    }
                     info.captions.push(CaptionTrack {
                         lang: code.clone(),
                         name: s(vtt, "/name").unwrap_or(code.clone()),
-                        url: s(vtt, "/url").unwrap_or_default(),
+                        url,
+                        json3_url: list.as_array().and_then(|items| items.iter().find(|item| item["ext"] == "json3")).and_then(|item| s(item, "/url")),
                         auto,
                     });
                 }

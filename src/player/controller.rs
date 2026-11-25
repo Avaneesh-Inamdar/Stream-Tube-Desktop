@@ -1708,9 +1708,9 @@ mod caption_tests {
         let info = StreamInfo {
             original_language: Some("ja".into()),
             captions: vec![
-                CaptionTrack { lang: "en".into(), name: "English".into(), url: String::new(), auto: false },
-                CaptionTrack { lang: "ja".into(), name: "Japanese (auto-generated)".into(), url: String::new(), auto: true },
-                CaptionTrack { lang: "ja".into(), name: "Japanese".into(), url: String::new(), auto: false },
+                CaptionTrack { lang: "en".into(), name: "English".into(), url: String::new(), json3_url: None, auto: false },
+                CaptionTrack { lang: "ja".into(), name: "Japanese (auto-generated)".into(), url: String::new(), json3_url: None, auto: true },
+                CaptionTrack { lang: "ja".into(), name: "Japanese".into(), url: String::new(), json3_url: None, auto: false },
             ],
             ..Default::default()
         };
@@ -1724,8 +1724,8 @@ mod caption_tests {
             title: "Ev Genci Nedir? Gençler Neden Çalışmıyor?".into(),
             description: "Bu bölümde yeni neslin sorunlarını konuşuyoruz. https://instagram.com/test".into(),
             captions: vec![
-                CaptionTrack { lang: "en".into(), name: "English (auto-generated)".into(), url: String::new(), auto: true },
-                CaptionTrack { lang: "tr".into(), name: "Turkish".into(), url: String::new(), auto: false },
+                CaptionTrack { lang: "en".into(), name: "English (auto-generated)".into(), url: String::new(), json3_url: None, auto: true },
+                CaptionTrack { lang: "tr".into(), name: "Turkish".into(), url: String::new(), json3_url: None, auto: false },
             ],
             ..Default::default()
         };
@@ -1736,8 +1736,8 @@ mod caption_tests {
             title: "How Rockets Work and Why They Don't Fall".into(),
             description: "In this video we explain how orbital mechanics work for beginners.".into(),
             captions: vec![
-                CaptionTrack { lang: "en".into(), name: "English (auto-generated)".into(), url: String::new(), auto: true },
-                CaptionTrack { lang: "tr".into(), name: "Turkish".into(), url: String::new(), auto: false },
+                CaptionTrack { lang: "en".into(), name: "English (auto-generated)".into(), url: String::new(), json3_url: None, auto: true },
+                CaptionTrack { lang: "tr".into(), name: "Turkish".into(), url: String::new(), json3_url: None, auto: false },
             ],
             ..Default::default()
         };

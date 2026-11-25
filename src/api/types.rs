@@ -180,6 +180,7 @@ pub struct StreamFormat {
 
 #[derive(Clone, Debug, Default)]
 pub struct CaptionTrack {
+    pub json3_url: Option<String>,
     pub lang: String,
     pub name: String,
     pub url: String,

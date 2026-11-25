@@ -774,7 +774,7 @@ impl WatchPage {
                                 copy_to_clipboard(format!("https://youtu.be/{share_id}"), cx)
                             }))
                             .child(pill("w-dl", Some("download"), "Download", cx).on_click(move |ev, window, cx| {
-                                open_menu(ev.position(), download_menu_items(&v_dl), window, cx);
+                                open_menu(ev.position(), download_menu_items(&v_dl, ev.position()), window, cx);
                             }))
                             .child(pill("w-save", Some("bookmark"), "Save", cx).on_click(move |_, window, cx| {
                                 crate::ui::app::open_save_dialog(v_save.clone(), window, cx)
