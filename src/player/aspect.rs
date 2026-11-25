@@ -151,13 +151,26 @@ const MAX_TRIM: f32 = 0.25;
 /// right and of its height off the top and bottom (the smaller of the two sides,
 /// so a dark edge of the picture isn't cut). None when it can't tell (a dark frame).
 pub fn detect_bars(data: &[u8], w: u32, h: u32) -> Option<(f32, f32)> {
-    if w < 16 || h < 16 || data.len() < (w as usize * h as usize * 4) {
+    if data.len() < (w as usize * h as usize * 4) {
         return None;
     }
-    let dark = |x: u32, y: u32| {
+    detect_bars_by(w, h, |x, y| {
         let i = (y as usize * w as usize + x as usize) * 4;
-        data[i] <= DARK && data[i + 1] <= DARK && data[i + 2] <= DARK
-    };
+        is_dark([data[i], data[i + 1], data[i + 2]])
+    })
+}
+
+/// Whether a pixel (any channel order) is dark enough to be part of a black bar.
+pub fn is_dark(px: [u8; 3]) -> bool {
+    px.iter().all(|&c| c <= DARK)
+}
+
+/// [`detect_bars`] for any `w`x`h` picture, `dark(x, y)` telling whether a pixel
+/// counts as black. Used for frames that aren't BGRA bytes (macOS's GPU path).
+pub fn detect_bars_by(w: u32, h: u32, dark: impl Fn(u32, u32) -> bool) -> Option<(f32, f32)> {
+    if w < 16 || h < 16 {
+        return None;
+    }
     // a line is a bar when nearly all of it is black (a channel logo can sit in a bar)
     let row_dark = |y: u32| (0..SAMPLES).filter(|&i| dark((w - 1) * i / (SAMPLES - 1), y)).count() as u32 >= SAMPLES - 2;
     let col_dark = |x: u32| (0..SAMPLES).filter(|&i| dark(x, (h - 1) * i / (SAMPLES - 1))).count() as u32 >= SAMPLES - 2;
@@ -293,6 +306,17 @@ mod tests {
         assert!((ty - 138.0 / 1080.0).abs() < 0.001);
         let (tx, _) = detect_bars(&frame(w, h, 240, 0, 120), w, h).unwrap();
         assert!((tx - 240.0 / 1920.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn any_pixel_source_finds_the_same_bars() {
+        // what macOS's GPU path does: no BGRA bytes, just a dark-pixel test
+        let (w, h) = (1920u32, 1080u32);
+        let d = frame(w, h, 0, 138, 120);
+        let by_bytes = detect_bars(&d, w, h);
+        let by_pixel = detect_bars_by(w, h, |_, y| y < 138 || y >= h - 138);
+        assert_eq!(by_bytes, by_pixel);
+        assert_eq!(detect_bars_by(8, 8, |_, _| false), None);
     }
 
     #[test]

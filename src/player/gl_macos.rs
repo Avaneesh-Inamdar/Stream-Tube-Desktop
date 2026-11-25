@@ -211,9 +211,41 @@ impl SurfaceFrame {
     /// GPUI's matrix. Reads a few hundred bytes of the IOSurface: cheap enough for
     /// the ambient glow every few frames.
     pub fn sample_grid(&self, nx: usize, ny: usize) -> Option<Vec<[u8; 3]>> {
+        if nx < 2 || ny < 2 {
+            return None;
+        }
+        self.with_pixels(|w, h, rgb| {
+            let mut out = Vec::with_capacity(nx * ny);
+            for gy in 0..ny {
+                for gx in 0..nx {
+                    out.push(rgb((w - 1) * gx / (nx - 1), (h - 1) * gy / (ny - 1)));
+                }
+            }
+            out
+        })
+        .filter(|out| !out.is_empty())
+    }
+
+    /// Size of the frame in pixels (its luma plane).
+    pub fn size(&self) -> (u32, u32) {
+        let pb = self.raw();
+        unsafe { (CVPixelBufferGetWidthOfPlane(pb, 0) as u32, CVPixelBufferGetHeightOfPlane(pb, 0) as u32) }
+    }
+
+    /// Black bars of the frame, as [`crate::player::aspect::detect_bars`] finds them
+    /// in a software frame. Reads only the pixels the detector looks at.
+    pub fn detect_bars(&self) -> Option<(f32, f32)> {
+        self.with_pixels(|w, h, rgb| crate::player::aspect::detect_bars_by(w as u32, h as u32, |x, y| crate::player::aspect::is_dark(rgb(x as usize, y as usize))))
+            .flatten()
+    }
+
+    /// Calls `f(width, height, rgb)` with the frame locked for reading, where
+    /// `rgb(x, y)` is a pixel (0..=255) converted with GPUI's matrix. None when the
+    /// buffer isn't 420f or can't be read.
+    fn with_pixels<R>(&self, f: impl FnOnce(usize, usize, &dyn Fn(usize, usize) -> [u8; 3]) -> R) -> Option<R> {
         let pb = self.raw();
         unsafe {
-            if CVPixelBufferGetPixelFormatType(pb) != PIXEL_FORMAT_420F || nx < 2 || ny < 2 {
+            if CVPixelBufferGetPixelFormatType(pb) != PIXEL_FORMAT_420F {
                 return None;
             }
             if CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly) != 0 {
@@ -224,24 +256,22 @@ impl SurfaceFrame {
             let (ys, cs) = (CVPixelBufferGetBytesPerRowOfPlane(pb, 0), CVPixelBufferGetBytesPerRowOfPlane(pb, 1));
             let yp = CVPixelBufferGetBaseAddressOfPlane(pb, 0);
             let cp = CVPixelBufferGetBaseAddressOfPlane(pb, 1);
-            let mut out = Vec::with_capacity(nx * ny);
-            if !yp.is_null() && !cp.is_null() && w >= 2 && h >= 2 && cw >= 1 && ch >= 1 {
-                for gy in 0..ny {
-                    for gx in 0..nx {
-                        let x = (w - 1) * gx / (nx - 1);
-                        let y = (h - 1) * gy / (ny - 1);
-                        let (cx, cy) = ((x / 2).min(cw - 1), (y / 2).min(ch - 1));
-                        let l = *yp.add(y * ys + x) as f32 / 255.0;
-                        let cb = *cp.add(cy * cs + cx * 2) as f32 / 255.0;
-                        let cr = *cp.add(cy * cs + cx * 2 + 1) as f32 / 255.0;
-                        let rgb = gpui_ycbcr_to_rgb([l, cb, cr]);
-                        let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-                        out.push([q(rgb[0]), q(rgb[1]), q(rgb[2])]);
-                    }
-                }
-            }
+            let out = if !yp.is_null() && !cp.is_null() && w >= 2 && h >= 2 && cw >= 1 && ch >= 1 {
+                let rgb = |x: usize, y: usize| -> [u8; 3] {
+                    let (x, y) = (x.min(w - 1), y.min(h - 1));
+                    let (cx, cy) = ((x / 2).min(cw - 1), (y / 2).min(ch - 1));
+                    // x < w, y < h and cx < cw, cy < ch: inside the locked planes
+                    let (l, cb, cr) = (*yp.add(y * ys + x), *cp.add(cy * cs + cx * 2), *cp.add(cy * cs + cx * 2 + 1));
+                    let rgb = gpui_ycbcr_to_rgb([l as f32 / 255.0, cb as f32 / 255.0, cr as f32 / 255.0]);
+                    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                    [q(rgb[0]), q(rgb[1]), q(rgb[2])]
+                };
+                Some(f(w, h, &rgb))
+            } else {
+                None
+            };
             CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
-            (!out.is_empty()).then_some(out)
+            out
         }
     }
 }

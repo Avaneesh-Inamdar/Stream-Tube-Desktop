@@ -20,6 +20,23 @@ pub enum VideoImage {
     Surface(super::mpv::gl_macos::SurfaceFrame),
 }
 
+impl VideoImage {
+    /// The frame's size in pixels, for laying it out by the aspect mode.
+    pub fn size(&self) -> (f32, f32) {
+        match self {
+            VideoImage::Image(f) => {
+                let d = f.size(0);
+                (i32::from(d.width) as f32, i32::from(d.height) as f32)
+            }
+            #[cfg(target_os = "macos")]
+            VideoImage::Surface(s) => {
+                let (w, h) = s.size();
+                (w as f32, h as f32)
+            }
+        }
+    }
+}
+
 /// mpv's `hwdec` value. The GL path keeps decoded frames on the GPU; the software
 /// path needs them copied back to memory.
 fn hwdec_option(hwdec: bool, gl: bool) -> &'static str {
@@ -356,14 +373,19 @@ impl Player {
                     if let Some(f) = m.take_frame() {
                         self.ambient_tick += 1;
                         let ambient = self.ambient_tick % 12 == 1 && store::settings_snapshot().ambient_mode;
+                        // a few looks a second are enough to follow the bars
+                        let find_bars = self.ambient_tick % 10 == 0 && store::settings_snapshot().aspect_mode == "auto";
                         #[cfg(target_os = "macos")]
                         if let Some(s) = f.surface {
                             // GL path: GPUI draws the pixel buffer itself; the ambient colour
-                            // reads ~200 pixels straight from the IOSurface
+                            // and the black bars are read straight from the IOSurface
                             if ambient {
                                 if let Some(c) = s.sample_grid(16, 12).and_then(|px| average_rgb(&px)) {
                                     self.set_ambient(c, cx);
                                 }
+                            }
+                            if find_bars {
+                                self.auto_crop.feed(s.detect_bars());
                             }
                             if let Some(VideoImage::Image(old)) = self.frame.replace(VideoImage::Surface(s)) {
                                 cx.drop_image(old, None);
@@ -376,8 +398,7 @@ impl Player {
                                 self.set_ambient(c, cx);
                             }
                         }
-                        // a few looks a second are enough to follow the bars
-                        if self.ambient_tick % 10 == 0 && store::settings_snapshot().aspect_mode == "auto" {
+                        if find_bars {
                             self.auto_crop.feed(super::aspect::detect_bars(&f.data, f.width, f.height));
                         }
                         if let Some(buf) = image::RgbaImage::from_raw(f.width, f.height, f.data) {

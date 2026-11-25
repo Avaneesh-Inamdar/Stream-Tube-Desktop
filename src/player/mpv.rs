@@ -848,6 +848,45 @@ mod tests {
         assert!(len > 1000, "screenshot written");
     }
 
+    /// The "Auto" aspect mode on the GL path: the black bars of a letterboxed video
+    /// are found in the surfaces themselves. Make one with
+    /// `ffmpeg -f lavfi -i testsrc2=size=1920x804:duration=6 -vf pad=1920:1080:0:138:black -pix_fmt yuv420p letterbox.mp4`.
+    #[test]
+    #[ignore = "requires VideoToolbox, macOS libmpv and a 1920x1080 video letterboxed to 1920x804 in STREAMTUBE_MPV_TEST_LETTERBOX"]
+    fn gl_path_finds_black_bars() {
+        let path = std::env::var("STREAMTUBE_MPV_TEST_LETTERBOX").expect("set a path to a letterboxed video");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let player = Mpv::new_gl(
+            &[("vo", "libmpv"), ("ao", "null"), ("hwdec", "videotoolbox"), ("gpu-dumb-mode", "yes"), ("config", "no"), ("osc", "no")],
+            move |event| {
+                let _ = tx.send(event);
+            },
+        )
+        .expect("GL path");
+        player.set_render_size(1920, 1080);
+        player.command_sync(&["loadfile", &path]).unwrap();
+        let mut crop = crate::player::aspect::AutoCrop::default();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut frames = 0;
+        while Instant::now() < deadline && frames < 10 {
+            if let Ok(MpvEvent::Frame) = rx.recv_timeout(Duration::from_secs(5)) {
+                if let Some(s) = player.take_frame().and_then(|f| f.surface) {
+                    if s.size() != (1920, 1080) {
+                        continue;
+                    }
+                    // the first frames can be all black, which tells nothing
+                    let Some(bars) = s.detect_bars() else { continue };
+                    assert!(bars.0 < 0.01, "no side bars: {bars:?}");
+                    assert!((bars.1 - 138.0 / 1080.0).abs() < 0.005, "top/bottom bars: {bars:?}");
+                    crop.feed(Some(bars));
+                    frames += 1;
+                }
+            }
+        }
+        assert_eq!(frames, 10, "frames from the GL path");
+        assert!((crop.trim.1 - 138.0 / 1080.0).abs() < 0.005, "steadied crop: {:?}", crop.trim);
+    }
+
     fn render_local_video(hwdec: &str) -> Option<String> {
         let path = std::env::var("STREAMTUBE_MPV_TEST_VIDEO").expect("set a path to a local video");
         let (tx, rx) = std::sync::mpsc::channel();
