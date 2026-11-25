@@ -1,5 +1,6 @@
 //! Shared page helpers.
 use super::*;
+use crate::api::types::DescriptionLink;
 use crate::i18n::{t, tf};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarMode};
 use std::rc::Rc;
@@ -334,6 +335,21 @@ pub(crate) fn tokenize(text: &str) -> Vec<(std::ops::Range<usize>, Token)> {
     out
 }
 
+fn rich_text_tokens(text: &str, links: &[DescriptionLink]) -> Vec<(std::ops::Range<usize>, Token)> {
+    let mut tokens = tokenize(text);
+    if !links.is_empty() {
+        for link in links {
+            let range = link.range.start..link.range.end.min(text.len());
+            if text.get(range.clone()).is_some_and(|label| !label.is_empty()) {
+                tokens.retain(|(r, _)| r.end <= range.start || range.end <= r.start);
+                tokens.push((range, Token::Url(link.url.clone())));
+            }
+        }
+        tokens.sort_by_key(|(range, _)| range.start);
+    }
+    tokens
+}
+
 /// Escapes text so Markdown shows it literally.
 fn md_escape(t: &str, out: &mut String) {
     for c in t.chars() {
@@ -346,10 +362,10 @@ fn md_escape(t: &str, out: &mut String) {
 
 /// Plain text with links, timestamps, #hashtags and @handles as Markdown links
 /// (app-internal schemes for the non-URL ones), line breaks kept.
-fn to_markdown(text: &str) -> String {
+fn to_markdown(text: &str, tokens: &[(std::ops::Range<usize>, Token)]) -> String {
     let mut md = String::with_capacity(text.len() + 64);
     let mut last = 0;
-    for (r, tok) in tokenize(text) {
+    for (r, tok) in tokens {
         md_escape(&text[last..r.start], &mut md);
         let label = &text[r.clone()];
         md.push('[');
@@ -361,9 +377,9 @@ fn to_markdown(text: &str) -> String {
                 md.push_str(&u.replace(['<', '>', ' '], ""));
                 md.push('>');
             }
-            Token::Time(t) => md.push_str(&format!("st-time:{}", t as u64)),
-            Token::Hashtag(h) => md.push_str(&format!("st-tag:{}", crate::api::http::urlencode(&h))),
-            Token::Handle(h) => md.push_str(&format!("st-handle:{}", crate::api::http::urlencode(&h))),
+            Token::Time(t) => md.push_str(&format!("st-time:{}", *t as u64)),
+            Token::Hashtag(h) => md.push_str(&format!("st-tag:{}", crate::api::http::urlencode(h))),
+            Token::Handle(h) => md.push_str(&format!("st-handle:{}", crate::api::http::urlencode(h))),
         }
         md.push(')');
         last = r.end;
@@ -397,12 +413,7 @@ fn open_link(url: &str, window: &mut Window, cx: &mut App) {
             }
         })
         .detach();
-    } else if let Some(r) = crate::api::innertube::parse_youtube_url(url) {
-        let route = match r {
-            crate::api::innertube::ResolvedUrl::Video(id) => crate::ui::app::Route::Watch { id, playlist: None, start: None },
-            crate::api::innertube::ResolvedUrl::Channel(id) => crate::ui::app::Route::Channel(id),
-            crate::api::innertube::ResolvedUrl::Playlist(id) => crate::ui::app::Route::Playlist(id),
-        };
+    } else if let Some(route) = crate::ui::app::route_from_link(url).filter(|r| !matches!(r, crate::ui::app::Route::Search(_))) {
         crate::ui::app::navigate(route, window, cx);
     } else {
         crate::ui::open_web(url);
@@ -415,12 +426,25 @@ pub fn rich_text(id: impl Into<ElementId>, text: String, cx: &App) -> AnyElement
     rich_text_with(id, text, &[], cx)
 }
 
+pub fn rich_text_with_links(id: impl Into<ElementId>, text: String, links: &[DescriptionLink]) -> AnyElement {
+    render_rich_text(id, text, &[], links)
+}
+
 /// [`rich_text`] with channel emojis (shortcut, image URL) drawn inline as images.
-pub fn rich_text_with(id: impl Into<ElementId>, text: String, emojis: &[(String, String)], cx: &App) -> AnyElement {
-    let p = pal(cx);
-    let urls: Vec<String> = tokenize(&text).into_iter().filter_map(|(_, t)| if let Token::Url(u) = t { Some(u) } else { None }).collect();
+pub fn rich_text_with(id: impl Into<ElementId>, text: String, emojis: &[(String, String)], _cx: &App) -> AnyElement {
+    render_rich_text(id, text, emojis, &[])
+}
+
+fn render_rich_text(
+    id: impl Into<ElementId>,
+    text: String,
+    emojis: &[(String, String)],
+    links: &[DescriptionLink],
+) -> AnyElement {
+    let tokens = rich_text_tokens(&text, links);
+    let urls: Vec<String> = tokens.iter().filter_map(|(_, t)| if let Token::Url(u) = t { Some(u.clone()) } else { None }).collect();
     let md = if emojis.is_empty() {
-        to_markdown(&text)
+        to_markdown(&text, &tokens)
     } else {
         // swap each shortcut for a marker the Markdown conversion leaves alone,
         // then the marker for an inline image
@@ -428,7 +452,7 @@ pub fn rich_text_with(id: impl Into<ElementId>, text: String, emojis: &[(String,
         for (i, (code, _)) in emojis.iter().enumerate() {
             marked = marked.replace(code.as_str(), &format!("\u{E000}{i}\u{E001}"));
         }
-        let mut md = to_markdown(&marked);
+        let mut md = to_markdown(&marked, &tokenize(&marked));
         for (i, (code, url)) in emojis.iter().enumerate() {
             let alt: String = code.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_').collect();
             let src: String = url.chars().filter(|c| !matches!(c, '<' | '>' | '"' | ' ')).collect();
@@ -439,8 +463,7 @@ pub fn rich_text_with(id: impl Into<ElementId>, text: String, emojis: &[(String,
     let view = gpui_kit::base::TextView::markdown(id, md)
         .selectable(true)
         .on_link_click(|url, _, window, cx| open_link(url, window, cx));
-    let copy_text = text.clone();
-    let _ = p;
+    let copy_text = text;
     div()
         .w_full()
         .child(view)
@@ -531,7 +554,7 @@ pub fn comment_body(id: impl Into<SharedString>, c: &crate::api::types::Comment,
 
 #[cfg(test)]
 mod clamp_tests {
-    use super::clamp_text;
+    use super::{DescriptionLink, clamp_text, rich_text_tokens, to_markdown};
     #[test]
     fn clamps() {
         assert_eq!(clamp_text("short", 5, 400), None);
@@ -544,6 +567,22 @@ b…"));
         assert!(c.chars().count() <= 401 && c.ends_with("word…"));
         // multi-byte text is cut on a char boundary
         assert!(clamp_text(&"é".repeat(500), 5, 400).is_some());
+    }
+
+    #[test]
+    fn rich_text_preserves_labels_and_links_in_collapsed_descriptions() {
+        let text = "Watch [this] at 1:23\r\n#Playlist";
+        let playlist_start = text.find('#').unwrap();
+        let links = [
+            DescriptionLink { range: 6..12, url: "https://www.youtube.com/watch?v=_0do0jAoJt8".into() },
+            DescriptionLink { range: playlist_start..text.len() + 10, url: "https://www.youtube.com/playlist?list=PLExample".into() },
+            DescriptionLink { range: text.len() + 1..text.len() + 4, url: "https://www.youtube.com/playlist?list=PLOutside".into() },
+        ];
+        let md = to_markdown(text, &rich_text_tokens(text, &links));
+        assert!(md.contains(r"[\[this\]](<https://www.youtube.com/watch?v=_0do0jAoJt8>)"));
+        assert!(md.contains("[1\\:23](st-time:83)"));
+        assert!(md.contains(r"[\#Playlist](<https://www.youtube.com/playlist?list=PLExample>)"));
+        assert!(!md.contains("PLOutside"));
     }
 }
 

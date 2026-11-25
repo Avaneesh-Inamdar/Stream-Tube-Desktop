@@ -744,10 +744,17 @@ pub enum ResolvedUrl {
     Playlist(String),
 }
 
+fn is_video_id(id: &str) -> bool {
+    id.len() == 11 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn is_browse_id(id: &str) -> bool {
+    (2..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// Fast local parse of common URL shapes before falling back to resolve_url.
 pub fn parse_youtube_url(input: &str) -> Option<ResolvedUrl> {
     let s = input.trim();
-    let is_id = |x: &str| x.len() == 11 && x.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     if !s.contains("youtu") {
         return None;
     }
@@ -760,30 +767,29 @@ pub fn parse_youtube_url(input: &str) -> Option<ResolvedUrl> {
     };
     if let Some(rest) = s.split("youtu.be/").nth(1) {
         let id: String = rest.chars().take(11).collect();
-        if is_id(&id) {
+        if is_video_id(&id) {
             return Some(ResolvedUrl::Video(id));
         }
     }
     for marker in ["/shorts/", "/live/", "/embed/"] {
         if let Some(rest) = s.split(marker).nth(1) {
             let id: String = rest.chars().take(11).collect();
-            if is_id(&id) {
+            if is_video_id(&id) {
                 return Some(ResolvedUrl::Video(id));
             }
         }
     }
-    if let Some(v) = get_param("v").filter(|v| is_id(v)) {
+    if let Some(v) = get_param("v").filter(|v| is_video_id(v)) {
         return Some(ResolvedUrl::Video(v));
     }
     // links can come from any web page (streamtube: links), so only take IDs
     // made of the characters YouTube uses
-    let is_list_id = |x: &str| (2..=64).contains(&x.len()) && x.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    if let Some(l) = get_param("list").filter(|l| is_list_id(l)) {
+    if let Some(l) = get_param("list").filter(|l| is_browse_id(l)) {
         return Some(ResolvedUrl::Playlist(l));
     }
     if let Some(rest) = s.split("/channel/").nth(1) {
         let id: String = rest.chars().take_while(|c| *c != '/' && *c != '?' && *c != '#').collect();
-        if id.starts_with("UC") && is_list_id(&id) {
+        if id.starts_with("UC") && is_browse_id(&id) {
             return Some(ResolvedUrl::Channel(id));
         }
     }
@@ -961,6 +967,64 @@ pub fn playlist(playlist_id: &str) -> Result<PlaylistPage> {
 
 // ───────────────────────── watch / next ─────────────────────────
 
+fn description_link_url(command: &Value) -> Option<String> {
+    if let Some(watch) = command.get("watchEndpoint") {
+        let id = watch.get("videoId")?.as_str().filter(|id| is_video_id(id))?;
+        let mut url = format!("https://www.youtube.com/watch?v={id}");
+        if let Some(list) = watch.get("playlistId").and_then(Value::as_str).filter(|id| is_browse_id(id)) {
+            url.push_str("&list=");
+            url.push_str(list);
+        }
+        if let Some(start) = watch.get("startTimeSeconds").and_then(Value::as_u64).filter(|&start| start > 0) {
+            url.push_str("&t=");
+            url.push_str(&start.to_string());
+        }
+        return Some(url);
+    }
+    let browse = command.pointer("/browseEndpoint/browseId")?.as_str()?;
+    if let Some(list) = browse.strip_prefix("VL").filter(|id| is_browse_id(id)) {
+        Some(format!("https://www.youtube.com/playlist?list={list}"))
+    } else if browse.starts_with("UC") && is_browse_id(browse) {
+        Some(format!("https://www.youtube.com/channel/{browse}"))
+    } else {
+        None
+    }
+}
+
+fn description_links(attributed: &Value, text: &str) -> Vec<DescriptionLink> {
+    let Some(runs) = attributed.get("commandRuns").and_then(Value::as_array) else { return Vec::new() };
+    // YouTube counts UTF-16 code units. A span cannot split a surrogate pair.
+    let offsets: Vec<_> = text
+        .char_indices()
+        .flat_map(|(byte, c)| [Some(byte), None].into_iter().take(c.len_utf16()))
+        .chain([Some(text.len())])
+        .collect();
+    let mut links: Vec<_> = runs
+        .iter()
+        .filter_map(|run| {
+            let start = usize::try_from(run.get("startIndex").map_or(Some(0), Value::as_u64)?).ok()?;
+            let length = usize::try_from(run.get("length")?.as_u64()?).ok()?;
+            let start_byte = (*offsets.get(start)?)?;
+            let end_byte = (*offsets.get(start.checked_add(length)?)?)?;
+            if start_byte == end_byte {
+                return None;
+            }
+            let url = description_link_url(run.pointer("/onTap/innertubeCommand")?)?;
+            Some(DescriptionLink { range: start_byte..end_byte, url })
+        })
+        .collect();
+    links.sort_by_key(|link| link.range.start);
+    let mut end = 0;
+    links.retain(|link| {
+        if link.range.start < end {
+            return false;
+        }
+        end = link.range.end;
+        true
+    });
+    links
+}
+
 pub fn watch_next(video_id: &str, playlist_id: Option<&str>) -> Result<WatchInfo> {
     let mut body = json!({ "videoId": video_id, "contentCheckOk": true, "racyCheckOk": true });
     if let Some(p) = playlist_id {
@@ -1032,12 +1096,12 @@ pub fn watch_next(video_id: &str, playlist_id: Option<&str>) -> Result<WatchInfo
                 }
             }
         }
-        w.description = sec
-            .pointer("/attributedDescription/content")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| opt_text(sec.get("description")))
-            .unwrap_or_default();
+        if let Some((attributed, content)) = sec.get("attributedDescription").and_then(|d| Some((d, d.get("content")?.as_str()?))) {
+            w.description = content.to_string();
+            w.description_links = description_links(attributed, content);
+        } else {
+            w.description = opt_text(sec.get("description")).unwrap_or_default();
+        }
     }
     // Related
     if let Some(sr) = results.pointer("/secondaryResults") {
@@ -1386,6 +1450,45 @@ mod tests {
         assert_eq!(parse_youtube_url("https://youtu.be/dQw4w9WgXcQ?t=1"), Some(ResolvedUrl::Video("dQw4w9WgXcQ".into())));
         assert_eq!(parse_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=x"), Some(ResolvedUrl::Video("dQw4w9WgXcQ".into())));
         assert_eq!(parse_youtube_url("https://www.youtube.com/shorts/oImytUi5y-w"), Some(ResolvedUrl::Video("oImytUi5y-w".into())));
+    }
+
+    fn description_run(start: u64, length: u64, command: Value) -> Value {
+        json!({ "startIndex": start, "length": length, "onTap": { "innertubeCommand": command } })
+    }
+
+    #[test]
+    fn description_metadata_keeps_link_labels_and_destinations() {
+        let text = "🎬 Video | List | Channel";
+        let runs = json!({ "commandRuns": [
+            description_run(3, 5, json!({ "watchEndpoint": { "videoId": "_0do0jAoJt8", "playlistId": "PLExample", "startTimeSeconds": 42 } })),
+            description_run(11, 4, json!({ "browseEndpoint": { "browseId": "VLPLExample" } })),
+            description_run(18, 7, json!({ "browseEndpoint": { "browseId": "UCExample" } })),
+        ] });
+        let links = description_links(&runs, text);
+        let links: Vec<_> = links.iter().map(|link| (&text[link.range.clone()], link.url.as_str())).collect();
+        assert_eq!(links, [
+            ("Video", "https://www.youtube.com/watch?v=_0do0jAoJt8&list=PLExample&t=42"),
+            ("List", "https://www.youtube.com/playlist?list=PLExample"),
+            ("Channel", "https://www.youtube.com/channel/UCExample"),
+        ]);
+    }
+
+    #[test]
+    fn description_metadata_ignores_invalid_and_overlapping_runs() {
+        let text = "🎬 Video";
+        let watch = json!({ "watchEndpoint": { "videoId": "_0do0jAoJt8" } });
+        let runs = json!({ "commandRuns": [
+            description_run(1, 1, watch.clone()),
+            description_run(3, u64::MAX, watch.clone()),
+            description_run(3, 0, watch.clone()),
+            description_run(3, 5, json!({ "urlEndpoint": { "url": "file:///example" } })),
+            description_run(3, 5, json!({ "browseEndpoint": { "browseId": "VLPLExample&extra=true" } })),
+            description_run(4, 3, watch.clone()),
+            description_run(3, 5, watch),
+        ] });
+        let links = description_links(&runs, text);
+        assert_eq!(links.len(), 1);
+        assert_eq!(&text[links[0].range.clone()], "Video");
     }
 
     #[test]
