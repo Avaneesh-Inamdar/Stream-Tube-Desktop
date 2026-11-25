@@ -736,12 +736,14 @@ fn send_position_report(event: impl FnOnce() -> Event) {
 
 #[cfg(test)]
 mod playback_tests {
-    use super::{Event, TEST_POSITION_REPORTS, Watch, stats_url, watch_report_summary};
+    use super::{Event, TEST_POSITION_REPORTS, Watch, oneshot, stats_url, watch_report_summary};
+    use crate::PlatformQuitRequested;
     use crate::api::types::VideoItem;
     use crate::player::controller;
     use crate::ui::{Pal, app::UiState, pip};
     use gpui::{Empty, TestAppContext, WindowHandle};
     use std::sync::mpsc::{Receiver, TryRecvError};
+    use std::time::Duration;
 
     #[test]
     fn watch_report_summary_uses_only_allowlisted_fields_and_status() {
@@ -895,6 +897,46 @@ mod playback_tests {
         );
     }
 
+    #[gpui::test]
+    fn shutdown_waits_for_watch_history_flush_acknowledgement(cx: &mut TestAppContext) {
+        let video_id = "test-watch-history-shutdown-ack";
+        let (main, reports) = open_main_window_with_watch_history(cx, video_id);
+        main.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        let flushed = take_final_report_and_flush(&reports, video_id);
+        assert!(!cx.read(|cx| cx.has_global::<PlatformQuitRequested>()));
+
+        cx.executor().advance_clock(Duration::from_secs(2));
+        cx.run_until_parked();
+        assert!(!cx.read(|cx| cx.has_global::<PlatformQuitRequested>()),
+            "platform exit must wait while the flush is pending");
+
+        flushed.send(()).unwrap();
+        cx.run_until_parked();
+        assert!(cx.read(|cx| cx.has_global::<PlatformQuitRequested>()),
+            "the flush acknowledgement must release platform exit before the deadline");
+    }
+
+    #[gpui::test]
+    fn shutdown_requests_exit_at_three_seconds_if_watch_history_flush_stalls(cx: &mut TestAppContext) {
+        let video_id = "test-watch-history-shutdown-timeout";
+        let (main, reports) = open_main_window_with_watch_history(cx, video_id);
+        main.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        let flushed = take_final_report_and_flush(&reports, video_id);
+
+        cx.executor().advance_clock(Duration::from_millis(2_999));
+        cx.run_until_parked();
+        assert!(!cx.read(|cx| cx.has_global::<PlatformQuitRequested>()),
+            "platform exit must wait until the full three seconds have elapsed");
+
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        assert!(cx.read(|cx| cx.has_global::<PlatformQuitRequested>()),
+            "platform exit must proceed at the deadline with no acknowledgement");
+        assert!(flushed.is_canceled(), "the timeout must stop waiting for the reporter");
+    }
+
     const SHUTDOWN_TEST_POSITION: f64 = 85.375;
     const SHUTDOWN_TEST_DURATION: f64 = 464.0;
 
@@ -928,6 +970,13 @@ mod playback_tests {
     }
 
     fn assert_final_report_before_flush(cx: &TestAppContext, reports: &Receiver<Event>, video_id: &str) {
+        take_final_report_and_flush(reports, video_id).send(()).unwrap();
+        cx.run_until_parked();
+        assert!(matches!(reports.try_recv(), Err(TryRecvError::Empty)),
+            "expected exactly one final report followed by one flush");
+    }
+
+    fn take_final_report_and_flush(reports: &Receiver<Event>, video_id: &str) -> oneshot::Sender<()> {
         let saved = crate::store::progress_map()[video_id];
         assert_eq!(saved, (SHUTDOWN_TEST_POSITION, SHUTDOWN_TEST_DURATION));
         assert!(matches!(reports.try_recv(),
@@ -935,10 +984,7 @@ mod playback_tests {
         let Ok(Event::Flush(flushed)) = reports.try_recv() else {
             panic!("closing the last main window must flush after the final report");
         };
-        flushed.send(()).unwrap();
-        cx.run_until_parked();
-        assert!(matches!(reports.try_recv(), Err(TryRecvError::Empty)),
-            "expected exactly one final report followed by one flush");
+        flushed
     }
 }
 
