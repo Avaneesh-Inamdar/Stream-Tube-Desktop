@@ -32,6 +32,7 @@ pub struct Preview {
 }
 
 pub enum PreviewEvent {
+    TargetChanged,
     Changed,
 }
 
@@ -94,8 +95,9 @@ pub fn hover(id: &str, hovered: bool, cx: &mut App) {
         p.serial += 1;
         if p.id.as_deref() != Some(id.as_str()) {
             p.clear(cx);
+            p.id = Some(id.clone());
+            cx.emit(PreviewEvent::TargetChanged);
         }
-        p.id = Some(id.clone());
         p.serial
     });
     // wait for the pointer to rest, then resolve streams and start
@@ -268,7 +270,9 @@ impl Preview {
         let Some(src) = src else { return };
         let Some(m) = self.ensure_mpv(cx) else { return };
         self.ready = false;
-        let _ = m.command(&["loadfile", &src, "replace", "-1", "pause=no"]);
+        // The loadfile options moved from the third to the fourth argument in mpv 0.38.
+        let _ = m.command(&["loadfile", &src, "replace", "-1", "pause=no"])
+            .or_else(|_| m.command(&["loadfile", &src, "replace", "pause=no"]));
     }
 
     fn on_frame(&mut self, cx: &mut Context<Self>) {
