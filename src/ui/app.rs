@@ -2062,15 +2062,13 @@ impl AppView {
                     true
                 }
                 (",", true) | ("<", _) => {
-                    let s = pl.speed;
-                    pl.set_speed(s - 0.25);
-                    crate::ui::toast(cx, tf!("Speed {0}x", format_args!("{:.2}", (s - 0.25).max(0.25))));
+                    pl.set_speed(pl.speed - 0.25);
+                    crate::ui::toast(cx, tf!("Speed {0}x", format_args!("{:.2}", pl.speed)));
                     true
                 }
                 (".", true) | (">", _) => {
-                    let s = pl.speed;
-                    pl.set_speed(s + 0.25);
-                    crate::ui::toast(cx, tf!("Speed {0}x", format_args!("{:.2}", s + 0.25)));
+                    pl.set_speed(pl.speed + 0.25);
+                    crate::ui::toast(cx, tf!("Speed {0}x", format_args!("{:.2}", pl.speed)));
                     true
                 }
                 ("home", _) => {
