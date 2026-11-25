@@ -1,5 +1,4 @@
 {
-  "Load older videos": "Charger des vidéos plus anciennes",
   "Back": "Retour",
   "Search languages": "Rechercher une langue",
   "original": "original",
@@ -467,6 +466,7 @@
   "No results found": "Aucun résultat",
   "Try different keywords or remove filters": "Essayez d'autres mots-clés ou supprimez les filtres",
   "No subscriptions yet": "Pas d'abonnements encore",
+  "Load older videos": "Charger des vidéos plus anciennes",
   "Import subscriptions": "Importation des abonnements",
   "All channels": "Toutes les chaînes",
   "Refreshing…": "Rafraîchissant…",

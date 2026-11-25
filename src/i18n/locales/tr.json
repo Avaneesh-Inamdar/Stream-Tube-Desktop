@@ -1,5 +1,4 @@
 {
-  "Load older videos": "Daha eski videoları yükle",
   "Back": "Geri",
   "Search languages": "Dil ara",
   "original": "orijinal",
@@ -467,6 +466,7 @@
   "No results found": "Sonuç bulunamadı",
   "Try different keywords or remove filters": "Farklı anahtar kelimeler deneyin veya filtreleri kaldırın",
   "No subscriptions yet": "Henüz abonelik yok",
+  "Load older videos": "Daha eski videoları yükle",
   "Import subscriptions": "Abonelikleri içe aktar",
   "All channels": "Tüm kanallar",
   "Refreshing…": "Yenileniyor…",

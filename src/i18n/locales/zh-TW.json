@@ -1,5 +1,4 @@
 {
-  "Load older videos": "載入較早的影片",
   "Back": "返回",
   "Search languages": "搜尋語言",
   "original": "原始語言",
@@ -467,6 +466,7 @@
   "No results found": "找不到結果",
   "Try different keywords or remove filters": "試試其他關鍵字或移除過濾器",
   "No subscriptions yet": "尚無訂閱",
+  "Load older videos": "載入較早的影片",
   "Import subscriptions": "導入訂閱",
   "All channels": "所有頻道",
   "Refreshing…": "更新",

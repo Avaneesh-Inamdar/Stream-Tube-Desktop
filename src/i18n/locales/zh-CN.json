@@ -1,5 +1,4 @@
 {
-  "Load older videos": "加载更早的视频",
   "Back": "返回",
   "Search languages": "搜索语言",
   "original": "原始语言",
@@ -467,6 +466,7 @@
   "No results found": "未找到结果",
   "Try different keywords or remove filters": "尝试其他关键字或删除过滤器",
   "No subscriptions yet": "尚无订阅",
+  "Load older videos": "加载更早的视频",
   "Import subscriptions": "进口订阅",
   "All channels": "全部频道",
   "Refreshing…": "清新",
