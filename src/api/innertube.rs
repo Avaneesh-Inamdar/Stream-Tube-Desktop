@@ -18,8 +18,12 @@ fn web_context() -> Value {
     json!({ "client": { "clientName": "WEB", "clientVersion": WEB_VERSION, "hl": hl, "gl": gl } })
 }
 
-pub fn call(endpoint: &str, mut body: Value) -> Result<Value> {
-    body["context"] = web_context();
+pub fn call(endpoint: &str, body: Value) -> Result<Value> {
+    call_with_context(endpoint, body, web_context())
+}
+
+fn call_with_context(endpoint: &str, mut body: Value, context: Value) -> Result<Value> {
+    body["context"] = context;
     http::post_json(
         &format!("{BASE}/{endpoint}?prettyPrint=false"),
         &body,
@@ -1204,7 +1208,44 @@ pub fn watch_next(video_id: &str, playlist_id: Option<&str>) -> Result<WatchInfo
             }).collect(),
         });
     }
+    if crate::store::settings_snapshot().original_video_titles {
+        if let Ok(title) = original_video_title(video_id) {
+            w.title = title;
+        }
+    }
     Ok(w)
+}
+
+fn original_video_title(video_id: &str) -> Result<String> {
+    let response = call_with_context(
+        "player",
+        json!({ "videoId": video_id }),
+        json!({ "client": { "clientName": "WEB", "clientVersion": WEB_VERSION } }),
+    )?;
+    let details = response.get("videoDetails").ok_or_else(|| anyhow!("Missing video details"))?;
+    anyhow::ensure!(details.get("videoId").and_then(Value::as_str) == Some(video_id), "Unexpected video ID");
+    details.get("title").and_then(Value::as_str).filter(|title| !title.trim().is_empty())
+        .map(str::to_owned).ok_or_else(|| anyhow!("Missing original video title"))
+}
+
+#[cfg(test)]
+mod original_title_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "calls YouTube for the video reported in #120"]
+    fn original_titles_preserve_the_reported_english_title_in_russian() {
+        let id = "hJEmt03Rz1c";
+        crate::store::init();
+        crate::store::update_settings(|s| {
+            s.language = "ru".into();
+            s.region = "US".into();
+            s.original_video_titles = false;
+        });
+        assert_eq!(watch_next(id, None).unwrap().title, "Диета без английского");
+        crate::store::update_settings(|s| s.original_video_titles = true);
+        assert_eq!(watch_next(id, None).unwrap().title, "The No English Diet");
+    }
 }
 
 pub fn related_continue(token: &str) -> Result<Page> {

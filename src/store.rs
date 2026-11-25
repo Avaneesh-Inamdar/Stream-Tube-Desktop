@@ -21,6 +21,7 @@ pub struct Settings {
     // Region
     pub region: String,
     pub language: String,
+    pub original_video_titles: bool,
     // Backend
     pub stream_backend: String,
     /// Linux: "auto", "x11" or "wayland" (see display.rs)
@@ -166,6 +167,7 @@ impl Default for Settings {
             grid_columns: 0,
             region: "US".into(),
             language: "en".into(),
+            original_video_titles: false,
             stream_backend: "auto".into(),
             display_server: "auto".into(),
             ytdlp_path: String::new(),
