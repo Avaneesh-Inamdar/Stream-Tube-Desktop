@@ -239,7 +239,42 @@ fn more_button(id: SharedString, v: &VideoItem, cx: &App) -> Stateful<Div> {
     more_button_with(id, v, Vec::new(), cx)
 }
 
-/// The three-dots button; `extra` items go into the menu after "Save to playlist…".
+/// The video's menu; `extra` items go in after "Save to playlist…".
+fn menu_with(v: &VideoItem, extra: &[MenuItem]) -> Vec<MenuItem> {
+    let mut items = video_menu_items(v);
+    let at = items.len().min(4);
+    items.splice(at..at, extra.iter().cloned());
+    items
+}
+
+/// A right click on a card opens the same menu as its three-dots button.
+fn right_click_menu(v: &VideoItem, extra: Vec<MenuItem>) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+    let v = v.clone();
+    move |ev, window, cx| {
+        cx.stop_propagation();
+        open_menu(ev.position, menu_with(&v, &extra), window, cx);
+    }
+}
+
+/// The lighter rounded background that appears behind a card under the pointer. It
+/// reaches past the card's edges so the thumbnail isn't flush with it, as on YouTube.
+fn hover_backdrop(cx: &App) -> impl IntoElement {
+    let p = pal(cx);
+    div()
+        .id("card-hover")
+        .absolute()
+        .top(px(-8.))
+        .bottom(px(-8.))
+        .left(px(-8.))
+        .right(px(-8.))
+        .rounded_xl()
+        .bg(p.surface)
+        .invisible()
+        .group_hover("card", |s| s.visible())
+}
+
+/// The three-dots button, shown while the pointer is over its card; `extra` items go
+/// into the menu after "Save to playlist…".
 fn more_button_with(id: SharedString, v: &VideoItem, extra: Vec<MenuItem>, cx: &App) -> Stateful<Div> {
     let p = pal(cx);
     let v = v.clone();
@@ -252,15 +287,14 @@ fn more_button_with(id: SharedString, v: &VideoItem, extra: Vec<MenuItem>, cx: &
         .size_8()
         .rounded_full()
         .cursor_pointer()
+        .invisible()
+        .group_hover("card", |s| s.visible())
         .hover(move |s| s.bg(p.hover))
         .child(icon("ellipsis-vertical").size_4().text_color(p.text))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |ev, window, cx| {
             cx.stop_propagation();
-            let mut items = video_menu_items(&v);
-            let at = items.len().min(4);
-            items.splice(at..at, extra.iter().cloned());
-            open_menu(ev.position(), items, window, cx);
+            open_menu(ev.position(), menu_with(&v, &extra), window, cx);
         })
 }
 
@@ -323,6 +357,7 @@ pub fn video_card(v: &VideoItem, width: Pixels, show_channel: bool, cx: &mut App
     div()
         .id(SharedString::from(format!("vc-{}", v.id)))
         .on_hover(prefetch_hover(&v.id))
+        .relative()
         .flex()
         .flex_col()
         .w(width)
@@ -330,7 +365,9 @@ pub fn video_card(v: &VideoItem, width: Pixels, show_channel: bool, cx: &mut App
         .cursor_pointer()
         .group("card")
         .on_aux_click(middle_click_tab(route.clone()))
+        .on_mouse_down(MouseButton::Right, right_click_menu(v, Vec::new()))
         .on_click(move |_, window, cx| navigate(route.clone(), window, cx))
+        .child(hover_backdrop(cx))
         .child(thumbnail(v, thumb, width, h, px(12.), cx))
         .child(
             div()
@@ -400,13 +437,17 @@ pub fn shorts_card(v: &VideoItem, width: Pixels, cx: &mut App) -> AnyElement {
     let h = width * (16. / 9.);
     div()
         .id(SharedString::from(format!("sc-{}", v.id)))
+        .relative()
         .flex()
         .flex_col()
         .w(width)
         .gap_2()
         .cursor_pointer()
+        .group("card")
         .on_aux_click(middle_click_tab(route.clone()))
+        .on_mouse_down(MouseButton::Right, right_click_menu(v, Vec::new()))
         .on_click(move |_, window, cx| navigate(route.clone(), window, cx))
+        .child(hover_backdrop(cx))
         .child(thumbnail(v, thumb, width, h, px(12.), cx))
         .child(
             div()
@@ -437,12 +478,16 @@ pub fn video_row(v: &VideoItem, thumb_w: Pixels, cx: &mut App) -> AnyElement {
     div()
         .id(SharedString::from(format!("vr-{}", v.id)))
         .on_hover(prefetch_hover(&v.id))
+        .relative()
         .flex()
         .gap_4()
         .w_full()
         .cursor_pointer()
+        .group("card")
         .on_aux_click(middle_click_tab(route.clone()))
+        .on_mouse_down(MouseButton::Right, right_click_menu(v, Vec::new()))
         .on_click(move |_, window, cx| navigate(route.clone(), window, cx))
+        .child(hover_backdrop(cx))
         .child(thumbnail(v, thumb, thumb_w, thumb_w * (9. / 16.), px(12.), cx))
         .child(
             div()
@@ -512,9 +557,11 @@ pub fn compact_row_with(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn
         .p_1()
         .rounded_lg()
         .cursor_pointer()
+        .group("card")
         .when(active, |d| d.bg(p.hover))
         .hover(move |s| s.bg(p.surface))
         .on_aux_click(middle_click_tab(route.clone()))
+        .on_mouse_down(MouseButton::Right, right_click_menu(v, extra.clone()))
         .on_click(move |_, window, cx| match &on_click {
             Some(f) => f(window, cx),
             None => navigate(route.clone(), window, cx),
