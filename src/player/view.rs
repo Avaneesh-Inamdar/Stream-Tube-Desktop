@@ -15,11 +15,22 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 fn playback_error_message(error: &str) -> String {
+    if let Some((_, signed_in_error)) = error.rsplit_once("\nyt-dlp (signed in): ") {
+        return if crate::api::streams::verification_requested(signed_in_error) {
+            crate::i18n::t("YouTube requested verification again when opening this video with your account.").into()
+        } else if signed_in_error == "No playable stream found" {
+            crate::i18n::t("No playable stream found").into()
+        } else {
+            crate::ui::friendly_error(signed_in_error)
+        };
+    }
+    if error == "No playable stream found" {
+        return crate::i18n::t("No playable stream found").into();
+    }
     let lower = error.to_ascii_lowercase();
     if lower.contains("sign in to confirm") && (lower.contains("not a bot") || lower.contains("your age")) {
-        // the signed-in retry (yt-dlp with the browser sign-in) ran already
         let msg = if crate::api::web::connected() {
-            "YouTube blocked playback for this video, even with your account. Make sure yt-dlp is installed and up to date (Settings → Update yt-dlp), or try another network."
+            "YouTube requested verification before providing a video stream."
         } else {
             "YouTube blocked anonymous playback for this video. Connect “YouTube watch history” in Settings to play it with your account, or try another network."
         };

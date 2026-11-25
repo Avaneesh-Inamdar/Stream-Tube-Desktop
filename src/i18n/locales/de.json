@@ -380,6 +380,8 @@
   "Thanks for voting": "Danke für deine Stimme",
   "No playable stream found": "Kein abspielbarer Stream gefunden",
   "Video ID": "Video-ID",
+  "YouTube requested verification again when opening this video with your account.": "YouTube verlangt beim Öffnen dieses Videos mit deinem Konto erneut eine Bestätigung.",
+  "YouTube requested verification before providing a video stream.": "YouTube verlangt eine Bestätigung, bevor der Videostream bereitgestellt wird.",
   "Resolution": "Auflösung",
   "Frames": "Frames",
   "Video codec": "Videocodec",

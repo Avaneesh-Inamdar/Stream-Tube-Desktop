@@ -380,6 +380,8 @@
   "Thanks for voting": "Oy verdiğiniz için teşekkürler",
   "No playable stream found": "Oynatılabilir akış bulunamadı",
   "Video ID": "Video kimliği",
+  "YouTube requested verification again when opening this video with your account.": "YouTube, bu video hesabınızla açılırken yeniden doğrulama istedi.",
+  "YouTube requested verification before providing a video stream.": "YouTube, video akışını sunmadan önce doğrulama istedi.",
   "Resolution": "Çözünürlük",
   "Frames": "Kareler",
   "Video codec": "Video codec",

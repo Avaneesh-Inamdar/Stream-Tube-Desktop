@@ -803,15 +803,17 @@ pub fn ytdlp_streams(video_id: &str) -> Result<StreamInfo> {
 
 /// Whether YouTube refused an anonymous caller: a bot check, an age check, or
 /// a video only signed-in viewers may see.
-fn needs_sign_in(error: &str) -> bool {
+pub(crate) fn verification_requested(error: &str) -> bool {
     let e = error.to_ascii_lowercase();
     e.contains("not a bot")
         || e.contains("confirm your age")
         || e.contains("login_required")
         || e.contains("age_check_required")
-        || e.contains("sign in to")
-        || e.contains("age-restricted")
-        || e.contains("--cookies")
+}
+
+fn needs_sign_in(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    verification_requested(&e) || e.contains("sign in to") || e.contains("age-restricted") || e.contains("--cookies")
 }
 
 /// yt-dlp with the browser sign-in's cookies, for videos YouTube only plays to a

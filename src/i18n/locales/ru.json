@@ -380,6 +380,8 @@
   "Thanks for voting": "Голос учтён",
   "No playable stream found": "Не найден поток для воспроизведения",
   "Video ID": "Идентификатор видео",
+  "YouTube requested verification again when opening this video with your account.": "YouTube снова запросил подтверждение при открытии этого видео с вашим аккаунтом.",
+  "YouTube requested verification before providing a video stream.": "YouTube запросил подтверждение перед выдачей видеопотока.",
   "Resolution": "Разрешение",
   "Frames": "Кадры",
   "Video codec": "Видеокодек",

@@ -380,6 +380,8 @@
   "Thanks for voting": "Дауыс бергеніңізге рақмет",
   "No playable stream found": "Ойнатуға болатын ағын табылмады",
   "Video ID": "Видео ID",
+  "YouTube requested verification again when opening this video with your account.": "Бұл бейнені есептік жазбаңызбен ашқанда YouTube растауды қайта сұрады.",
+  "YouTube requested verification before providing a video stream.": "YouTube бейне ағынын бермес бұрын растауды сұрады.",
   "Resolution": "Ажыратымдылық",
   "Frames": "Фреймдер",
   "Video codec": "Бейне кодегі",
