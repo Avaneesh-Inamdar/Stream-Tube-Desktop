@@ -490,7 +490,7 @@ pub fn subscribed_channels() -> Result<Vec<ChannelItem>> {
 }
 
 /// The account's subscriptions feed, following a few continuations.
-pub fn subscriptions_videos(max_pages: usize) -> Result<Vec<VideoItem>> {
+pub fn subscriptions_videos(max_pages: usize) -> Result<(Vec<VideoItem>, Option<String>)> {
     let mut page = subscriptions_feed()?;
     let mut out: Vec<VideoItem> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -499,15 +499,15 @@ pub fn subscriptions_videos(max_pages: usize) -> Result<Vec<VideoItem>> {
             Item::Video(v) if seen.insert(v.id.clone()) => Some(v),
             _ => None,
         }));
-        match page.continuation.take() {
-            Some(tok) if n + 1 < max_pages => match browse_continue(&tok) {
+        match page.continuation.as_deref() {
+            Some(tok) if n + 1 < max_pages => match browse_continue(tok) {
                 Ok(p) => page = p,
                 Err(_) => break,
             },
             _ => break,
         }
     }
-    Ok(out)
+    Ok((out, page.continuation))
 }
 
 /// Copies the account's subscriptions into the local list. Returns how many were new.
