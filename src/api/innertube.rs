@@ -187,10 +187,13 @@ pub(crate) fn parse_tile(t: &Value) -> Option<VideoItem> {
     // episodes instead of giving a length, its title is the show's name and its two lines
     // are the latest episode and the channel. Show that episode like a video, with the
     // show and its size where the views would be.
+    // Two kinds: a show page ("VL" + a playlist id), or the latest episode played with
+    // the show's own list ("OL…"), which is what YouTube runs for recommended shows.
     let show_playlist = t
         .pointer("/onSelectCommand/browseEndpoint/browseId")
         .and_then(Value::as_str)
         .and_then(|b| b.strip_prefix("VL"))
+        .or_else(|| t.pointer("/onSelectCommand/watchEndpoint/playlistId").and_then(Value::as_str).filter(|p| p.starts_with("OL")))
         .map(str::to_string);
     let is_show = show_playlist.is_some();
     let (title, channel_name, views) = if is_show && parts.len() == 2 && views.is_none() && published.is_none() {
@@ -1572,6 +1575,26 @@ mod tile_tests {
         assert!(v.duration_text.is_none());
         // opening the card shows the show's playlist, without the "VL" of the browse id
         assert_eq!(v.playlist_id.as_deref(), Some("PLgZ8mBDMf-VTsBkM3YatTRCblZjbIBN0Q"));
+    }
+
+    /// Some shows play their latest episode together with the show's own list.
+    #[test]
+    fn a_show_that_plays_its_own_list_keeps_that_list() {
+        let line = |t: &str| json!({ "lineRenderer": { "items": [{ "lineItemRenderer": { "text": { "simpleText": t } } }] } });
+        let tile = json!({
+            "contentType": "TILE_CONTENT_TYPE_VIDEO",
+            "contentId": "9DCrS24Zk-g",
+            "onSelectCommand": { "watchEndpoint": { "videoId": "9DCrS24Zk-g", "playlistId": "OLa8Qyc44XfVYUHLvQqGvlBHDYTk1cx-n6Q" } },
+            "header": { "tileHeaderRenderer": { "thumbnailOverlays": [
+                { "thumbnailOverlayTimeStatusRenderer": { "text": { "runs": [{ "text": "49" }, { "text": " episodes" }] } } }
+            ] } },
+            "metadata": { "tileMetadataRenderer": { "title": { "simpleText": "A show" }, "lines": [line("Episode"), line("Channel")] } }
+        });
+        let v = super::parse_tile(&tile).unwrap();
+        assert_eq!(v.title, "Episode");
+        assert_eq!(v.channel_name, "Channel");
+        assert_eq!(v.views_text.as_deref(), Some("A show • 49 episodes"));
+        assert_eq!(v.playlist_id.as_deref(), Some("OLa8Qyc44XfVYUHLvQqGvlBHDYTk1cx-n6Q"));
     }
 
     /// An ordinary tile keeps its own title, channel, views and date.

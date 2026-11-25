@@ -239,7 +239,9 @@ fn more_button(id: SharedString, v: &VideoItem, cx: &App) -> Stateful<Div> {
 
 fn watch_route(v: &VideoItem) -> Route {
     match &v.playlist_id {
-        // a show opens its list of episodes, like on YouTube
+        // a show's own list ("OL…") plays the latest episode with the episodes queued
+        Some(list) if list.starts_with("OL") => Route::Watch { id: v.id.clone(), playlist: Some(list.clone()), start: None },
+        // any other show opens its page, a list of episodes, like on YouTube
         Some(list) => Route::Playlist(list.clone()),
         None => Route::Watch { id: v.id.clone(), playlist: None, start: None },
     }
