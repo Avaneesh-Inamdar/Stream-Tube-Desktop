@@ -143,6 +143,8 @@ pub struct Settings {
     pub feed_group_by_day: bool,
     /// audio equalizer preset ("flat", "bass", "voice", "treble", "warm")
     pub eq_preset: String,
+    /// keep the tab bar visible even when only one tab is open
+    pub always_show_tab_bar: bool,
 }
 
 impl Default for Settings {
@@ -217,6 +219,7 @@ impl Default for Settings {
             feed_group_by_day: true,
             show_player_title: false,
             eq_preset: "flat".into(),
+            always_show_tab_bar: false,
             download_dir: dirs::download_dir()
                 .map(|d| d.join("Stream Tube").to_string_lossy().into_owned())
                 .unwrap_or_default(),

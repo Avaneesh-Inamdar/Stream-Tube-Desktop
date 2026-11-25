@@ -11,7 +11,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 
 // ───────────────────────── routes ─────────────────────────
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Route {
     Home,
     Explore(usize),
@@ -522,6 +522,7 @@ struct Tab {
     /// the queue and position of the video this tab was playing when it was
     /// left, so coming back resumes it with its queue (one player is shared)
     playback: Option<(String, Vec<crate::api::types::VideoItem>, Option<usize>, f64)>,
+    pinned: bool,
 }
 
 /// At most this many tabs; more would only hold pages nobody looks at.
@@ -735,10 +736,22 @@ impl AppView {
                 .detach();
             }
         }
+        let pinned_routes: Vec<Route> = store::kv_get("pinned_tabs")
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let mut tabs: Vec<Tab> = Vec::new();
+        let mut next_tab_id = 1u64;
+        for r in pinned_routes.into_iter().take(MAX_TABS.saturating_sub(1)) {
+            tabs.push(Tab { id: next_tab_id, route: r, page: None, history: Vec::new(), forward: Vec::new(), playback: None, pinned: true });
+            next_tab_id += 1;
+        }
+        let active_tab = tabs.len();
+        tabs.push(Tab { id: next_tab_id, route: start.clone(), page: None, history: Vec::new(), forward: Vec::new(), playback: None, pinned: false });
+        next_tab_id += 1;
         Self {
-            tabs: vec![Tab { id: 1, route: start.clone(), page: None, history: Vec::new(), forward: Vec::new(), playback: None }],
-            active_tab: 0,
-            next_tab_id: 2,
+            tabs,
+            active_tab,
+            next_tab_id,
             route: start,
             page,
             history: Vec::new(),
@@ -1236,7 +1249,7 @@ impl AppView {
         self.next_tab_id += 1;
         // right after the current tab, like a browser
         let at = self.active_tab + 1;
-        self.tabs.insert(at, Tab { id, route, page: None, history: Vec::new(), forward: Vec::new(), playback: None });
+        self.tabs.insert(at, Tab { id, route, page: None, history: Vec::new(), forward: Vec::new(), playback: None, pinned: false });
         if switch {
             self.switch_tab(at, window, cx);
         } else {
@@ -1307,7 +1320,7 @@ impl AppView {
     }
 
     pub fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tabs.len() < 2 || index >= self.tabs.len() {
+        if self.tabs.len() < 2 || index >= self.tabs.len() || self.tabs[index].pinned {
             return;
         }
         if index == self.active_tab {
@@ -1357,8 +1370,27 @@ impl AppView {
         }
     }
 
+    fn save_pinned_tabs(&self) {
+        let pinned: Vec<Route> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.pinned)
+            .map(|(i, t)| if i == self.active_tab { self.route.clone() } else { t.route.clone() })
+            .collect();
+        store::kv_set("pinned_tabs", &serde_json::to_string(&pinned).unwrap_or_default());
+    }
+
+    fn toggle_pin_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(index) {
+            tab.pinned = !tab.pinned;
+            self.save_pinned_tabs();
+            cx.notify();
+        }
+    }
+
     fn render_tabs(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.tabs.len() < 2 {
+        if self.tabs.len() < 2 && !store::settings_snapshot().always_show_tab_bar {
             return None;
         }
         let p = pal(cx);
@@ -1376,6 +1408,7 @@ impl AppView {
             .overflow_x_scroll();
         for i in 0..self.tabs.len() {
             let active = i == self.active_tab;
+            let pinned = self.tabs[i].pinned;
             let route = if active { self.route.clone() } else { self.tabs[i].route.clone() };
             let id = self.tabs[i].id;
             let label = Self::tab_label(&route, cx);
@@ -1389,7 +1422,7 @@ impl AppView {
                     .h(px(30.))
                     .pl_3()
                     .pr_1()
-                    .w(px(200.))
+                    .w(if pinned { px(160.) } else { px(200.) })
                     .rounded_lg()
                     .cursor_pointer()
                     .when(active, |d| d.bg(p.surface2))
@@ -1399,13 +1432,45 @@ impl AppView {
                             this.switch_tab(i, window, cx);
                         }
                     }))
-                    // middle click closes, like a browser tab
+                    // middle click closes (unless pinned), like a browser tab
                     .on_mouse_down(
                         MouseButton::Middle,
                         cx.listener(move |this, _, window, cx| {
                             if let Some(i) = this.tabs.iter().position(|t| t.id == id) {
                                 this.close_tab(i, window, cx);
                             }
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            let can_close = !pinned && this.tabs.len() > 1;
+                            let mut items = vec![MenuItem::new(
+                                "pin",
+                                t(if pinned { "Unpin tab" } else { "Pin tab" }),
+                                move |_, cx| {
+                                    if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+                                        app.update(cx, |a, cx| {
+                                            if let Some(idx) = a.tabs.iter().position(|t| t.id == id) {
+                                                a.toggle_pin_tab(idx, cx);
+                                            }
+                                        });
+                                    }
+                                },
+                            )];
+                            if can_close {
+                                items.push(MenuItem::new("x", t("Close tab"), move |window, cx| {
+                                    if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+                                        app.update(cx, |a, cx| {
+                                            if let Some(idx) = a.tabs.iter().position(|t| t.id == id) {
+                                                a.close_tab(idx, window, cx);
+                                            }
+                                        });
+                                    }
+                                }));
+                            }
+                            open_menu(ev.position, items, window, cx);
                         }),
                     )
                     .child(icon(Self::tab_icon(&route)).size_4().text_color(if active { p.accent } else { p.text2 }))
@@ -1420,24 +1485,37 @@ impl AppView {
                             .text_color(if active { p.text } else { p.text2 })
                             .child(label),
                     )
-                    .child(
-                        div()
-                            .id(("tab-close", id))
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .justify_center()
-                            .size(px(22.))
-                            .rounded_md()
-                            .hover(|d| d.bg(p.hover))
-                            .child(icon("x").size_3p5().text_color(p.text2))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                if let Some(i) = this.tabs.iter().position(|t| t.id == id) {
-                                    this.close_tab(i, window, cx);
-                                }
-                            })),
-                    ),
+                    .when(pinned, |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .justify_center()
+                                .size(px(22.))
+                                .child(icon("pin").size_3p5().text_color(p.accent)),
+                        )
+                    })
+                    .when(!pinned, |d| {
+                        d.child(
+                            div()
+                                .id(("tab-close", id))
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .justify_center()
+                                .size(px(22.))
+                                .rounded_md()
+                                .hover(|d| d.bg(p.hover))
+                                .child(icon("x").size_3p5().text_color(p.text2))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    if let Some(i) = this.tabs.iter().position(|t| t.id == id) {
+                                        this.close_tab(i, window, cx);
+                                    }
+                                })),
+                        )
+                    }),
             );
         }
         strip = strip.child(

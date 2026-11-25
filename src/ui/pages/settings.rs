@@ -660,6 +660,12 @@ impl SettingsPage {
                 switch("sbar", s.always_scrollbars, |s, v| s.always_scrollbars = v, cx),
                 cx,
             ))
+            .child(row(
+                "Always show tab bar",
+                "Keep the tab bar visible even when only one tab is open",
+                switch("tbar", s.always_show_tab_bar, |s, v| s.always_show_tab_bar = v, cx),
+                cx,
+            ))
             .child(row("Density", "", self.choice("density", &[("compact".to_string(), "Compact"), ("default".to_string(), "Default"), ("comfortable".to_string(), "Comfortable")], s.density.clone(), |s, v| s.density = v, cx), cx))
             .child(row("Thumbnail corners", "", self.choice("radius", &[(0.0f32, "Square"), (6.0, "Small"), (12.0, "Rounded"), (18.0, "Large")], s.thumb_radius, |s, v| s.thumb_radius = v, cx), cx))
             .child(row("Grid columns", "", self.choice("cols", &[(0u32, "Auto"), (3, "3"), (4, "4"), (5, "5"), (6, "6")], s.grid_columns, |s, v| s.grid_columns = v, cx), cx))
