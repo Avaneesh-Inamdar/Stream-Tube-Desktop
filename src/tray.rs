@@ -16,7 +16,7 @@ const QUIT: i32 = 2;
 static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
 
 thread_local! {
-    static HIDDEN: Cell<bool> = const { Cell::new(false) };
+    static HIDDEN: Cell<Option<HWND>> = const { Cell::new(None) };
     static QUITTING: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -59,7 +59,7 @@ fn remove_icon(window: HWND) {
 
 fn restore_native(window: HWND) {
     remove_icon(window);
-    HIDDEN.set(false);
+    HIDDEN.set(None);
     // SAFETY: This is the HWND passed by Windows to the tray callback.
     unsafe {
         let _ = ShowWindowAsync(window, SW_SHOW);
@@ -67,12 +67,16 @@ fn restore_native(window: HWND) {
     }
 }
 
+pub(crate) fn is_hidden(window: &Window) -> bool {
+    hwnd(window).is_some_and(|window| HIDDEN.get() == Some(window))
+}
+
 pub(crate) fn hide(window: &Window) -> bool {
     if QUITTING.replace(false) || !crate::store::settings_snapshot().minimize_to_tray {
         return false;
     }
     let Some(window) = hwnd(window) else { return false };
-    if HIDDEN.get() {
+    if HIDDEN.get() == Some(window) {
         return true;
     }
     // SAFETY: The subclass is installed on the same UI thread that owns the HWND.
@@ -81,17 +85,18 @@ pub(crate) fn hide(window: &Window) -> bool {
         if !SetWindowSubclass(window, Some(window_message), 1, 0).as_bool() || !add_icon(window) {
             return false;
         }
+        HIDDEN.set(Some(window));
         if !ShowWindowAsync(window, SW_HIDE).as_bool() {
+            HIDDEN.set(None);
             remove_icon(window);
             return false;
         }
     }
-    HIDDEN.set(true);
     true
 }
 
 pub(crate) fn restore(window: &Window) -> bool {
-    let Some(window) = hwnd(window).filter(|_| HIDDEN.get()) else { return false };
+    let Some(window) = hwnd(window).filter(|&window| HIDDEN.get() == Some(window)) else { return false };
     restore_native(window);
     true
 }
@@ -106,7 +111,7 @@ extern "system" fn window_message(window: HWND, message: u32, wparam: WPARAM, lp
                     OPEN => restore_native(window),
                     QUIT => {
                         remove_icon(window);
-                        HIDDEN.set(false);
+                        HIDDEN.set(None);
                         QUITTING.set(true);
                         // SAFETY: the owning window handles the posted close on its event loop.
                         unsafe { let _ = PostMessageW(Some(window), WM_CLOSE, WPARAM(0), LPARAM(0)); }
@@ -118,12 +123,12 @@ extern "system" fn window_message(window: HWND, message: u32, wparam: WPARAM, lp
         }
         return LRESULT(0);
     }
-    if TASKBAR_CREATED.get() == Some(&message) && HIDDEN.get() && !add_icon(window) {
+    if TASKBAR_CREATED.get() == Some(&message) && HIDDEN.get() == Some(window) && !add_icon(window) {
         restore_native(window);
     }
     if message == WM_NCDESTROY {
         remove_icon(window);
-        HIDDEN.set(false);
+        HIDDEN.set(None);
         // SAFETY: Remove the callback installed by hide before the window is destroyed.
         unsafe { let _ = RemoveWindowSubclass(window, Some(window_message), 1); }
     }

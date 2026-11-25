@@ -3603,6 +3603,9 @@ pub fn refresh_all_pages(cx: &mut App) {
 fn window_minimized(window: &Window) -> bool {
     #[cfg(windows)]
     {
+        if crate::tray::is_hidden(window) {
+            return true;
+        }
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         #[link(name = "user32")]
         unsafe extern "system" {
