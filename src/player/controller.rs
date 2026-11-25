@@ -570,7 +570,7 @@ impl Player {
         }
         self.frame_progress = None;
         if self.recovering_picture {
-            self.set_paused(true);
+            self.set_paused(true, cx);
             self.set_playback_ready(false, cx);
             self.error = Some(translate("The video decoder stopped producing frames.").into());
             cx.notify();
