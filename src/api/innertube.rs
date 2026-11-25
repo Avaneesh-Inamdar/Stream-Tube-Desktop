@@ -183,6 +183,26 @@ pub(crate) fn parse_tile(t: &Value) -> Option<VideoItem> {
         .cloned();
     let channel_name = parts.iter().find(|p| Some(*p) != views.as_ref() && Some(*p) != published.as_ref()).cloned().unwrap_or_default();
     let duration_secs = badge.as_deref().and_then(parse_duration);
+    // A show (podcast, series) is a tile too: it opens a playlist, its badge counts
+    // episodes instead of giving a length, its title is the show's name and its two lines
+    // are the latest episode and the channel. Show that episode like a video, with the
+    // show and its size where the views would be.
+    // Two kinds: a show page ("VL" + a playlist id), or the latest episode played with
+    // the show's own list ("OL…"), which is what YouTube runs for recommended shows.
+    let show_playlist = t
+        .pointer("/onSelectCommand/browseEndpoint/browseId")
+        .and_then(Value::as_str)
+        .and_then(|b| b.strip_prefix("VL"))
+        .or_else(|| t.pointer("/onSelectCommand/watchEndpoint/playlistId").and_then(Value::as_str).filter(|p| p.starts_with("OL")))
+        .map(str::to_string);
+    let is_show = show_playlist.is_some();
+    let (title, channel_name, views) = if is_show && parts.len() == 2 && views.is_none() && published.is_none() {
+        let size = badge.clone().filter(|_| duration_secs.is_none());
+        let note = [Some(title), size].into_iter().flatten().collect::<Vec<_>>().join(" • ");
+        (parts[0].clone(), parts[1].clone(), Some(note))
+    } else {
+        (title, channel_name, views)
+    };
     Some(VideoItem {
         id,
         title,
@@ -195,6 +215,7 @@ pub(crate) fn parse_tile(t: &Value) -> Option<VideoItem> {
         views_text: views,
         published_text: published,
         is_live,
+        playlist_id: show_playlist,
         ..Default::default()
     })
 }
@@ -257,6 +278,7 @@ fn parse_video_renderer(r: &Value) -> Option<VideoItem> {
         is_live,
         is_short,
         is_upcoming,
+        playlist_id: None,
     })
 }
 
@@ -1527,6 +1549,77 @@ mod heatmap_tests {
             let w = super::watch_next(id, None).unwrap();
             println!("{id}: heatmap={} chapters={}", w.heatmap.len(), w.chapters.len());
         }
+    }
+}
+
+#[cfg(test)]
+mod tile_tests {
+    use serde_json::json;
+
+    /// A show from the account's home feed: the tile's title is the show, the lines are the
+    /// latest episode and the channel, and the badge counts episodes.
+    #[test]
+    fn a_show_tile_reads_as_its_latest_episode() {
+        let tile = json!({
+            "contentType": "TILE_CONTENT_TYPE_VIDEO",
+            "contentId": "rTjvNXrxtas",
+            "onSelectCommand": { "browseEndpoint": { "browseId": "VLPLgZ8mBDMf-VTsBkM3YatTRCblZjbIBN0Q" } },
+            "header": { "tileHeaderRenderer": { "thumbnailOverlays": [
+                { "thumbnailOverlayTimeStatusRenderer": { "text": { "runs": [{ "text": "13" }, { "text": " episodes" }] } } }
+            ] } },
+            "metadata": { "tileMetadataRenderer": {
+                "title": { "simpleText": "Point" },
+                "lines": [
+                    { "lineRenderer": { "items": [{ "lineItemRenderer": { "text": { "simpleText": "Episode two" } } }] } },
+                    { "lineRenderer": { "items": [{ "lineItemRenderer": { "text": { "simpleText": "Some Channel" } } }] } }
+                ]
+            } }
+        });
+        let v = super::parse_tile(&tile).unwrap();
+        assert_eq!(v.title, "Episode two");
+        assert_eq!(v.channel_name, "Some Channel");
+        assert_eq!(v.views_text.as_deref(), Some("Point • 13 episodes"));
+        assert!(v.duration_text.is_none());
+        // opening the card shows the show's playlist, without the "VL" of the browse id
+        assert_eq!(v.playlist_id.as_deref(), Some("PLgZ8mBDMf-VTsBkM3YatTRCblZjbIBN0Q"));
+    }
+
+    /// Some shows play their latest episode together with the show's own list.
+    #[test]
+    fn a_show_that_plays_its_own_list_keeps_that_list() {
+        let line = |t: &str| json!({ "lineRenderer": { "items": [{ "lineItemRenderer": { "text": { "simpleText": t } } }] } });
+        let tile = json!({
+            "contentType": "TILE_CONTENT_TYPE_VIDEO",
+            "contentId": "9DCrS24Zk-g",
+            "onSelectCommand": { "watchEndpoint": { "videoId": "9DCrS24Zk-g", "playlistId": "OLa8Qyc44XfVYUHLvQqGvlBHDYTk1cx-n6Q" } },
+            "header": { "tileHeaderRenderer": { "thumbnailOverlays": [
+                { "thumbnailOverlayTimeStatusRenderer": { "text": { "runs": [{ "text": "49" }, { "text": " episodes" }] } } }
+            ] } },
+            "metadata": { "tileMetadataRenderer": { "title": { "simpleText": "A show" }, "lines": [line("Episode"), line("Channel")] } }
+        });
+        let v = super::parse_tile(&tile).unwrap();
+        assert_eq!(v.title, "Episode");
+        assert_eq!(v.channel_name, "Channel");
+        assert_eq!(v.views_text.as_deref(), Some("A show • 49 episodes"));
+        assert_eq!(v.playlist_id.as_deref(), Some("OLa8Qyc44XfVYUHLvQqGvlBHDYTk1cx-n6Q"));
+    }
+
+    /// An ordinary tile keeps its own title, channel, views and date.
+    #[test]
+    fn a_video_tile_is_unchanged() {
+        let line = |t: &str| json!({ "lineRenderer": { "items": [{ "lineItemRenderer": { "text": { "simpleText": t } } }] } });
+        let tile = json!({
+            "contentType": "TILE_CONTENT_TYPE_VIDEO",
+            "contentId": "abc",
+            "onSelectCommand": { "watchEndpoint": { "videoId": "abc" } },
+            "metadata": { "tileMetadataRenderer": { "title": { "simpleText": "A video" }, "lines": [line("Some Channel"), line("340K views"), line("4 days ago")] } }
+        });
+        let v = super::parse_tile(&tile).unwrap();
+        assert_eq!(v.title, "A video");
+        assert_eq!(v.channel_name, "Some Channel");
+        assert_eq!(v.views_text.as_deref(), Some("340K views"));
+        assert_eq!(v.published_text.as_deref(), Some("4 days ago"));
+        assert!(v.playlist_id.is_none());
     }
 }
 

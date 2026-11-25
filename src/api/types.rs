@@ -19,6 +19,9 @@ pub struct VideoItem {
     pub is_live: bool,
     pub is_short: bool,
     pub is_upcoming: bool,
+    /// Set when the card stands for a show (podcast, series): the playlist of its
+    /// episodes, which is what opening the card should show.
+    pub playlist_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
