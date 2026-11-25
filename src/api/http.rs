@@ -9,6 +9,8 @@ use ureq::typestate::AgentScope;
 pub const BROWSER_UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub(crate) struct NetworkAgent(Mutex<Option<CachedAgent>>);
 
 struct CachedAgent {
@@ -59,7 +61,7 @@ fn agent() -> ureq::Agent {
     static AGENT: NetworkAgent = NetworkAgent::new();
     AGENT.get(&crate::store::settings_snapshot(), |builder| {
         builder
-            .timeout_global(Some(Duration::from_secs(30)))
+            .timeout_global(Some(REQUEST_TIMEOUT))
             .http_status_as_error(false)
             .user_agent(BROWSER_UA)
     })
@@ -88,6 +90,46 @@ mod tests {
         settings.ipv4_only = true;
         let restored = cache.get(&settings, |builder| builder);
         assert_eq!(restored.config().ip_family(), IpFamily::Ipv4Only);
+    }
+
+    #[test]
+    #[ignore = "streams a local response for over 30 seconds"]
+    fn slow_download_can_keep_making_progress() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::{Ipv4Addr, TcpListener};
+        use std::time::Duration;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let url = format!("http://{}/download", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut request = BufReader::new(&mut stream);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                assert!(request.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\ns").unwrap();
+            for byte in b"low!" {
+                std::thread::sleep(Duration::from_secs(8));
+                stream.write_all(&[*byte]).unwrap();
+            }
+        });
+        let mut bytes = Vec::new();
+        let mut progress = 0;
+        super::download_to(&url, &mut bytes, |done, total| {
+            assert_eq!(total, Some(5));
+            assert!(done > progress);
+            progress = done;
+            true
+        }).unwrap();
+        server.join().unwrap();
+        assert_eq!(bytes, b"slow!");
+        assert_eq!(progress, 5);
     }
 }
 
@@ -165,7 +207,18 @@ pub fn download_to(
     out: &mut dyn std::io::Write,
     mut progress: impl FnMut(u64, Option<u64>) -> bool,
 ) -> Result<()> {
-    let mut resp = agent().get(url).call()?;
+    // A healthy transfer can take longer than a small API request.
+    let mut resp = agent()
+        .get(url)
+        .config()
+        .timeout_global(None)
+        .timeout_resolve(Some(REQUEST_TIMEOUT))
+        .timeout_connect(Some(REQUEST_TIMEOUT))
+        .timeout_send_request(Some(REQUEST_TIMEOUT))
+        .timeout_recv_response(Some(REQUEST_TIMEOUT))
+        .timeout_per_read(Some(REQUEST_TIMEOUT))
+        .build()
+        .call()?;
     if resp.status().as_u16() >= 400 {
         return Err(anyhow!("HTTP {}", resp.status()));
     }
