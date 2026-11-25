@@ -996,7 +996,7 @@ impl PlayerView {
         let muted = pl.muted;
         let segments = pl.segments.clone();
         let chapters = pl.chapters.clone();
-        let cache = pl.buffered_until();
+        let cache = pl.buffered_ranges();
         let caption_on = pl.caption.is_some();
         let has_captions = pl.streams.as_ref().map(|s| !s.captions.is_empty()).unwrap_or(false);
         let storyboard = pl.storyboard.clone();
@@ -1009,7 +1009,6 @@ impl PlayerView {
         let sb_show = store::settings_snapshot().sponsorblock;
         let sb_actions = store::settings_snapshot().sb_actions.clone();
         let frac = if duration > 0.0 { (time / duration) as f32 } else { 0.0 };
-        let cache_frac = if duration > 0.0 { (cache / duration).min(1.0) as f32 } else { 0.0 };
         let hover = self.hover_frac.filter(|_| duration > 0.0 && self.hovering);
         let accent = p.accent;
         let seek_b = self.seek_bounds.clone();
@@ -1063,7 +1062,12 @@ impl PlayerView {
                 .size_full()
                 .overflow_hidden()
                 .bg(hsla(0., 0., 1., 0.25))
-                .child(div().absolute().top_0().left_0().h_full().w(relative(local(cache_frac))).bg(hsla(0., 0., 1., 0.4)))
+                .children(cache.iter().filter_map(|&(start, end)| {
+                    if duration <= 0.0 { return None }
+                    let left = local((start / duration) as f32);
+                    let right = local((end / duration) as f32);
+                    (right > left).then(|| div().absolute().top_0().left(relative(left)).h_full().w(relative(right - left)).bg(hsla(0., 0., 1., 0.4)))
+                }))
                 .when_some(hover, |d, hv| d.child(div().absolute().top_0().left_0().h_full().w(relative(local(hv))).bg(hsla(0., 0., 1., 0.5))))
                 .child(div().absolute().top_0().left_0().h_full().w(relative(local(frac))).bg(accent));
             bar = bar.child(
