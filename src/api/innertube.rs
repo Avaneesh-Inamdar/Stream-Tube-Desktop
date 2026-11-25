@@ -187,7 +187,12 @@ pub(crate) fn parse_tile(t: &Value) -> Option<VideoItem> {
     // episodes instead of giving a length, its title is the show's name and its two lines
     // are the latest episode and the channel. Show that episode like a video, with the
     // show and its size where the views would be.
-    let is_show = t.pointer("/onSelectCommand/browseEndpoint/browseId").and_then(Value::as_str).is_some_and(|b| b.starts_with("VL"));
+    let show_playlist = t
+        .pointer("/onSelectCommand/browseEndpoint/browseId")
+        .and_then(Value::as_str)
+        .and_then(|b| b.strip_prefix("VL"))
+        .map(str::to_string);
+    let is_show = show_playlist.is_some();
     let (title, channel_name, views) = if is_show && parts.len() == 2 && views.is_none() && published.is_none() {
         let size = badge.clone().filter(|_| duration_secs.is_none());
         let note = [Some(title), size].into_iter().flatten().collect::<Vec<_>>().join(" • ");
@@ -207,6 +212,7 @@ pub(crate) fn parse_tile(t: &Value) -> Option<VideoItem> {
         views_text: views,
         published_text: published,
         is_live,
+        playlist_id: show_playlist,
         ..Default::default()
     })
 }
@@ -269,6 +275,7 @@ fn parse_video_renderer(r: &Value) -> Option<VideoItem> {
         is_live,
         is_short,
         is_upcoming,
+        playlist_id: None,
     })
 }
 
@@ -1563,6 +1570,8 @@ mod tile_tests {
         assert_eq!(v.channel_name, "Some Channel");
         assert_eq!(v.views_text.as_deref(), Some("Point • 13 episodes"));
         assert!(v.duration_text.is_none());
+        // opening the card shows the show's playlist, without the "VL" of the browse id
+        assert_eq!(v.playlist_id.as_deref(), Some("PLgZ8mBDMf-VTsBkM3YatTRCblZjbIBN0Q"));
     }
 
     /// An ordinary tile keeps its own title, channel, views and date.
@@ -1580,6 +1589,7 @@ mod tile_tests {
         assert_eq!(v.channel_name, "Some Channel");
         assert_eq!(v.views_text.as_deref(), Some("340K views"));
         assert_eq!(v.published_text.as_deref(), Some("4 days ago"));
+        assert!(v.playlist_id.is_none());
     }
 }
 

@@ -151,7 +151,7 @@ pub fn thumbnail(v: &VideoItem, url: String, w: Pixels, h: Pixels, radius: Pixel
 pub fn video_menu_items(v: &VideoItem) -> Vec<MenuItem> {
     let mut items = Vec::new();
     {
-        let route = if v.is_short { Route::Shorts(Some(v.id.clone())) } else { Route::Watch { id: v.id.clone(), playlist: None, start: None } };
+        let route = if v.is_short { Route::Shorts(Some(v.id.clone())) } else { watch_route(v) };
         items.push(MenuItem::new("app-window", t("Open in new tab"), move |window, cx| {
             crate::ui::app::open_in_new_tab(route.clone(), false, window, cx)
         }));
@@ -238,7 +238,11 @@ fn more_button(id: SharedString, v: &VideoItem, cx: &App) -> Stateful<Div> {
 }
 
 fn watch_route(v: &VideoItem) -> Route {
-    Route::Watch { id: v.id.clone(), playlist: None, start: None }
+    match &v.playlist_id {
+        // a show opens its list of episodes, like on YouTube
+        Some(list) => Route::Playlist(list.clone()),
+        None => Route::Watch { id: v.id.clone(), playlist: None, start: None },
+    }
 }
 
 fn video_title(title: String) -> Stateful<Div> {
