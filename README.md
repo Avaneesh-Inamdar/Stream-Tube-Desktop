@@ -215,13 +215,19 @@ sudo pacman -S mpv            # Arch
 `StreamTube-<version>-macos-arm64-UNOFFICIAL.zip`. It is built from the
 [`community/macos-apple-silicon`](https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop/tree/community/macos-apple-silicon)
 branch, contributed by [William Wessex](https://github.com/wwessex). The
-[0.7.3-alpha verification report](docs/macos-0.7.3-verification.md) records checks
-on a physical Apple M4 Mac. macOS support remains unofficial and community maintained.
+[0.7.4-alpha verification report](docs/macos-0.7.4-verification.md) records the
+aspect-control and browser-login fixes checked on a physical Apple M4 Mac.
+macOS support remains unofficial and community maintained.
 Install mpv with `brew install mpv`, extract the ZIP, and open `Stream Tube.app`.
 The bundle uses Homebrew's libmpv at runtime and is ad hoc signed. Standard
 Gatekeeper acceptance of a downloaded app requires
 [Developer ID signing and notarisation](https://developer.apple.com/developer-id/).
 The [local build instructions](#macos-local-build) also produce a runnable bundle.
+
+On macOS, the browser sign-in window runs normally while you enter your Google
+credentials. Once YouTube has signed in, it closes and the app reads the temporary
+profile's YouTube session in a separate headless process. Your existing browser
+profiles are not used.
 
 Downloads above 360p need yt-dlp and FFmpeg. The app offers to fetch both the first
 time you need them, on Windows and Linux, or get them any time from *Settings → Downloads*.
@@ -241,10 +247,20 @@ gh attestation verify StreamTube-0.7.4-alpha-setup.exe --repo Avaneesh-Inamdar/S
 Check a download against those before running it. The in-app updater also checks
 the installer's SHA-256 before running it.
 
-The unofficial macOS ZIP attached to **0.7.3-alpha** is absent from that release's
-checksum file and has no provenance attestation. Its
-[verification report](docs/macos-0.7.3-verification.md#package-checks) records the
-SHA-256 checked against GitHub's release asset metadata.
+The unofficial macOS ZIPs attached to **0.7.3-alpha** and **0.7.4-alpha** are absent
+from their releases' checksum files and have no provenance attestation. The
+[0.7.3 report](docs/macos-0.7.3-verification.md#package-checks) and
+[0.7.4 report](docs/macos-0.7.4-verification.md#package-checks) record the SHA-256
+checked against GitHub's release asset metadata.
+
+New macOS workflow artifacts include the ZIP and a matching `.zip.sha256` file.
+Push and manual builds also attest both files. Keep them together when attaching an
+unofficial build to a release, then verify the download with:
+
+```sh
+shasum -c StreamTube-0.7.4-alpha-macos-arm64-UNOFFICIAL.zip.sha256
+gh attestation verify StreamTube-0.7.4-alpha-macos-arm64-UNOFFICIAL.zip --repo Avaneesh-Inamdar/Stream-Tube-Desktop
+```
 
 ## Building
 
