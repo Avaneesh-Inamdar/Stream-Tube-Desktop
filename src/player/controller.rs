@@ -1022,7 +1022,7 @@ impl Player {
     }
 
     pub fn seek_to(&mut self, t: f64) {
-        let t = if self.duration > 0.0 { t.clamp(0.0, self.duration - 0.1) } else { t.max(0.0) };
+        let t = clamp_seek(t, self.duration);
         self.time = t;
         if let Some(m) = &self.mpv {
             let _ = m.command(&["seek", &format!("{t}"), "absolute+exact"]);
@@ -1653,6 +1653,14 @@ mod caption_tests {
 
 /// Where a chapter jump from `now` lands: the next chapter's start (`dir` > 0), or
 /// the previous chapter's start (in the first chapter, its own start).
+fn clamp_seek(t: f64, duration: f64) -> f64 {
+    if duration > 0.0 {
+        t.clamp(0.0, (duration - 0.1).max(0.0))
+    } else {
+        t.max(0.0)
+    }
+}
+
 fn chapter_target(starts: &[f64], now: f64, dir: i32) -> Option<f64> {
     let now = now + 0.01;
     if dir > 0 {
@@ -1676,5 +1684,20 @@ mod chapter_tests {
         assert_eq!(chapter_target(&c, 60.0, -1), Some(0.0));
         assert_eq!(chapter_target(&c, 10.0, -1), Some(0.0));
         assert_eq!(chapter_target(&[], 10.0, 1), None);
+    }
+}
+
+#[cfg(test)]
+mod seek_tests {
+    use super::clamp_seek;
+
+    #[::core::prelude::v1::test]
+    fn stays_inside_the_video_and_does_not_panic_when_it_is_very_short() {
+        assert_eq!(clamp_seek(30.0, 120.0), 30.0);
+        assert_eq!(clamp_seek(120.0, 120.0), 119.9);
+        assert_eq!(clamp_seek(-1.0, 120.0), 0.0);
+        assert_eq!(clamp_seek(5.0, 0.0), 5.0);
+        assert_eq!(clamp_seek(0.05, 0.05), 0.0);
+        assert_eq!(clamp_seek(0.1, 0.1), 0.0);
     }
 }
