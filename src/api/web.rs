@@ -736,7 +736,7 @@ fn send_position_report(event: impl FnOnce() -> Event) {
 
 #[cfg(test)]
 mod playback_tests {
-    use super::{Event, TEST_POSITION_REPORTS, Watch, oneshot, stats_url, watch_report_summary};
+    use super::{Event, REPORTER, TEST_POSITION_REPORTS, Watch, oneshot, stats_url, watch_report_summary};
     use crate::PlatformQuitRequested;
     use crate::api::types::VideoItem;
     use crate::player::controller;
@@ -935,6 +935,30 @@ mod playback_tests {
         assert!(cx.read(|cx| cx.has_global::<PlatformQuitRequested>()),
             "platform exit must proceed at the deadline with no acknowledgement");
         assert!(flushed.is_canceled(), "the timeout must stop waiting for the reporter");
+    }
+
+    #[gpui::test]
+    fn closing_last_window_without_reporter_requests_immediate_exit(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            controller::init(cx);
+            crate::register_window_close_handler(cx);
+        });
+        let main = cx.add_window(|_, _| Empty);
+        assert!(REPORTER.get().is_none());
+        assert!(TEST_POSITION_REPORTS.with(|slot| slot.borrow().is_none()));
+        assert!(!cx.read(|cx| cx.has_global::<PlatformQuitRequested>()));
+
+        main.update(cx, |_, window, _| window.remove_window()).unwrap();
+
+        assert!(cx.windows().is_empty());
+        assert!(cx.read(|cx| cx.has_global::<PlatformQuitRequested>()),
+            "closing the last window without a reporter must request platform exit synchronously");
+
+        // Let any spawned work register its timers without advancing the test clock.
+        cx.run_until_parked();
+        assert!(!cx.dispatcher.scheduler().has_pending_tasks(),
+            "closing without a reporter must leave no shutdown timer pending");
+        assert!(REPORTER.get().is_none(), "the reporter should remain uninitialised");
     }
 
     const SHUTDOWN_TEST_POSITION: f64 = 85.375;
