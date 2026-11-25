@@ -630,6 +630,9 @@ impl Render for ShortsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = pal(cx);
         let ui = *cx.global::<UiState>();
+        let pl = player(cx);
+        let playing = pl.read(cx);
+        crate::player::shorts_preload::update(&self.list[self.idx..], playing.quality, playing.audio_only);
         if self.list.is_empty() {
             crate::ui::slot::clear_slot(cx);
             return div().size_full().child(if self.loading { spinner(cx).into_any_element() } else { empty_state("zap", "No Shorts found", "", cx).into_any_element() }).into_any_element();

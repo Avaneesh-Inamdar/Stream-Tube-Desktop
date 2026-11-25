@@ -53,6 +53,8 @@
   "Notes and links on older videos, restored from the Annotations Restored archive": "从注释 恢复档案中恢复的旧视频上的注释和链接",
   "Force original audio": "强制原始音频",
   "Play the original language instead of auto-dubbed tracks": "播放原始语言而不是自动配音的音轨",
+  "Preload upcoming Shorts": "预加载接下来的 Shorts",
+  "Buffer the start of this many videos ahead of playback": "提前缓冲多少个视频的开头",
   "Shorts: play next automatically": "自动播放下一条 Shorts",
   "Move to the next Short when one ends": "当一个短期结束时移动到下一个短期",
   "Open Shorts in the regular player": "开放短片在普通播放器",

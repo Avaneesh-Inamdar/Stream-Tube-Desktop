@@ -308,7 +308,7 @@ fn hls_client(video_id: &str, c: HlsClient) -> Result<StreamInfo> {
     // adaptive URLs from this client need a PO token; only the HLS path is usable
     info.audio.clear();
     info.muxed.clear();
-    let (video, audio, hls_orig_lang) = hls_variants(&hls).unwrap_or_default();
+    let (video, audio, hls_orig_lang) = hls_variants(video_id, &hls).unwrap_or_default();
     info.video = video;
     // audio renditions (dubbed tracks): only names, the proxy picks the playlist
     info.audio = audio;
@@ -322,8 +322,9 @@ fn hls_client(video_id: &str, c: HlsClient) -> Result<StreamInfo> {
 
 /// The variants of an HLS master playlist, as formats for the quality menu,
 /// plus its audio renditions (one per language, `audio_language` = display name).
-fn hls_variants(master_url: &str) -> Result<(Vec<StreamFormat>, Vec<StreamFormat>, Option<String>)> {
+fn hls_variants(video_id: &str, master_url: &str) -> Result<(Vec<StreamFormat>, Vec<StreamFormat>, Option<String>)> {
     let text = http::get_text(master_url)?;
+    crate::player::shorts_preload::remember_master(video_id, master_url, &text);
     let attr = |l: &str, k: &str| -> Option<String> {
         let rest = l.split(&format!("{k}=")).nth(1)?;
         Some(if let Some(q) = rest.strip_prefix('"') { q.split('"').next()?.to_string() } else { rest.split(',').next()?.to_string() })

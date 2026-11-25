@@ -53,6 +53,8 @@
   "Notes and links on older videos, restored from the Annotations Restored archive": "Notes et liens sur les anciennes vidéos, restaurées à partir des archives Annotations Restauré",
   "Force original audio": "Force audio original",
   "Play the original language instead of auto-dubbed tracks": "Lire la langue originale au lieu des pistes doublées automatiquement",
+  "Preload upcoming Shorts": "Précharger les prochains Shorts",
+  "Buffer the start of this many videos ahead of playback": "Nombre de vidéos dont le début est chargé à l’avance",
   "Shorts: play next automatically": "Lire automatiquement le Short suivant",
   "Move to the next Short when one ends": "Passer au prochain Short quand un se termine",
   "Open Shorts in the regular player": "Ouvrir Shorts dans le joueur régulier",

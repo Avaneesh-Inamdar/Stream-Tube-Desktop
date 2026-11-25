@@ -3114,6 +3114,9 @@ impl Render for AppView {
                 MouseButton::Navigate(NavigationDirection::Forward),
                 cx.listener(|this, _, window, cx| this.forward(window, cx)),
             );
+        if !is_shorts {
+            crate::player::shorts_preload::clear();
+        }
         let has_slot = matches!(self.route, Route::Watch { .. } | Route::Shorts(_));
         let page_id = self.page.entity_id();
         let page_area = div()

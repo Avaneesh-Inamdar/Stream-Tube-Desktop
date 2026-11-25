@@ -53,6 +53,8 @@
   "Notes and links on older videos, restored from the Annotations Restored archive": "Примітки і посилання на старі відео, відновлені з архіву відновлених анотацій",
   "Force original audio": "Примусити оригінальний звук",
   "Play the original language instead of auto-dubbed tracks": "Відтворити оригінальну мову замість автоматично дубльованих доріжок",
+  "Preload upcoming Shorts": "Попереднє завантаження наступних Shorts",
+  "Buffer the start of this many videos ahead of playback": "Для скількох наступних відео заздалегідь завантажувати початок",
   "Shorts: play next automatically": "Автоматично відтворювати наступний Shorts",
   "Move to the next Short when one ends": "Перейти до наступного короткого, коли один закінчується",
   "Open Shorts in the regular player": "Відкрити короткі фрагменти у звичайному програвачі",

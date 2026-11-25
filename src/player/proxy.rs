@@ -113,7 +113,7 @@ pub fn local_hls(url: &str, max_height: u32, audio: Option<&str>) -> String {
     }
 }
 
-fn hls_attr(line: &str, key: &str) -> Option<String> {
+pub(super) fn hls_attr(line: &str, key: &str) -> Option<String> {
     // match KEY= at an attribute boundary (so AUDIO= doesn't hit "VIDEO-RANGE=..."-like names)
     let mut search = line;
     loop {
@@ -134,7 +134,7 @@ fn hls_attr(line: &str, key: &str) -> Option<String> {
 /// `max_height` and the codec preference) plus its default audio rendition.
 /// ffmpeg opens every playlist a master lists before starting, so serving the
 /// full master (often 30+ playlists) delays the start by many seconds.
-fn rewrite_master(p: &Proxy, text: &str, max_height: u32, audio_name: Option<&str>) -> String {
+pub(super) fn select_master(text: &str, max_height: u32, audio_name: Option<&str>) -> Option<String> {
     let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     let mut header = Vec::new();
     let mut medias = Vec::new();
@@ -175,8 +175,7 @@ fn rewrite_master(p: &Proxy, text: &str, max_height: u32, audio_name: Option<&st
     } else {
         fits.into_iter().max_by_key(|(l, _)| (class(l), !crate::api::streams::is_hdr_codecs(&hls_attr(l, "CODECS").unwrap_or_default()), codec_rank(l), bw(l)))
     };
-    let Some((inf, uri)) = chosen else { return rewrite_playlist(p, text, max_height) };
-    let local_pl = |u: &str| format!("{}/h/{}?max=0", p.base(), register(p, u, None, HLS));
+    let (inf, uri) = chosen?;
     let mut out = String::new();
     for h in header {
         out.push_str(h);
@@ -196,22 +195,15 @@ fn rewrite_master(p: &Proxy, text: &str, max_height: u32, audio_name: Option<&st
             .or_else(|| in_group.first())
             .copied();
         if let Some(m) = audio {
-            match (m.find("URI=\""), hls_attr(m, "URI")) {
-                (Some(i), Some(u)) => {
-                    out.push_str(&m[..i + 5]);
-                    out.push_str(&local_pl(&u));
-                    out.push_str(&m[i + 5 + u.len()..]);
-                }
-                _ => out.push_str(m),
-            }
+            out.push_str(m);
             out.push('\n');
         }
     }
     out.push_str(inf);
     out.push('\n');
-    out.push_str(&local_pl(uri));
+    out.push_str(uri);
     out.push('\n');
-    out
+    Some(out)
 }
 
 /// Rewrites one playlist so all its URLs point back at the proxy. Whether a
@@ -278,8 +270,12 @@ fn rewrite_playlist(p: &Proxy, text: &str, max_height: u32) -> String {
 }
 
 fn serve_playlist(conn: &mut TcpStream, p: &Proxy, url: &str, max_height: u32, audio: Option<&str>) -> std::io::Result<()> {
-    let mut text = None;
+    let cached = super::shorts_preload::cached(url);
+    let mut text = cached.and_then(|media| std::str::from_utf8(&media.bytes).ok().map(str::to_owned));
     for attempt in 0..3u64 {
+        if text.is_some() {
+            break;
+        }
         if let Ok(mut r) = agent().get(url).header("User-Agent", crate::api::http::BROWSER_UA).call() {
             if r.status().as_u16() < 400 {
                 text = r.body_mut().with_config().limit(16 << 20).read_to_string().ok();
@@ -292,7 +288,8 @@ fn serve_playlist(conn: &mut TcpStream, p: &Proxy, url: &str, max_height: u32, a
         conn.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
         return Ok(());
     };
-    let body = if text.contains("#EXT-X-STREAM-INF") { rewrite_master(p, &text, max_height, audio) } else { rewrite_playlist(p, &text, max_height) };
+    let selected = text.contains("#EXT-X-STREAM-INF").then(|| select_master(&text, max_height, audio)).flatten();
+    let body = rewrite_playlist(p, selected.as_deref().unwrap_or(&text), max_height);
     let head = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -304,6 +301,23 @@ fn serve_playlist(conn: &mut TcpStream, p: &Proxy, url: &str, max_height: u32, a
 
 /// Plain pass-through (HLS segments): forwards the request and streams the reply.
 fn serve_pass(conn: &mut TcpStream, url: &str, range: Option<(u64, Option<u64>)>, head_only: bool) -> std::io::Result<()> {
+    if let Some(media) = super::shorts_preload::cached(url) {
+        let total = media.total;
+        let (start, end) = range.unwrap_or((0, None));
+        let end = end.unwrap_or(total - 1).min(total - 1);
+        if start <= end && end < media.bytes.len() as u64 {
+            if range.is_some() {
+                write!(conn, "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\n")?;
+            } else {
+                conn.write_all(b"HTTP/1.1 200 OK\r\n")?;
+            }
+            write!(conn, "Content-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", media.mime, end - start + 1)?;
+            if !head_only {
+                conn.write_all(&media.bytes[start as usize..=end as usize])?;
+            }
+            return conn.flush();
+        }
+    }
     let mut resp = None;
     for attempt in 0..3u64 {
         let mut req = agent().get(url).header("User-Agent", crate::api::http::BROWSER_UA);
@@ -350,7 +364,7 @@ fn serve_pass(conn: &mut TcpStream, url: &str, range: Option<(u64, Option<u64>)>
     conn.flush()
 }
 
-fn agent() -> ureq::Agent {
+pub(super) fn agent() -> ureq::Agent {
     static AGENT: crate::api::http::NetworkAgent = crate::api::http::NetworkAgent::new();
     AGENT.get(&crate::store::settings_snapshot(), |builder| {
         builder
@@ -424,8 +438,9 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
         conn.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
         return Ok(());
     };
+    let cached = super::shorts_preload::cached(&url);
     if len.is_none() {
-        len = probe_len(&url);
+        len = cached.as_ref().map(|m| m.total).or_else(|| probe_len(&url));
         if let (Some(id), Some(l)) = (id, len) {
             if let Some(e) = p.streams.lock().get_mut(&id) {
                 e.len = Some(l);
@@ -458,6 +473,11 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
         return Ok(());
     }
     let mut pos = start;
+    if let Some(media) = cached.filter(|media| media.total == total && start < media.bytes.len() as u64) {
+        let stop = (end + 1).min(media.bytes.len() as u64);
+        conn.write_all(&media.bytes[start as usize..stop as usize])?;
+        pos = stop;
+    }
     let mut first = true;
     let mut stalls = 0;
     let mut buf = vec![0u8; 64 * 1024];

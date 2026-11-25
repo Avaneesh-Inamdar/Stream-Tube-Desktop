@@ -53,6 +53,8 @@
   "Notes and links on older videos, restored from the Annotations Restored archive": "古いビデオのノートとリンク、Annotations Restored アーカイブから復元",
   "Force original audio": "オリジナルのオーディオを強制",
   "Play the original language instead of auto-dubbed tracks": "自動ダビングされたトラックの代わりにオリジナルの言語を再生",
+  "Preload upcoming Shorts": "次のショート動画を先読み",
+  "Buffer the start of this many videos ahead of playback": "冒頭をあらかじめ読み込む動画の本数",
   "Shorts: play next automatically": "次のショート動画を自動再生",
   "Move to the next Short when one ends": "終了したときに次のショートに移動",
   "Open Shorts in the regular player": "レギュラープレイヤーでショーツを開く",

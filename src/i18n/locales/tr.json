@@ -53,6 +53,8 @@
   "Notes and links on older videos, restored from the Annotations Restored archive": "Eski videolardaki notlar ve bağlantılar (Annotations Restored arşivi)",
   "Force original audio": "Orijinal ses dilini zorla",
   "Play the original language instead of auto-dubbed tracks": "Otomatik dublaj yerine videonun orijinal sesini oynat",
+  "Preload upcoming Shorts": "Sonraki Shorts videolarını önceden yükle",
+  "Buffer the start of this many videos ahead of playback": "Başlangıcı önceden yüklenecek video sayısı",
   "Shorts: play next automatically": "Shorts: sonrakine otomatik geç",
   "Move to the next Short when one ends": "Biri bitince sonraki Short videosunu başlatır",
   "Open Shorts in the regular player": "Shorts videolarını normal oynatıcıda aç",
