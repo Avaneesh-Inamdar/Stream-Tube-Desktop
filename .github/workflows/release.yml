@@ -59,6 +59,10 @@ jobs:
   macos:
     needs: check
     uses: ./.github/workflows/macos.yml
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
 
   publish:
     needs: [check, linux, windows, macos]
