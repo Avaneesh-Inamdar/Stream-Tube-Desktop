@@ -739,7 +739,9 @@ mod playback_tests {
     use super::{Event, TEST_POSITION_REPORTS, Watch, stats_url, watch_report_summary};
     use crate::api::types::VideoItem;
     use crate::player::controller;
-    use gpui::{Empty, TestAppContext};
+    use crate::ui::{Pal, app::UiState, pip};
+    use gpui::{Empty, TestAppContext, WindowHandle};
+    use std::sync::mpsc::{Receiver, TryRecvError};
 
     #[test]
     fn watch_report_summary_uses_only_allowlisted_fields_and_status() {
@@ -836,8 +838,70 @@ mod playback_tests {
     #[gpui::test]
     fn closing_last_main_window_enqueues_one_final_position_before_flushing(cx: &mut TestAppContext) {
         let video_id = "test-watch-history-last-main-window";
-        let position = 85.375;
-        let duration = 464.0;
+        let (main, reports) = open_main_window_with_watch_history(cx, video_id);
+        let other = cx.add_window(|_, _| Empty);
+        // GPUI's native close callback also goes through Window::remove_window.
+        other.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        assert!(matches!(reports.try_recv(), Err(TryRecvError::Empty)),
+            "closing a non-final window must leave reporting active");
+
+        main.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        assert!(cx.windows().is_empty());
+        assert_final_report_before_flush(cx, &reports, video_id);
+    }
+
+    #[gpui::test]
+    fn closing_last_main_window_with_pip_open_flushes_the_final_position(cx: &mut TestAppContext) {
+        let video_id = "test-watch-history-last-main-window-with-pip";
+        let (main, reports) = open_main_window_with_watch_history(cx, video_id);
+        cx.update(pip::open);
+        let panel = cx.read(pip::handle).expect("PiP window opened");
+        assert!(cx.windows().contains(&panel));
+        assert!(cx.read(|cx| cx.try_global::<crate::QuitRequested>().is_none()));
+
+        main.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        assert!(main.root(cx).is_err(), "the main window must be closed before the flush");
+        assert_final_report_before_flush(cx, &reports, video_id);
+    }
+
+    #[gpui::test]
+    fn closing_pip_alone_keeps_the_main_window_and_playback_active(cx: &mut TestAppContext) {
+        let video_id = "test-watch-history-close-pip-only";
+        let (main, reports) = open_main_window_with_watch_history(cx, video_id);
+        cx.update(pip::open);
+        let panel = cx.read(pip::handle).expect("PiP window opened");
+
+        panel.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(cx.windows(), [main.into()]);
+        assert!(cx.read(pip::handle).is_none());
+        cx.read(|cx| {
+            assert!(cx.try_global::<crate::QuitRequested>().is_none());
+            let player = controller::player(cx);
+            let player = player.read(cx);
+            assert_eq!(
+                player.video.as_ref().map(|video| video.id.as_str()),
+                Some(video_id)
+            );
+            assert!(!player.paused);
+            assert_eq!(player.time, SHUTDOWN_TEST_POSITION);
+        });
+        assert!(
+            reports.try_iter().all(|event| !matches!(event, Event::Stop { .. } | Event::Flush(_))),
+            "closing PiP alone must leave reporting active"
+        );
+    }
+
+    const SHUTDOWN_TEST_POSITION: f64 = 85.375;
+    const SHUTDOWN_TEST_DURATION: f64 = 464.0;
+
+    fn open_main_window_with_watch_history(
+        cx: &mut TestAppContext,
+        video_id: &str,
+    ) -> (WindowHandle<Empty>, Receiver<Event>) {
         let (sender, reports) = std::sync::mpsc::channel();
         TEST_POSITION_REPORTS.with(|slot| slot.replace(Some(sender)));
         cx.on_quit(|| {
@@ -846,30 +910,26 @@ mod playback_tests {
 
         let video = VideoItem { id: video_id.into(), ..Default::default() };
         crate::store::history_add(&video);
-        crate::store::history_progress(video_id, 80.0, duration);
+        crate::store::history_progress(video_id, 80.0, SHUTDOWN_TEST_DURATION);
         cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(Pal::new(true, 0x3ea6ff));
+            cx.set_global(UiState::default());
             controller::init(cx);
             controller::player(cx).update(cx, |player, _| {
                 player.video = Some(video);
-                player.time = position;
-                player.duration = duration;
+                player.time = SHUTDOWN_TEST_POSITION;
+                player.duration = SHUTDOWN_TEST_DURATION;
                 player.paused = false;
             });
             crate::register_window_close_handler(cx);
         });
+        (cx.add_window(|_, _| Empty), reports)
+    }
 
-        let main = cx.add_window(|_, _| Empty);
-        let other = cx.add_window(|_, _| Empty);
-        // GPUI's native close callback also goes through Window::remove_window.
-        other.update(cx, |_, window, _| window.remove_window()).unwrap();
-        cx.run_until_parked();
-        assert!(reports.try_recv().is_err(), "closing a non-final window must leave reporting active");
-
-        main.update(cx, |_, window, _| window.remove_window()).unwrap();
-        cx.run_until_parked();
-        assert!(cx.read(|cx| cx.windows().is_empty()));
+    fn assert_final_report_before_flush(cx: &TestAppContext, reports: &Receiver<Event>, video_id: &str) {
         let saved = crate::store::progress_map()[video_id];
-        assert_eq!(saved, (position, duration));
+        assert_eq!(saved, (SHUTDOWN_TEST_POSITION, SHUTDOWN_TEST_DURATION));
         assert!(matches!(reports.try_recv(),
             Ok(Event::Stop { id, t }) if id == video_id && t == saved.0));
         let Ok(Event::Flush(flushed)) = reports.try_recv() else {
@@ -877,7 +937,8 @@ mod playback_tests {
         };
         flushed.send(()).unwrap();
         cx.run_until_parked();
-        assert!(reports.try_recv().is_err(), "expected exactly one final report followed by one flush");
+        assert!(matches!(reports.try_recv(), Err(TryRecvError::Empty)),
+            "expected exactly one final report followed by one flush");
     }
 }
 
