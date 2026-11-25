@@ -687,7 +687,13 @@ impl AppView {
         let preview_view = cx.new(crate::player::preview::PreviewView::new);
         let images = crate::ui::image_cache::init(cx);
         // re-render (to add or drop the preview layer) only when a preview starts or ends
-        subs.push(cx.subscribe(&crate::player::preview::preview(cx), |_, _, _: &crate::player::preview::PreviewEvent, cx| cx.notify()));
+        subs.push(cx.subscribe(&crate::player::preview::preview(cx), |this, _, event, cx| {
+            if matches!(event, crate::player::preview::PreviewEvent::TargetChanged) {
+                // Repaint the cached page once so the hovered thumbnail records its bounds.
+                App::notify(cx, this.page.entity_id());
+            }
+            cx.notify();
+        }));
         cx.set_global(crate::ui::slot::PlayerSlot::default());
         // a YouTube link passed on the command line opens directly
         let arg_route = route_from_link(&std::env::args().nth(1).unwrap_or_default());
