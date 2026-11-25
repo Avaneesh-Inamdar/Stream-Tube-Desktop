@@ -120,18 +120,20 @@ fn badge(v: &VideoItem, cx: &App) -> Option<AnyElement> {
 pub fn thumbnail(v: &VideoItem, url: String, w: Pixels, h: Pixels, radius: Pixels, cx: &App) -> Div {
     let p = pal(cx);
     let progress = watched_progress(&v.id, cx);
+    let radius = radius * (store::settings_snapshot().thumb_radius / 12.0);
     div()
         .relative()
         .w(w)
         .h(h)
         .flex_none()
-        .rounded(radius * (store::settings_snapshot().thumb_radius / 12.0))
+        .rounded(radius)
         .overflow_hidden()
         .bg(p.surface)
         // the card's ratio: otherwise the image's own (4:3 for letterboxed
         // sddefault/hqdefault) wins over the size, the image ends up taller than
         // the card and shows top-aligned with the bottom cut off
-        .child(img(SharedString::from(url)).size_full().aspect_ratio(w / h).object_fit(ObjectFit::Cover))
+        // overflow_hidden clips to a rectangle, so the image rounds its own corners
+        .child(img(SharedString::from(url)).size_full().rounded(radius).aspect_ratio(w / h).object_fit(ObjectFit::Cover))
         .child(crate::player::preview::slot_marker(&v.id, cx))
         .children(badge(v, cx))
         .when_some(progress.filter(|p| *p > 0.01), |d, pr| {
@@ -654,7 +656,7 @@ pub fn playlist_thumb(thumb: Option<String>, count: Option<String>, w: Pixels, h
                 .rounded_xl()
                 .overflow_hidden()
                 .bg(p.surface)
-                .when_some(thumb, |d, t| d.child(img(SharedString::from(t)).size_full().object_fit(ObjectFit::Cover)))
+                .when_some(thumb, |d, t| d.child(img(SharedString::from(t)).size_full().rounded_xl().object_fit(ObjectFit::Cover)))
                 .child(
                     div()
                         .absolute()

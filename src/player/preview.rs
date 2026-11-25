@@ -347,7 +347,7 @@ impl Render for PreviewView {
         let fade_id = SharedString::from(format!("preview-in-{}", self.preview.read(cx).id.clone().unwrap_or_default()));
         let el = div().id("preview").group("preview").relative().size_full().rounded(radius).overflow_hidden().when_some(frame, |d, f| {
             d.bg(black())
-                .child(img(ImageSource::Render(f)).size_full().object_fit(ObjectFit::Cover))
+                .child(img(ImageSource::Render(f)).size_full().rounded(radius).object_fit(ObjectFit::Cover))
                 // time left, bottom right (like the duration badge it covers)
                 .when(dur > 0.0, |d| {
                     d.child(
