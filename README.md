@@ -91,6 +91,7 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 - Or sign in with your Google account to get your own Home feed, subscriptions, playlists, likes and subscribe button
 - Watch history and search history from your other devices sync in, with resume positions, and single entries can be removed
 - Connect your YouTube history (*Settings → General*) and it works the other way too: videos you watch in Stream Tube show up in your YouTube history, and your phone or TV resumes them where you stopped. You sign in once in a browser window with a fresh profile (Chrome, Edge, Brave or Chromium) that closes and is deleted afterwards, or load a `cookies.txt` file instead
+- Sign in to YouTube to open Watch later, Liked videos and any account Favorites playlist from the sidebar. The local playlists are available in Library.
 - History, watch later, favourites and playlists are stored in a local SQLite database, and you can pause or clear history at any time
 - Import from YouTube Takeout, NewPipe, FreeTube or OPML. Export to NewPipe JSON, YouTube CSV, OPML or a full backup
 
