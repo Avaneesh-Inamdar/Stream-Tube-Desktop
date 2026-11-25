@@ -6,10 +6,10 @@
 //! the video lands in the account's watch history and the position you stopped at
 //! is what other devices resume from.
 //!
-//! Signing in happens in a real browser (Edge, Chrome, Brave or Chromium) started
-//! with its own empty profile. The app reads that profile's youtube.com cookies over
-//! the browser's local debugging port once sign-in is done, then closes the browser
-//! and deletes the profile. Nothing else from the user's browsers is read.
+//! Signing in uses a browser with its own empty profile. On macOS the login
+//! window runs normally; only after sign-in does a headless browser read that
+//! profile's youtube.com cookies over private pipes. The profile is then deleted.
+//! Nothing from the user's existing browser profiles is read.
 use super::http;
 use anyhow::{Context, Result, anyhow};
 use parking_lot::Mutex;
@@ -43,7 +43,11 @@ fn save(s: &Option<Session>) {
 }
 
 fn has_login(c: &BTreeMap<String, String>) -> bool {
-    (c.contains_key("SAPISID") || c.contains_key("__Secure-3PAPISID")) && (c.contains_key("SID") || c.contains_key("__Secure-3PSID"))
+    has_login_names(|name| c.contains_key(name))
+}
+
+fn has_login_names(has: impl Fn(&str) -> bool) -> bool {
+    (has("SAPISID") || has("__Secure-3PAPISID")) && (has("SID") || has("__Secure-3PSID"))
 }
 
 /// Whether the browser sign-in is connected.
@@ -414,55 +418,152 @@ pub fn browser_sign_in(cancel: Arc<AtomicBool>) -> Result<String> {
     let (_, exe) = find_browser().ok_or_else(|| {
         anyhow!("No supported browser found. Install Google Chrome, Microsoft Edge, Brave or Chromium, or import a cookies.txt file instead.")
     })?;
-    let profile = crate::store::data_dir().join("signin-browser");
-    let _ = std::fs::remove_dir_all(&profile);
-    std::fs::create_dir_all(&profile)?;
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg(format!("--user-data-dir={}", profile.display()))
-        .args(["--no-first-run", "--no-default-browser-check", "--disable-sync", "--new-window"])
-        .arg(SIGN_IN_URL);
-    if let Some(p) = crate::store::proxy_setting() {
-        cmd.arg(format!("--proxy-server={p}"));
+    let profile = crate::store::data_dir().join(format!("signin-browser-{:016x}", rand::random::<u64>()));
+    let mut dir = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        dir.mode(0o700);
     }
-    let (mut cdp, browser_ends) = Cdp::attach(&mut cmd)?;
-    let mut child = cmd.spawn().context("couldn't start the browser")?;
-    drop(browser_ends);
-    let started = Instant::now();
-    let result = loop {
-        std::thread::sleep(Duration::from_millis(1500));
-        if cancel.load(Ordering::Relaxed) {
-            break Err(anyhow!("cancelled"));
-        }
-        if let Ok(Some(_)) = child.try_wait() {
-            // the user closed the window; the browser may have handed off to an
-            // already running copy, but with our own profile that doesn't happen
-            break Err(anyhow!("The browser was closed before sign-in finished."));
-        }
-        if started.elapsed() > Duration::from_secs(20 * 60) {
-            break Err(anyhow!("Sign-in timed out."));
-        }
-        let Ok(list) = cdp.cookies() else { continue };
-        let cookies = youtube_cookies(&list);
-        if has_login(&cookies) && cookies.contains_key("LOGIN_INFO") {
-            break Ok(cookies);
-        }
-    };
-    cdp.close_browser();
-    for _ in 0..20 {
-        if let Ok(Some(_)) = child.try_wait() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
+    dir.create(&profile)?;
+    let result = (|| {
+        #[cfg(target_os = "macos")]
+        sign_in_window(&exe, &profile, &cancel)?;
+        let mut cmd = sign_in_command(&exe, &profile);
+        #[cfg(target_os = "macos")]
+        cmd.args(["--headless=new", "about:blank"]);
+        #[cfg(not(target_os = "macos"))]
+        cmd.arg(SIGN_IN_URL);
+        let (mut cdp, browser_ends) = Cdp::attach(&mut cmd)?;
+        let mut child = cmd.spawn().context("couldn't start the browser")?;
+        drop(browser_ends);
+        let started = Instant::now();
+        let timeout = if cfg!(target_os = "macos") { 20 } else { 20 * 60 };
+        let result = loop {
+            std::thread::sleep(Duration::from_millis(1500));
+            if cancel.load(Ordering::Relaxed) {
+                break Err(anyhow!("cancelled"));
+            }
+            if let Ok(Some(_)) = child.try_wait() {
+                break Err(anyhow!("The browser was closed before sign-in finished."));
+            }
+            if started.elapsed() > Duration::from_secs(timeout) {
+                break Err(anyhow!("Sign-in timed out."));
+            }
+            let Ok(list) = cdp.cookies() else { continue };
+            let cookies = youtube_cookies(&list);
+            if has_login(&cookies) && cookies.contains_key("LOGIN_INFO") {
+                break Ok(cookies);
+            }
+        };
+        cdp.close_browser();
+        wait_for_browser_exit(&mut child);
+        result
+    })();
     for _ in 0..8 {
         if std::fs::remove_dir_all(&profile).is_ok() || !profile.exists() {
             break;
         }
         std::thread::sleep(Duration::from_millis(500));
     }
+    if cancel.load(Ordering::Relaxed) {
+        return Err(anyhow!("cancelled"));
+    }
     connect(result?)
+}
+
+fn sign_in_command(exe: &std::path::Path, profile: &std::path::Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg(format!("--user-data-dir={}", profile.display()))
+        .args(["--no-first-run", "--no-default-browser-check", "--disable-sync", "--new-window"]);
+    if let Some(p) = crate::store::proxy_setting() {
+        cmd.arg(format!("--proxy-server={p}"));
+    }
+    cmd
+}
+
+fn wait_for_browser_exit(child: &mut std::process::Child) {
+    for _ in 0..20 {
+        if let Ok(Some(_)) = child.try_wait() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(target_os = "macos")]
+fn sign_in_window(exe: &std::path::Path, profile: &std::path::Path, cancel: &AtomicBool) -> Result<()> {
+    // Google rejects sign-in in a debug-controlled browser. Keep the human login
+    // separate from the later cookie read, in the same app-owned temporary profile.
+    let mut child = sign_in_command(exe, profile).arg(SIGN_IN_URL).spawn().context("couldn't start the browser")?;
+    let started = Instant::now();
+    let result = loop {
+        std::thread::sleep(Duration::from_millis(1500));
+        if cancel.load(Ordering::Relaxed) {
+            break Err(anyhow!("cancelled"));
+        }
+        if profile_has_login(profile) {
+            break Ok(());
+        }
+        if let Ok(Some(_)) = child.try_wait() {
+            break Err(anyhow!("The browser was closed before sign-in finished."));
+        }
+        if started.elapsed() > Duration::from_secs(20 * 60) {
+            break Err(anyhow!("Sign-in timed out."));
+        }
+    };
+    if !matches!(child.try_wait(), Ok(Some(_))) {
+        // Chrome flushes its cookie store on SIGTERM. Only signal our own child.
+        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    }
+    wait_for_browser_exit(&mut child);
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn profile_has_login(profile: &std::path::Path) -> bool {
+    ["Default/Cookies", "Default/Network/Cookies"].iter().any(|file| {
+        let Ok(db) = rusqlite::Connection::open_with_flags(profile.join(file), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else { return false };
+        let Ok(mut query) = db.prepare("SELECT name FROM cookies WHERE host_key IN ('.youtube.com', 'youtube.com')") else { return false };
+        let Ok(rows) = query.query_map([], |r| r.get::<_, String>(0)) else { return false };
+        let names: Vec<String> = rows.filter_map(Result::ok).collect();
+        let has = |name: &str| names.iter().any(|n| n == name);
+        has("LOGIN_INFO") && has_login_names(has)
+    })
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod sign_in_tests {
+    use super::*;
+
+    #[test]
+    fn waits_for_youtube_login_in_the_temporary_profile() {
+        let profile = std::env::temp_dir().join(format!("streamtube-signin-test-{:016x}", rand::random::<u64>()));
+        assert!(!profile_has_login(&profile));
+        for file in ["Default/Cookies", "Default/Network/Cookies"] {
+            let path = profile.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.execute("CREATE TABLE cookies (host_key TEXT, name TEXT)", []).unwrap();
+            for host in [".google.com", ".youtube.com.evil.example"] {
+                for name in ["LOGIN_INFO", "SID", "SAPISID"] {
+                    db.execute("INSERT INTO cookies VALUES (?1, ?2)", [host, name]).unwrap();
+                }
+            }
+            assert!(!profile_has_login(&profile), "other origins are not a YouTube login");
+            for name in ["LOGIN_INFO", "__Secure-3PSID"] {
+                db.execute("INSERT INTO cookies VALUES ('.youtube.com', ?1)", [name]).unwrap();
+            }
+            assert!(!profile_has_login(&profile), "the session is incomplete");
+            db.execute("INSERT INTO cookies VALUES ('.youtube.com', '__Secure-3PAPISID')", []).unwrap();
+            assert!(profile_has_login(&profile));
+            drop(db);
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir_all(profile).unwrap();
+    }
 }
 
 /// Reads a Netscape-format cookies.txt (as saved by "Get cookies.txt" style
