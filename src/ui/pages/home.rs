@@ -43,11 +43,18 @@ fn feed_source() -> &'static str {
     }
 }
 
+/// Bumped when the cached items change shape (a new field, a different reading of a
+/// tile), so a feed cached by an older version is not shown.
+const CACHE_VERSION: i64 = 2;
+
 /// The home feed from the last session, shown at once when the app starts while
 /// the new one loads. Kept for three days.
 fn cached_home() -> Option<Vec<Item>> {
     let v: serde_json::Value = serde_json::from_str(&store::kv_get("home_cache")?).ok()?;
-    if v.get("source")?.as_str()? != feed_source() || crate::api::json::now() - v.get("at")?.as_i64()? > 3 * 24 * 3600 {
+    if v.get("version").and_then(serde_json::Value::as_i64) != Some(CACHE_VERSION)
+        || v.get("source")?.as_str()? != feed_source()
+        || crate::api::json::now() - v.get("at")?.as_i64()? > 3 * 24 * 3600
+    {
         return None;
     }
     let items: Vec<Item> = serde_json::from_value(v.get("items")?.clone()).ok()?;
@@ -56,6 +63,7 @@ fn cached_home() -> Option<Vec<Item>> {
 
 fn save_home(items: &[Item]) {
     let v = serde_json::json!({
+        "version": CACHE_VERSION,
         "source": feed_source(),
         "at": crate::api::json::now(),
         "items": items.iter().take(60).collect::<Vec<_>>(),
