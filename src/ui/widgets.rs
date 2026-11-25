@@ -378,7 +378,7 @@ fn open_link(url: &str, window: &mut Window, cx: &mut App) {
         let t: f64 = t.parse().unwrap_or(0.0);
         crate::player::controller::player(cx).update(cx, |p, cx| {
             p.seek_to(t);
-            p.set_paused(false);
+            p.set_paused(false, cx);
             cx.notify();
         });
         // back up to the player, like YouTube does

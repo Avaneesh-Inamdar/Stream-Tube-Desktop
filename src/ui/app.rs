@@ -571,6 +571,7 @@ pub struct AppView {
 
 impl AppView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        crate::idle_inhibit::set_main_window(cx, window);
         cx.set_global(AppHandle(cx.entity().downgrade()));
         cx.set_global(UiState { sidebar_open: true, ..Default::default() });
         cx.set_global(OpenMenu::default());
@@ -660,14 +661,14 @@ impl AppView {
                     }
                     if !pl.read(cx).paused && pl.read(cx).video.is_some() {
                         pl.update(cx, |p, cx| {
-                            p.set_paused(true);
+                            p.set_paused(true, cx);
                             cx.notify();
                         });
                         paused_by_us.set(true);
                     }
                 } else if paused_by_us.replace(false) {
                     pl.update(cx, |p, cx| {
-                        p.set_paused(false);
+                        p.set_paused(false, cx);
                         cx.notify();
                     });
                 }
@@ -1857,7 +1858,7 @@ impl AppView {
             if pl.boost.is_some() {
                 pl.end_boost();
             } else {
-                pl.toggle_pause();
+                pl.toggle_pause(cx);
             }
             cx.notify();
         });
@@ -2011,13 +2012,13 @@ impl AppView {
                 ("space", _) => {
                     // acted on at release (tap) or while held (2x)
                     if held {
-                        pl.start_boost();
+                        pl.start_boost(cx);
                         cx.notify();
                     }
                     true
                 }
                 ("k", false) => {
-                    pl.toggle_pause();
+                    pl.toggle_pause(cx);
                     true
                 }
                 ("i", true) => {

@@ -79,7 +79,7 @@ fn chapters_open() -> bool {
 fn jump_to(t: f64, window: &mut Window, cx: &mut App) {
     player(cx).update(cx, |p, cx| {
         p.seek_to(t);
-        p.set_paused(false);
+        p.set_paused(false, cx);
         cx.notify();
     });
     scroll_page_key("home", false, window);
@@ -1142,7 +1142,7 @@ impl WatchPage {
                                 .on_click(move |_, _, cx| {
                                     player(cx).update(cx, |p, cx| {
                                         p.seek_to(t2);
-                                        p.set_paused(false);
+                                        p.set_paused(false, cx);
                                         cx.notify();
                                     })
                                 }),

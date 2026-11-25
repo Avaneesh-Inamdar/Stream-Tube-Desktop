@@ -173,6 +173,20 @@ impl Player {
         self
     }
 
+    /// True while mpv is actually progressing through a video.
+    fn should_inhibit_idle(&self) -> bool {
+        self.mpv.is_some()
+            && self.video.is_some()
+            && !self.loading
+            && !self.paused
+            && !self.eof
+            && self.error.is_none()
+    }
+
+    fn sync_idle(&self, cx: &mut App) {
+        crate::idle_inhibit::set_playing(cx, self.should_inhibit_idle());
+    }
+
     fn ensure_mpv(&mut self, cx: &mut Context<Self>) -> Option<Arc<Mpv>> {
         if let Some(m) = &self.mpv {
             return Some(m.clone());
@@ -280,6 +294,14 @@ impl Player {
     }
 
     fn handle_event(&mut self, ev: MpvEvent, cx: &mut Context<Self>) {
+        let tracked = matches!(
+            &ev,
+            MpvEvent::FileLoaded
+                | MpvEvent::PlaybackRestart
+                | MpvEvent::EndFile { .. }
+                | MpvEvent::Prop(..)
+                | MpvEvent::Shutdown
+        );
         match ev {
             MpvEvent::Frame => {
                 let t0 = std::time::Instant::now();
@@ -396,6 +418,9 @@ impl Player {
             }
             MpvEvent::Shutdown => {}
         }
+        if tracked {
+            self.sync_idle(cx);
+        }
     }
 
     fn on_ended(&mut self, cx: &mut Context<Self>) {
@@ -414,8 +439,9 @@ impl Player {
         self.eof = true;
         self.save_progress(true);
         if self.loop_video {
+            self.eof = false;
             self.seek_to(0.0);
-            self.set_paused(false);
+            self.set_paused(false, cx);
             return;
         }
         if let Some(pos) = self.queue_pos {
@@ -425,6 +451,7 @@ impl Player {
             }
         }
         cx.emit(PlayerEvent::Ended);
+        self.sync_idle(cx);
     }
 
     pub fn play_queue_index(&mut self, idx: usize, cx: &mut Context<Self>) {
@@ -555,6 +582,7 @@ impl Player {
         }
         let Some(mpv) = self.ensure_mpv(cx) else {
             self.video = Some(video);
+            self.sync_idle(cx);
             cx.notify();
             return;
         };
@@ -587,6 +615,7 @@ impl Player {
         // with the browser sign-in, the video goes into the account's YouTube history
         // and the position reported as it plays is where other devices resume
         crate::api::web::report_start(&video.id, self.duration);
+        self.sync_idle(cx);
         let s = store::settings_snapshot();
         let id = video.id.clone();
         let resume = if start.is_some() {
@@ -675,6 +704,7 @@ impl Player {
                         p.error = Some(e.to_string());
                     }
                 }
+                p.sync_idle(cx);
                 cx.notify();
             });
         })
@@ -724,6 +754,7 @@ impl Player {
                         p.error = Some(tf!("Could not play this video: {0}", e));
                     }
                 }
+                p.sync_idle(cx);
                 cx.notify();
             });
         })
@@ -780,6 +811,7 @@ impl Player {
         let Some(src) = src else {
             self.error = Some(translate("No playable stream found").into());
             self.loading = false;
+            self.sync_idle(cx);
             return;
         };
         let was_paused = self.paused;
@@ -1071,17 +1103,18 @@ impl Player {
 
     // ───── transport controls ─────
 
-    pub fn toggle_pause(&mut self) {
+    pub fn toggle_pause(&mut self, cx: &mut App) {
         if self.eof {
+            self.eof = false;
             self.seek_to(0.0);
-            self.set_paused(false);
+            self.set_paused(false, cx);
             return;
         }
         let p = !self.paused;
-        self.set_paused(p);
+        self.set_paused(p, cx);
     }
 
-    pub fn set_paused(&mut self, p: bool) {
+    pub fn set_paused(&mut self, p: bool, cx: &mut App) {
         self.paused = p;
         if let Some(m) = &self.mpv {
             m.set_flag("pause", p);
@@ -1089,6 +1122,7 @@ impl Player {
         if p {
             self.save_progress(true);
         }
+        self.sync_idle(cx);
     }
 
     pub fn seek_to(&mut self, t: f64) {
@@ -1140,13 +1174,13 @@ impl Player {
     }
 
     /// Press-and-hold: plays at 2x until `end_boost`, without touching the saved speed.
-    pub fn start_boost(&mut self) {
+    pub fn start_boost(&mut self, cx: &mut App) {
         if self.boost.is_some() || self.video.is_none() {
             return;
         }
         self.boost = Some(self.speed);
         if self.paused {
-            self.set_paused(false);
+            self.set_paused(false, cx);
         }
         if let Some(m) = &self.mpv {
             m.set_f64("speed", (self.speed * 2.0).clamp(2.0, 4.0));
@@ -1227,6 +1261,7 @@ impl Player {
         if let Some(old) = self.frame.take() {
             cx.drop_image(old, None);
         }
+        self.sync_idle(cx);
         cx.notify();
     }
 

@@ -18,7 +18,9 @@ pub fn handle(cx: &App) -> Option<AnyWindowHandle> {
 
 pub fn open(cx: &mut App) {
     if let Some(h) = cx.try_global::<PipWindow>().and_then(|p| p.0) {
-        if h.update(cx, |_, window, _| window.activate_window()).is_ok() {
+        if h.update(cx, |_, window, _| window.activate_window())
+            .is_ok()
+        {
             return;
         }
     }
@@ -27,7 +29,10 @@ pub fn open(cx: &mut App) {
         .primary_display()
         .map(|d| {
             let b = d.bounds();
-            point(b.origin.x + b.size.width - size.width - px(24.), b.origin.y + b.size.height - size.height - px(72.))
+            point(
+                b.origin.x + b.size.width - size.width - px(24.),
+                b.origin.y + b.size.height - size.height - px(72.),
+            )
         })
         .unwrap_or(point(px(80.), px(80.)));
     let opts = WindowOptions {
@@ -39,7 +44,7 @@ pub fn open(cx: &mut App) {
         window_min_size: Some(gpui_kit::size(px(256.), px(144.))),
         ..Default::default()
     };
-    let res = gpui_kit::open_window(opts, cx, |_, cx| {
+    let res = gpui_kit::open_window(opts, cx, |_window, cx| {
         let pl = player(cx);
         let view = cx.new(|cx| {
             let mut v = PlayerView::new(pl, false, cx);
@@ -49,13 +54,19 @@ pub fn open(cx: &mut App) {
         cx.new(|_| PipView { view })
     });
     match res {
-        Ok((h, _)) => cx.set_global(PipWindow(Some(h))),
+        Ok((h, _)) => {
+            cx.set_global(PipWindow(Some(h)));
+            let _ = h.update(cx, |_, window, cx| {
+                crate::idle_inhibit::set_pip_window(cx, Some(window));
+            });
+        }
         Err(e) => toast(cx, crate::ui::friendly_error(&e.to_string())),
     }
     cx.refresh_windows();
 }
 
 pub fn close(window: &mut Window, cx: &mut App) {
+    crate::idle_inhibit::set_pip_window(cx, None);
     cx.set_global(PipWindow(None));
     window.remove_window();
     cx.refresh_windows();
@@ -104,6 +115,7 @@ pub(crate) fn begin_window_move(window: &Window) {
 /// main window shows the video again.
 pub fn window_closed(id: WindowId, cx: &mut App) {
     if handle(cx).is_some_and(|h| h.window_id() == id) {
+        crate::idle_inhibit::set_pip_window(cx, None);
         cx.set_global(PipWindow(None));
         cx.refresh_windows();
     }
@@ -113,7 +125,11 @@ pub fn window_closed(id: WindowId, cx: &mut App) {
 /// the PiP window plays it, a placeholder (like YouTube) so the picture
 /// isn't drawn twice.
 pub(super) fn main_surface(view: &Entity<PlayerView>, cx: &App) -> super::slot::SlotFollower {
-    let content = if handle(cx).is_some() { placeholder().into_any_element() } else { view.clone().into_any_element() };
+    let content = if handle(cx).is_some() {
+        placeholder().into_any_element()
+    } else {
+        view.clone().into_any_element()
+    };
     super::slot::SlotFollower::new(cx, content)
 }
 
@@ -170,8 +186,18 @@ impl Render for PipView {
                     .justify_end()
                     .invisible()
                     .group_hover("pip", |s| s.visible())
-                    .bg(linear_gradient(180., linear_color_stop(hsla(0., 0., 0., 0.6), 0.), linear_color_stop(hsla(0., 0., 0., 0.), 1.)))
-                    .child(div().id("pip-drag").flex_1().h_full().window_control_area(WindowControlArea::Drag))
+                    .bg(linear_gradient(
+                        180.,
+                        linear_color_stop(hsla(0., 0., 0., 0.6), 0.),
+                        linear_color_stop(hsla(0., 0., 0., 0.), 1.),
+                    ))
+                    .child(
+                        div()
+                            .id("pip-drag")
+                            .flex_1()
+                            .h_full()
+                            .window_control_area(WindowControlArea::Drag),
+                    )
                     .child(
                         div()
                             .id("pip-close")
