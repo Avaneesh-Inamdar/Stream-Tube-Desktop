@@ -172,6 +172,9 @@ release comes out (*Settings → About*).
 To run it without installing, choose *Extract All* on
 `StreamTube-<version>-windows-x64.zip`, then open `streamtube.exe` in the extracted
 folder with `libmpv-2.dll` beside it. It doesn't need the Visual C++ runtime.
+After you extract a build with portable update support, use *Settings → About*
+for future updates. Stream Tube replaces the app files in that folder and
+restarts with the same settings and history.
 Older PCs whose graphics driver has no Vulkan support (for example Intel HD 4000)
 work too: the app carries its own Vulkan loader for libmpv and uses it only when
 Windows doesn't have one.
