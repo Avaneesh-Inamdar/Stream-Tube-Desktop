@@ -226,7 +226,7 @@ impl Render for ChannelPage {
                             .child(div().text_3xl().font_weight(FontWeight::BOLD).text_color(p.text).child(d.info.name.clone()))
                             .child(
                                 div().text_sm().text_color(p.text2).child(
-                                    [d.info.handle.clone(), d.info.subscribers_text.clone(), d.info.video_count_text.clone()]
+                                    [d.info.handle.clone(), d.info.subscribers_text.clone().filter(|_| !store::settings_snapshot().hide_subscriber_counts), d.info.video_count_text.clone()]
                                         .into_iter()
                                         .flatten()
                                         .collect::<Vec<_>>()

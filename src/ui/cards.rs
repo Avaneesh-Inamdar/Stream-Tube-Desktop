@@ -555,7 +555,7 @@ pub fn channel_row(c: &ChannelItem, cx: &mut App) -> AnyElement {
                 .child(div().text_lg().text_color(p.text).child(c.name.clone()))
                 .child(
                     div().text_xs().text_color(p.text2).child(
-                        [c.handle.clone(), c.subscribers_text.clone(), c.video_count_text.clone()]
+                        [c.handle.clone(), c.subscribers_text.clone().filter(|_| !store::settings_snapshot().hide_subscriber_counts), c.video_count_text.clone()]
                             .into_iter()
                             .flatten()
                             .collect::<Vec<_>>()
@@ -632,7 +632,7 @@ pub fn channel_card(c: &ChannelItem, width: Pixels, cx: &mut App) -> AnyElement 
         .on_click(move |_, window, cx| navigate(Route::Channel(id.clone()), window, cx))
         .child(avatar(c.avatar.as_deref(), px(104.), &c.name, cx))
         .child(div().text_base().text_color(p.text).text_center().line_clamp(1).child(c.name.clone()))
-        .when_some(c.subscribers_text.clone(), |d, s| d.child(div().text_xs().text_color(p.text2).child(s)))
+        .when_some(c.subscribers_text.clone().filter(|_| !store::settings_snapshot().hide_subscriber_counts), |d, s| d.child(div().text_xs().text_color(p.text2).child(s)))
         .child(subscribe_button(SharedString::from(format!("ccs-{}", c.id)), c, subscribed, cx))
         .into_any_element()
 }

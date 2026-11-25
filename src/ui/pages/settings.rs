@@ -953,6 +953,7 @@ impl SettingsPage {
                     .child(row("Hide related videos", "", switch("hr", s.hide_related, |s, v| s.hide_related = v, cx), cx))
                     .child(row("Hide description", "", switch("hd", s.hide_description, |s, v| s.hide_description = v, cx), cx))
                     .child(row("Hide view counts", "", switch("hv", s.hide_view_counts, |s, v| s.hide_view_counts = v, cx), cx))
+                    .child(row("Hide subscriber counts", "", switch("hsc", s.hide_subscriber_counts, |s, v| s.hide_subscriber_counts = v, cx), cx))
                     .child(row("Hide channel avatars", "", switch("ha", s.hide_channel_avatars, |s, v| s.hide_channel_avatars = v, cx), cx))
                     .child(row("Hide chapters", "", switch("hch", s.hide_chapters, |s, v| s.hide_chapters = v, cx), cx))
                     .child(row("Hide Explore / trending", "", switch("he", s.hide_explore, |s, v| s.hide_explore = v, cx), cx))
