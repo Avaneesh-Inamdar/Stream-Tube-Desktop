@@ -217,6 +217,11 @@ fn is_watched_in_history(id: &str) -> bool {
 }
 
 fn more_button(id: SharedString, v: &VideoItem, cx: &App) -> Stateful<Div> {
+    more_button_with(id, v, Vec::new(), cx)
+}
+
+/// The three-dots button; `extra` items go into the menu after "Save to playlist…".
+fn more_button_with(id: SharedString, v: &VideoItem, extra: Vec<MenuItem>, cx: &App) -> Stateful<Div> {
     let p = pal(cx);
     let v = v.clone();
     div()
@@ -233,7 +238,10 @@ fn more_button(id: SharedString, v: &VideoItem, cx: &App) -> Stateful<Div> {
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |ev, window, cx| {
             cx.stop_propagation();
-            open_menu(ev.position(), video_menu_items(&v), window, cx);
+            let mut items = video_menu_items(&v);
+            let at = items.len().min(4);
+            items.splice(at..at, extra.iter().cloned());
+            open_menu(ev.position(), items, window, cx);
         })
 }
 
@@ -457,6 +465,11 @@ pub fn video_row(v: &VideoItem, thumb_w: Pixels, cx: &mut App) -> AnyElement {
 
 /// Compact row used for related videos / queues.
 pub fn compact_row(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn(&mut Window, &mut App)>>, cx: &mut App) -> AnyElement {
+    compact_row_with(v, active, on_click, Vec::new(), cx)
+}
+
+/// `compact_row` with extra items in the video's menu.
+pub fn compact_row_with(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn(&mut Window, &mut App)>>, extra: Vec<MenuItem>, cx: &mut App) -> AnyElement {
     let p = pal(cx);
     let (title, thumb) = branded(v, cx);
     let thumb = if thumb == v.thumbnail {
@@ -493,7 +506,7 @@ pub fn compact_row(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn(&mut
                 .child(div().text_xs().text_color(p.text2).truncate().child(v.channel_name.clone()))
                 .child(div().text_xs().text_color(p.text2).truncate().child(meta_line(v))),
         )
-        .child(more_button(SharedString::from(format!("crm-{}", v.id)), v, cx))
+        .child(more_button_with(SharedString::from(format!("crm-{}", v.id)), v, extra, cx))
         .into_any_element()
 }
 

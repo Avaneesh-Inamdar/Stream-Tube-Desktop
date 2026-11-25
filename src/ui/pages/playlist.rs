@@ -259,6 +259,42 @@ impl PlaylistPage {
         }
     }
 
+    /// Takes one video out of the playlist: the local list, or the signed-in account's.
+    fn remove_video(&mut self, video_id: String, cx: &mut Context<Self>) {
+        match &self.source {
+            Source::Local(lid) => {
+                store::playlist_remove(*lid, &video_id);
+                self.reload_local();
+                toast(cx, t("Removed from playlist"));
+                cx.notify();
+            }
+            Source::Remote(pid) => {
+                let pid = pid.clone();
+                cx.spawn(async move |this, cx| {
+                    let ids = vec![video_id.clone()];
+                    let res = blocking(move || crate::api::auth::remove_many_from_playlist(&pid, &ids)).await;
+                    let _ = this.update(cx, |this, cx| {
+                        match res {
+                            Ok(()) => {
+                                if let Some(v) = this.videos.ready_mut() {
+                                    v.retain(|v| v.id != video_id);
+                                }
+                                // with the whole list loaded its length is the count
+                                if this.continuation.is_none() {
+                                    this.count_text = None;
+                                }
+                                toast(cx, t("Removed from playlist"));
+                            }
+                            Err(_) => toast(cx, t("Couldn't remove the video from your YouTube playlist")),
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+
     fn playlist_param(&self) -> String {
         match &self.source {
             Source::Remote(id) => id.clone(),
@@ -439,14 +475,24 @@ impl Render for PlaylistPage {
                     col = col.child(div().py_8().text_sm().text_color(p.text2).child(t("No videos match")));
                 }
                 let vs = &shown;
+                // a list of the user's own: local, or an account playlist the account can edit
+                let editable = local_id.is_some() || self.authed;
                 for (i, v) in vs.iter().map(|(i, v)| (*i, v)) {
                     let vid = v.id.clone();
+                    let extra = if editable {
+                        let (page, rid) = (cx.entity().downgrade(), v.id.clone());
+                        vec![crate::ui::app::MenuItem::new("list-x", t("Remove from playlist"), move |_, cx| {
+                            let _ = page.update(cx, |this, cx| this.remove_video(rid.clone(), cx));
+                        })]
+                    } else {
+                        Vec::new()
+                    };
                     let row = div()
                         .flex()
                         .items_center()
                         .gap_2()
                         .child(div().w_6().text_sm().text_color(p.text2).text_center().child((i + 1).to_string()))
-                        .child(div().flex_1().min_w_0().child(compact_row(
+                        .child(div().flex_1().min_w_0().child(compact_row_with(
                             v,
                             false,
                             Some({
@@ -466,6 +512,7 @@ impl Render for PlaylistPage {
                                     }
                                 })
                             }),
+                            extra,
                             cx,
                         )))
                         .when_some(local_id, |d, lid| {
