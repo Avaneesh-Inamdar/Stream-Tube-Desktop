@@ -1,6 +1,4 @@
 {
-  "Minimize to tray": "Réduire dans la zone de notification",
-  "Keep Stream Tube open in the Windows notification area when you minimize or close it": "Garder Stream Tube dans la zone de notification Windows lorsque la fenêtre est réduite ou fermée",
   "Back": "Retour",
   "Search languages": "Rechercher une langue",
   "original": "original",
@@ -98,6 +96,8 @@
   "Start page": "Page d’accueil",
   "Interface size": "Taille de l’interface",
   "Always show scrollbars": "Toujours afficher les barres de défilement",
+  "Minimize to tray": "Réduire dans la zone de notification",
+  "Keep Stream Tube open in the Windows notification area when you minimize or close it": "Garder Stream Tube dans la zone de notification Windows lorsque la fenêtre est réduite ou fermée",
   "Otherwise they appear when the pointer is over a page. Drag one, or click its track, to scroll": "Sinon, ils apparaissent lorsque le pointeur se trouve sur une page.Faites-en glisser un, ou cliquez sur sa piste, pour faire défiler",
   "Density": "Densité",
   "Compact": "Compacte",

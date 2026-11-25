@@ -1,6 +1,4 @@
 {
-  "Minimize to tray": "Bildiriş sahəsinə kiçilt",
-  "Keep Stream Tube open in the Windows notification area when you minimize or close it": "Pəncərəni kiçiltdikdə və ya bağladıqda Stream Tube-u Windows bildiriş sahəsində açıq saxla",
   "Back": "Geri",
   "Search languages": "Dilləri axtar",
   "original": "orijinal",
@@ -98,6 +96,8 @@
   "Start page": "Başlanğıc səhifəsi",
   "Interface size": "İnterfeysin ölçüsü",
   "Always show scrollbars": "Sürüşdürmə zolaqlarını həmişə göstər",
+  "Minimize to tray": "Bildiriş sahəsinə kiçilt",
+  "Keep Stream Tube open in the Windows notification area when you minimize or close it": "Pəncərəni kiçiltdikdə və ya bağladıqda Stream Tube-u Windows bildiriş sahəsində açıq saxla",
   "Otherwise they appear when the pointer is over a page. Drag one, or click its track, to scroll": "Əks təqdirdə, işarə səhifə üzərində olduğu zaman görünəcəklər. Səhifəni sürükləmək üçün onu sürüklə, ya da onun izinə kliklə",
   "Density": "Sıxlıq",
   "Compact": "Yığcam",

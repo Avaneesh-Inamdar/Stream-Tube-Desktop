@@ -1,6 +1,4 @@
 {
-  "Minimize to tray": "Згортати в область сповіщень",
-  "Keep Stream Tube open in the Windows notification area when you minimize or close it": "Залишати Stream Tube в області сповіщень Windows, якщо згорнути або закрити вікно",
   "Back": "Назад",
   "Search languages": "Пошук мов",
   "original": "оригінал",
@@ -98,6 +96,8 @@
   "Start page": "Початкова сторінка",
   "Interface size": "Масштаб інтерфейсу",
   "Always show scrollbars": "Завжди показувати смуги прокручування",
+  "Minimize to tray": "Згортати в область сповіщень",
+  "Keep Stream Tube open in the Windows notification area when you minimize or close it": "Залишати Stream Tube в області сповіщень Windows, якщо згорнути або закрити вікно",
   "Otherwise they appear when the pointer is over a page. Drag one, or click its track, to scroll": "Інакше вони з’ являться, коли вказівник буде поміщено на сторінку. Перетягніть один з них або клацніть його слід, щоб прокрутити",
   "Density": "Щільність",
   "Compact": "Компактна",

@@ -1,6 +1,4 @@
 {
-  "Minimize to tray": "In den Infobereich minimieren",
-  "Keep Stream Tube open in the Windows notification area when you minimize or close it": "Stream Tube beim Minimieren oder Schließen im Windows-Infobereich geöffnet lassen",
   "Back": "Zurück",
   "Search languages": "Sprachen suchen",
   "original": "Original",
@@ -98,6 +96,8 @@
   "Start page": "Startseite",
   "Interface size": "Oberflächengröße",
   "Always show scrollbars": "Bildlaufleisten immer anzeigen",
+  "Minimize to tray": "In den Infobereich minimieren",
+  "Keep Stream Tube open in the Windows notification area when you minimize or close it": "Stream Tube beim Minimieren oder Schließen im Windows-Infobereich geöffnet lassen",
   "Otherwise they appear when the pointer is over a page. Drag one, or click its track, to scroll": "Ziehen Sie eine Seite, oder klicken Sie auf die Spur, um sie zu scrollen.",
   "Density": "Anzeigedichte",
   "Compact": "Kompakt",

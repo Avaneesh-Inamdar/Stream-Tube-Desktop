@@ -1,6 +1,4 @@
 {
-  "Minimize to tray": "最小化至通知區域",
-  "Keep Stream Tube open in the Windows notification area when you minimize or close it": "最小化或關閉視窗時，讓 Stream Tube 在 Windows 通知區域繼續執行",
   "Back": "返回",
   "Search languages": "搜尋語言",
   "original": "原始語言",
@@ -98,6 +96,8 @@
   "Start page": "啟動頁面",
   "Interface size": "介面大小",
   "Always show scrollbars": "一律顯示捲軸",
+  "Minimize to tray": "最小化至通知區域",
+  "Keep Stream Tube open in the Windows notification area when you minimize or close it": "最小化或關閉視窗時，讓 Stream Tube 在 Windows 通知區域繼續執行",
   "Otherwise they appear when the pointer is over a page. Drag one, or click its track, to scroll": "否則，當指針移動到某一頁面上時，它們就會出現。 拖動某一頁面或點擊其軌跡，即可滾動",
   "Density": "顯示密度",
   "Compact": "精簡",

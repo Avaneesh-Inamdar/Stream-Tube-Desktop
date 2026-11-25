@@ -1,6 +1,4 @@
 {
-  "Minimize to tray": "Хабарландыру аймағына кішірейту",
-  "Keep Stream Tube open in the Windows notification area when you minimize or close it": "Терезе кішірейтілгенде немесе жабылғанда Stream Tube қолданбасын Windows хабарландыру аймағында ашық қалдыру",
   "Back": "Артқа",
   "Search languages": "Тілдерді іздеу",
   "original": "түпнұсқа",
@@ -98,6 +96,8 @@
   "Start page": "Бастапқы бет",
   "Interface size": "Интерфейс өлшемі",
   "Always show scrollbars": "Айналдыру жолақтарын әрдайым көрсету",
+  "Minimize to tray": "Хабарландыру аймағына кішірейту",
+  "Keep Stream Tube open in the Windows notification area when you minimize or close it": "Терезе кішірейтілгенде немесе жабылғанда Stream Tube қолданбасын Windows хабарландыру аймағында ашық қалдыру",
   "Otherwise they appear when the pointer is over a page. Drag one, or click its track, to scroll": "Әйтпесе, меңзер беттің үстінде тұрғанда олар көрінеді. Жүргізу үшін біреуін сүйреп апарыңыз немесе жолын түртіңіз",
   "Density": "Тығыздық",
   "Compact": "Ықшам",
