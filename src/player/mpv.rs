@@ -176,6 +176,9 @@ fn lib() -> Result<&'static (Library, Fns)> {
             preload_vulkan_loader();
         }
         let mut candidates = Vec::new();
+        // Prefer the current ABI on the host before the AppImage's legacy ABI.
+        #[cfg(target_os = "linux")]
+        candidates.push(PathBuf::from(LIBRARY_NAMES[0]));
         #[cfg(any(windows, target_os = "linux"))]
         if let Ok(exe) = std::env::current_exe() {
             if let Some(d) = exe.parent() {
@@ -193,7 +196,8 @@ fn lib() -> Result<&'static (Library, Fns)> {
         }
         #[cfg(windows)]
         candidates.push(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/third_party/mpv/libmpv-2.dll")));
-        candidates.extend(LIBRARY_NAMES.iter().map(PathBuf::from));
+        let next_name = usize::from(cfg!(target_os = "linux"));
+        candidates.extend(LIBRARY_NAMES[next_name..].iter().map(PathBuf::from));
         open_library(candidates)
     })
     .as_ref()
