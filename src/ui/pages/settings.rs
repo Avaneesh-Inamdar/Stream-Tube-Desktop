@@ -583,7 +583,13 @@ impl SettingsPage {
             .child(row(
                 "Preload upcoming Shorts",
                 "Buffer the start of this many videos ahead of playback",
-                self.choice("shorts-preload", &[(0, "Off"), (1, "1"), (2, "2")], s.shorts_preload.min(2), |s, v| s.shorts_preload = v, cx),
+                self.choice(
+                    "shorts-preload",
+                    &[(0, "Off"), (1, "1"), (2, "2"), (3, "3"), (4, "4"), (5, "5")],
+                    s.shorts_preload.min(crate::player::shorts_preload::MAX_AHEAD),
+                    |s, v| s.shorts_preload = v,
+                    cx,
+                ),
                 cx,
             ))
             .child(row("Open Shorts in the regular player", "", switch("shp", s.shorts_in_player, |s, v| s.shorts_in_player = v, cx), cx))

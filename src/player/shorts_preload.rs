@@ -5,6 +5,8 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, Weak};
 
+pub const MAX_AHEAD: u8 = 5;
+
 const PLAYLIST_LIMIT: usize = 512 * 1024;
 const SEGMENT_LIMIT: usize = 4 * 1024 * 1024;
 const STREAM_PREFIX: usize = 512 * 1024;
@@ -39,7 +41,7 @@ pub fn clear() {
 }
 
 pub fn update(feed: &[VideoItem], quality: u32, audio_only: bool) {
-    let ahead = crate::store::settings_snapshot().shorts_preload.min(2) as usize;
+    let ahead = crate::store::settings_snapshot().shorts_preload.min(MAX_AHEAD) as usize;
     if ahead == 0 || feed.is_empty() {
         clear();
         return;
