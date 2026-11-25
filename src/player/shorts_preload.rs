@@ -3,6 +3,7 @@ use super::proxy;
 use crate::api::{streams, types::VideoItem};
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::io::Read;
 use std::sync::{Arc, OnceLock, Weak};
 
 pub const MAX_AHEAD: u8 = 5;
@@ -28,19 +29,27 @@ struct Preloads {
     quality: u32,
     audio_only: bool,
     running: bool,
+    ready: bool,
 }
 
 static STATE: OnceLock<Mutex<Preloads>> = OnceLock::new();
 
+pub(super) fn suspend() {
+    if let Some(state) = STATE.get() {
+        state.lock().ready = false;
+    }
+}
+
 pub fn clear() {
     if let Some(state) = STATE.get() {
         let mut state = state.lock();
+        state.ready = false;
         state.upcoming.clear();
         state.videos.clear();
     }
 }
 
-pub fn update(feed: &[VideoItem], quality: u32, audio_only: bool) {
+pub fn update(feed: &[VideoItem], quality: u32, audio_only: bool, ready: bool) {
     let ahead = crate::store::settings_snapshot().shorts_preload.min(MAX_AHEAD) as usize;
     if ahead == 0 || feed.is_empty() {
         clear();
@@ -50,6 +59,7 @@ pub fn update(feed: &[VideoItem], quality: u32, audio_only: bool) {
     let next = &feed[1..feed.len().min(1 + ahead)];
     let state = STATE.get_or_init(Default::default);
     let mut s = state.lock();
+    s.ready = ready;
     if (s.quality, s.audio_only) != (quality, audio_only) {
         s.videos.clear();
         s.quality = quality;
@@ -59,7 +69,7 @@ pub fn update(feed: &[VideoItem], quality: u32, audio_only: bool) {
     if !s.upcoming.iter().eq(next.iter().map(|v| &v.id)) {
         s.upcoming = next.iter().map(|v| v.id.clone()).collect();
     }
-    if s.running || s.upcoming.iter().all(|id| s.videos.contains_key(id)) {
+    if !s.ready || s.running || s.upcoming.iter().all(|id| s.videos.contains_key(id)) {
         return;
     }
     s.running = true;
@@ -68,6 +78,10 @@ pub fn update(feed: &[VideoItem], quality: u32, audio_only: bool) {
         loop {
             let (id, assets, quality, audio_only) = {
                 let mut s = state.lock();
+                if !s.ready {
+                    s.running = false;
+                    return;
+                }
                 let Some(id) = s.upcoming.iter().find(|id| !s.videos.contains_key(*id)).cloned() else {
                     s.running = false;
                     return;
@@ -75,7 +89,12 @@ pub fn update(feed: &[VideoItem], quality: u32, audio_only: bool) {
                 let assets = Arc::downgrade(s.videos.entry(id.clone()).or_default());
                 (id, assets, s.quality, s.audio_only)
             };
-            preload(&id, assets, quality, audio_only);
+            preload(&id, assets.clone(), quality, audio_only);
+            let mut s = state.lock();
+            if !s.ready && s.upcoming.contains(&id) && s.videos.get(&id).is_some_and(|entry| Weak::ptr_eq(&assets, &Arc::downgrade(entry)))
+            {
+                s.videos.remove(&id);
+            }
         }
     });
 }
@@ -108,6 +127,10 @@ pub(crate) fn remember_master(id: &str, url: &str, text: &str) {
 struct Download(Weak<Assets>);
 
 impl Download {
+    fn can_fetch(&self) -> bool {
+        self.0.strong_count() > 0 && STATE.get().is_some_and(|state| state.lock().ready)
+    }
+
     fn store(&self, url: &str, media: Media) {
         if let Some(assets) = self.0.upgrade() {
             let mut assets = assets.lock();
@@ -119,7 +142,7 @@ impl Download {
     }
 
     fn fetch(&self, url: &str, limit: usize, prefix: bool) -> Option<Media> {
-        if self.0.strong_count() == 0 || !url.starts_with("https://") {
+        if !self.can_fetch() || !url.starts_with("https://") {
             return None;
         }
         let mut req = proxy::agent().get(url).header("User-Agent", crate::api::http::BROWSER_UA);
@@ -147,7 +170,30 @@ impl Download {
             .and_then(|h| h.to_str().ok())
             .unwrap_or("application/octet-stream")
             .to_owned();
-        let bytes = resp.body_mut().with_config().limit(limit as u64).read_to_vec().ok()?;
+        if resp
+            .headers()
+            .get("Content-Length")
+            .and_then(|v| v.to_str().ok()?.parse::<u64>().ok())
+            .is_some_and(|len| len > limit as u64)
+        {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        let mut reader = resp.body_mut().as_reader();
+        let mut chunk = [0; 32 * 1024];
+        loop {
+            if !self.can_fetch() {
+                return None;
+            }
+            let n = reader.read(&mut chunk).ok()?;
+            if n == 0 {
+                break;
+            }
+            if bytes.len() + n > limit {
+                return None;
+            }
+            bytes.extend_from_slice(&chunk[..n]);
+        }
         let len = bytes.len() as u64;
         let (expected, total) = range.unwrap_or((len, len));
         if len == 0 || len != expected || total < len {

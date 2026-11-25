@@ -13,6 +13,7 @@ use std::sync::Arc;
 pub enum PlayerEvent {
     Ended,
     Loaded,
+    PlaybackReadyChanged,
     /// average colour of the picture changed (ambient mode)
     Ambient,
 }
@@ -25,6 +26,7 @@ pub struct Player {
     pub video: Option<VideoItem>,
     pub streams: Option<Arc<StreamInfo>>,
     pub loading: bool,
+    pub playback_ready: bool,
     pub error: Option<String>,
     pub quality: u32,
     pub audio_only: bool,
@@ -112,6 +114,7 @@ impl Player {
             video: None,
             streams: None,
             loading: false,
+            playback_ready: false,
             error: None,
             quality: s.default_quality,
             audio_only: s.audio_only,
@@ -306,6 +309,9 @@ impl Player {
                 cx.notify();
             }
             MpvEvent::PlaybackRestart => {
+                if !self.loading && !self.buffering && self.streams.is_some() {
+                    self.set_playback_ready(true, cx);
+                }
                 self.seeking = false;
                 cx.notify();
             }
@@ -336,6 +342,9 @@ impl Player {
                 match (name, val) {
                     ("time-pos", PropValue::Double(t)) => {
                         self.time = t;
+                        if t > 0. && !self.loading && !self.buffering && !self.paused && !self.playback_ready {
+                            self.set_playback_ready(true, cx);
+                        }
                         self.on_time(cx);
                     }
                     ("duration", PropValue::Double(d)) => self.duration = d,
@@ -347,7 +356,12 @@ impl Player {
                             self.eof = false;
                         }
                     }
-                    ("paused-for-cache", PropValue::Flag(b)) => self.buffering = b,
+                    ("paused-for-cache", PropValue::Flag(b)) => {
+                        self.buffering = b;
+                        if b {
+                            self.set_playback_ready(false, cx);
+                        }
+                    }
                     ("seeking", PropValue::Flag(b)) => self.seeking = b,
                     ("demuxer-cache-time", PropValue::Double(c)) => self.cache_time = c,
                     ("speed", PropValue::Double(s)) => self.speed = s,
@@ -503,7 +517,18 @@ impl Player {
     }
 
     /// Starts playing a video. Fetches streams, SponsorBlock segments and resumes progress.
+    fn set_playback_ready(&mut self, ready: bool, cx: &mut Context<Self>) {
+        if self.playback_ready != ready {
+            self.playback_ready = ready;
+            if !ready {
+                super::shorts_preload::suspend();
+            }
+            cx.emit(PlayerEvent::PlaybackReadyChanged);
+        }
+    }
+
     pub fn play(&mut self, video: VideoItem, start: Option<f64>, cx: &mut Context<Self>) {
+        self.set_playback_ready(false, cx);
         self.save_progress(true);
         if let Some(prev) = &self.video {
             crate::api::web::report_stop(&prev.id, self.time);
@@ -686,6 +711,7 @@ impl Player {
 
     /// (Re)loads current streams into mpv with current quality/audio settings.
     fn load_current(&mut self, start: Option<f64>, keep_pause: bool, cx: &mut Context<Self>) {
+        self.set_playback_ready(false, cx);
         let (Some(mpv), Some(info)) = (self.mpv.clone(), self.streams.clone()) else { return };
         let s = store::settings_snapshot();
         let src = if info.hls_only {
@@ -1090,6 +1116,7 @@ impl Player {
     }
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {
+        self.set_playback_ready(false, cx);
         self.save_progress(true);
         if let Some(v) = &self.video {
             crate::api::web::report_stop(&v.id, self.time);

@@ -228,6 +228,10 @@ pub fn sync_watch_route(id: String, cx: &mut App) {
     }
 }
 
+pub fn is_current_page(page: EntityId, cx: &App) -> bool {
+    cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()).is_some_and(|app| app.read(cx).page.entity_id() == page)
+}
+
 pub fn has_autoplay_next(cx: &App) -> bool {
     cx.try_global::<AutoplayNext>().map(|a| a.0.is_some()).unwrap_or(false)
 }
