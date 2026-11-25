@@ -1,7 +1,4 @@
 {
-  "Sign in to YouTube in the {0} window that opened.": "開いた {0} のウィンドウで YouTube にログインしてください。",
-  "In the browser, open your YouTube profile menu and choose the channel for your watch history.": "ブラウザーで YouTube のプロフィールメニューを開き、再生履歴を保存するチャンネルを選択してください。",
-  "Use current YouTube channel": "現在の YouTube チャンネルを使う",
   "Back": "戻る",
   "Search languages": "言語を検索",
   "original": "オリジナル",
@@ -290,6 +287,9 @@
   "Signed out": "ログアウトしました",
   "The code expired. Try again.": "コードが有効期限を過ぎました。もう一度試してください。",
   "Connect your YouTube history": "YouTube履歴を接続",
+  "Sign in to YouTube in the {0} window that opened.": "開いた {0} のウィンドウで YouTube にログインしてください。",
+  "In the browser, open your YouTube profile menu and choose the channel for your watch history.": "ブラウザーで YouTube のプロフィールメニューを開き、再生履歴を保存するチャンネルを選択してください。",
+  "Use current YouTube channel": "現在の YouTube チャンネルを使う",
   "Use a cookies.txt file instead": "cookies.txt ファイルを使う",
   "Cancel": "キャンセル",
   "Try again": "もう一度試す",

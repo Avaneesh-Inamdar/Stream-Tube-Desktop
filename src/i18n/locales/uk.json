@@ -1,7 +1,4 @@
 {
-  "Sign in to YouTube in the {0} window that opened.": "Увійдіть у YouTube у відкритому вікні {0}.",
-  "In the browser, open your YouTube profile menu and choose the channel for your watch history.": "У браузері відкрийте меню профілю YouTube і виберіть канал для історії переглядів.",
-  "Use current YouTube channel": "Використати поточний канал YouTube",
   "Back": "Назад",
   "Search languages": "Пошук мов",
   "original": "оригінал",
@@ -290,6 +287,9 @@
   "Signed out": "Ви вийшли з облікового запису",
   "The code expired. Try again.": "Код застарів. Спробуйте знову.",
   "Connect your YouTube history": "Підключіть історію YouTube",
+  "Sign in to YouTube in the {0} window that opened.": "Увійдіть у YouTube у відкритому вікні {0}.",
+  "In the browser, open your YouTube profile menu and choose the channel for your watch history.": "У браузері відкрийте меню профілю YouTube і виберіть канал для історії переглядів.",
+  "Use current YouTube channel": "Використати поточний канал YouTube",
   "Use a cookies.txt file instead": "Скористатися файлом cookies.txt",
   "Cancel": "Скасувати",
   "Try again": "Спробувати ще раз",

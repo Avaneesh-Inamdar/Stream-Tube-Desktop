@@ -1,7 +1,4 @@
 {
-  "Sign in to YouTube in the {0} window that opened.": "Connectez-vous à YouTube dans la fenêtre {0} qui s’est ouverte.",
-  "In the browser, open your YouTube profile menu and choose the channel for your watch history.": "Dans le navigateur, ouvrez le menu de votre profil YouTube et choisissez la chaîne pour votre historique.",
-  "Use current YouTube channel": "Utiliser la chaîne YouTube actuelle",
   "Back": "Retour",
   "Search languages": "Rechercher une langue",
   "original": "original",
@@ -290,6 +287,9 @@
   "Signed out": "Déconnecté",
   "The code expired. Try again.": "Le code a expiré. Réessayez.",
   "Connect your YouTube history": "Connecter votre historique YouTube",
+  "Sign in to YouTube in the {0} window that opened.": "Connectez-vous à YouTube dans la fenêtre {0} qui s’est ouverte.",
+  "In the browser, open your YouTube profile menu and choose the channel for your watch history.": "Dans le navigateur, ouvrez le menu de votre profil YouTube et choisissez la chaîne pour votre historique.",
+  "Use current YouTube channel": "Utiliser la chaîne YouTube actuelle",
   "Use a cookies.txt file instead": "Utiliser un fichier cookies.txt",
   "Cancel": "Annuler",
   "Try again": "Réessayer",
