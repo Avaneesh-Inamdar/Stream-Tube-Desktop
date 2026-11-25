@@ -1,11 +1,11 @@
 //! Picture-in-picture: the player in a small always-on-top window that stays
 //! visible over other apps.
-use crate::player::controller::player;
+use crate::player::controller::{Player, player};
 use crate::player::view::PlayerView;
 use crate::ui::*;
 
 #[derive(Default)]
-struct PipWindow(Option<AnyWindowHandle>);
+struct PipWindow(Option<(AnyWindowHandle, Entity<Player>)>);
 impl Global for PipWindow {}
 
 pub struct PipView {
@@ -13,15 +13,20 @@ pub struct PipView {
 }
 
 pub fn handle(cx: &App) -> Option<AnyWindowHandle> {
-    cx.try_global::<PipWindow>().and_then(|p| p.0)
+    cx.try_global::<PipWindow>().and_then(|p| p.0.as_ref().map(|(handle, _)| *handle))
+}
+
+pub(crate) fn owner(cx: &App) -> Option<Entity<Player>> {
+    cx.try_global::<PipWindow>().and_then(|p| p.0.as_ref().map(|(_, player)| player.clone()))
 }
 
 pub fn open(cx: &mut App) {
-    if let Some(h) = cx.try_global::<PipWindow>().and_then(|p| p.0) {
-        if h.update(cx, |_, window, _| window.activate_window())
-            .is_ok()
-        {
-            return;
+    let active = player(cx);
+    if let Some(h) = handle(cx) {
+        if owner(cx).as_ref() == Some(&active) {
+            if h.update(cx, |_, window, _| window.activate_window()).is_ok() { return; }
+        } else {
+            let _ = h.update(cx, |_, window, cx| close(window, cx));
         }
     }
     let size = size(px(480.), px(270.));
@@ -45,7 +50,7 @@ pub fn open(cx: &mut App) {
         ..Default::default()
     };
     let res = gpui_kit::open_window(opts, cx, |_window, cx| {
-        let pl = player(cx);
+        let pl = active.clone();
         let view = cx.new(|cx| {
             let mut v = PlayerView::new(pl, false, cx);
             v.pip = true;
@@ -55,7 +60,8 @@ pub fn open(cx: &mut App) {
     });
     match res {
         Ok((h, _)) => {
-            cx.set_global(PipWindow(Some(h)));
+            cx.set_global(PipWindow(Some((h, active.clone()))));
+            active.update(cx, |p, cx| p.set_in_pip(true, cx));
             let _ = h.update(cx, |_, window, cx| {
                 crate::idle_inhibit::set_pip_window(cx, Some(window));
             });
@@ -66,10 +72,19 @@ pub fn open(cx: &mut App) {
 }
 
 pub fn close(window: &mut Window, cx: &mut App) {
-    crate::idle_inhibit::set_pip_window(cx, None);
-    cx.set_global(PipWindow(None));
+    clear(cx);
     window.remove_window();
     cx.refresh_windows();
+}
+
+fn clear(cx: &mut App) {
+    let previous = owner(cx);
+    cx.set_global(PipWindow(None));
+    crate::idle_inhibit::set_pip_window(cx, None);
+    if let Some(previous) = previous {
+        previous.update(cx, |p, cx| p.set_in_pip(false, cx));
+    }
+    player(cx).update(cx, |p, cx| p.refresh_idle_guard(cx));
 }
 
 /// Starts moving the window under the pointer, as if its title bar was pressed.
@@ -115,8 +130,7 @@ pub(crate) fn begin_window_move(window: &Window) {
 /// main window shows the video again.
 pub fn window_closed(id: WindowId, cx: &mut App) {
     if handle(cx).is_some_and(|h| h.window_id() == id) {
-        crate::idle_inhibit::set_pip_window(cx, None);
-        cx.set_global(PipWindow(None));
+        clear(cx);
         cx.refresh_windows();
     }
 }

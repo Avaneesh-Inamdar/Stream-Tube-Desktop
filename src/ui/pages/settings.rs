@@ -563,6 +563,12 @@ impl SettingsPage {
         card(cx)
             .children(note)
             .child(row("Background play", "Keep playing when the window is minimized (off: pause, resume on restore)", switch("bgp", s.background_play, |s, v| s.background_play = v, cx), cx))
+            .child(row(
+                "Independent tab playback",
+                "Play up to three tabs at once. Restart Stream Tube to apply.",
+                switch("independent-tab-playback", s.independent_tab_playback, |s, v| s.independent_tab_playback = v, cx),
+                cx,
+            ))
             .child(row("Most replayed graph", "Heat line above the seek bar", switch("heat", s.show_heatmap, |s, v| s.show_heatmap = v, cx), cx))
             .child(row("Jump ahead", "Button to skip to the most replayed part", switch("jump", s.jump_ahead, |s, v| s.jump_ahead = v, cx), cx))
             .child(row("Enhanced bitrate", "Picks the highest-bitrate stream YouTube offers for the chosen quality", switch("ebr", s.enhanced_bitrate, |s, v| s.enhanced_bitrate = v, cx), cx))

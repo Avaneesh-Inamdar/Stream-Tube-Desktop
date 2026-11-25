@@ -3,9 +3,9 @@ use crate::i18n::{t as translate, tf};
 use crate::api::json::compact_number;
 use crate::api::services::{self, Votes};
 use crate::api::types::*;
-use crate::player::controller::{PlayerEvent, player};
+use crate::player::controller::{Player, PlayerEvent, player};
 use crate::store;
-use crate::ui::app::{AutoplayNext, Route, UiState, navigate, open_menu};
+use crate::ui::app::{Route, UiState, navigate, open_menu};
 use crate::ui::cards::*;
 use crate::ui::widgets::*;
 use crate::ui::*;
@@ -31,6 +31,7 @@ const CHAT_KEEP: usize = 250;
 
 pub struct WatchPage {
     id: String,
+    player: Entity<Player>,
     playlist_id: Option<String>,
     info: Load<WatchInfo>,
     votes: Option<Votes>,
@@ -120,9 +121,9 @@ impl WatchPage {
         } else if let Some(t) = start {
             pl.update(cx, |p, _| p.seek_to(t));
         }
-        cx.set_global(AutoplayNext(None));
         let mut s = Self {
             id,
+            player: pl,
             playlist_id,
             info: Load::Loading,
             votes: None,
@@ -409,7 +410,7 @@ impl WatchPage {
                 match info {
                     Ok(w) => {
                         let s = store::settings_snapshot();
-                        let pl = player(cx);
+                        let pl = this.player.clone();
                         let chapters = w.chapters.clone();
                         let heatmap = w.heatmap.clone();
                         let full = VideoItem {
@@ -452,7 +453,7 @@ impl WatchPage {
                             .filter_map(|i| i.as_video())
                             .find(|v| !v.is_short && !v.is_live && !store::is_filtered(v, &s))
                             .cloned();
-                        if let Some(n) = next.as_ref().filter(|_| s.autoplay_next) {
+                        if let Some(n) = next.as_ref().filter(|_| s.autoplay_next && pl == player(cx)) {
                             // warm up the autoplay candidate so the next video starts instantly
                             let id = n.id.clone();
                             std::thread::spawn(move || {
@@ -460,7 +461,12 @@ impl WatchPage {
                                 crate::api::streams::prefetch(&id);
                             });
                         }
-                        cx.set_global(AutoplayNext(next));
+                        pl.update(cx, |p, cx| {
+                            if p.video.as_ref().is_some_and(|video| video.id == w.id) {
+                                p.autoplay_next = next;
+                                cx.notify();
+                            }
+                        });
                         let comments_token = w.comments_token.clone();
                         let has_chat = w.live_chat.is_some();
                         this.info = Load::Ready(w);
@@ -482,9 +488,13 @@ impl WatchPage {
     }
 
     fn on_ended(&mut self, cx: &mut Context<Self>) {
+        let playing = self.player.read(cx);
+        if self.player != player(cx) || playing.video.as_ref().is_none_or(|video| video.id != self.id) {
+            return;
+        }
         let s = store::settings_snapshot();
-        let next = cx.global::<AutoplayNext>().0.clone().filter(|_| s.autoplay_next);
-        let looping = player(cx).read(cx).loop_video;
+        let next = playing.autoplay_next.clone().filter(|_| s.autoplay_next);
+        let looping = playing.loop_video;
         if next.is_none() && !looping && s.exit_fullscreen_at_end && cx.global::<UiState>().fullscreen {
             if let Some(w) = cx.active_window() {
                 let _ = w.update(cx, |_, window, cx| crate::ui::app::exit_fullscreen(window, cx));
@@ -496,10 +506,13 @@ impl WatchPage {
         if let Some(v) = next {
             toast(cx, tf!("Up next: {0}", v.title));
             let id = v.id.clone();
+            let playback = self.player.clone();
+            let finished = self.id.clone();
             cx.spawn(async move |_, cx| {
                 cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
                 let _ = cx.update(|cx| {
-                    let still_ended = player(cx).read(cx).eof;
+                    let p = playback.read(cx);
+                    let still_ended = player(cx) == playback && p.eof && p.video.as_ref().is_some_and(|video| video.id == finished);
                     if still_ended {
                         if let Some(w) = cx.active_window() {
                             let _ = w.update(cx, |_, window, cx| navigate(Route::Watch { id, playlist: None, start: None }, window, cx));
@@ -529,7 +542,7 @@ impl WatchPage {
                     if !this.comment_timed {
                         return false;
                     }
-                    let now = player(cx).read(cx).time;
+                    let now = this.player.read(cx).time;
                     let shown = this.stamped().iter().filter(|(t, _)| *t <= now + 0.5).count();
                     if shown != this.timed_shown {
                         this.timed_shown = shown;
