@@ -1278,10 +1278,55 @@ fn comment_emojis(props: &Value) -> Vec<(String, String)> {
 
 pub fn comments(token: &str) -> Result<CommentPage> {
     let r = call("next", json!({ "continuation": token }))?;
+    Ok(parse_comments(&r))
+}
+
+pub(crate) fn account_comments(token: &str) -> Result<CommentPage> {
+    if let Some(account) = super::web::session_identity() {
+        if let Ok(response) = super::web::web_call_for_session(&account, "next", json!({ "continuation": token })) {
+            let mut page = parse_comments(&response);
+            page.account = Some(account);
+            return Ok(page);
+        }
+    }
+    comments(token)
+}
+
+pub(crate) fn post_comment(account: &std::sync::Arc<()>, params: &str, text: &str) -> Result<()> {
+    let text = text.trim();
+    anyhow::ensure!(!text.is_empty(), "Enter a comment first");
+    let response = super::web::web_call_for_session(
+        account, "comment/create_comment", json!({ "createCommentParams": params, "commentText": text }),
+    )?;
+    anyhow::ensure!(response.get("error").is_none(), "YouTube refused the comment");
+    Ok(())
+}
+
+pub(crate) fn react_to_comment(account: &std::sync::Arc<()>, actions: &[String]) -> Result<()> {
+    anyhow::ensure!(!actions.is_empty(), "This comment has no reaction command");
+    let response = super::web::web_call_for_session(account, "comment/perform_comment_action", json!({ "actions": actions }))?;
+    anyhow::ensure!(response.get("error").is_none(), "YouTube refused the reaction");
+    Ok(())
+}
+
+fn create_comment_params(node: &Value) -> Option<String> {
+    find(node, "createCommentEndpoint")?.get("createCommentParams")?.as_str().filter(|s| !s.is_empty()).map(str::to_owned)
+}
+
+fn reaction_actions(node: Option<&Value>) -> Vec<String> {
+    let Some(endpoint) = node.and_then(|n| find(n, "performCommentActionEndpoint")) else { return Vec::new() };
+    if let Some(actions) = endpoint.get("actions").and_then(Value::as_array) {
+        return actions.iter().filter_map(Value::as_str).map(str::to_owned).collect();
+    }
+    endpoint.get("action").and_then(Value::as_str).map(str::to_owned).into_iter().collect()
+}
+
+fn parse_comments(r: &Value) -> CommentPage {
     let mut page = CommentPage::default();
     // entity payloads
     let mut payloads = std::collections::HashMap::new();
     let mut toolbar_states = std::collections::HashMap::new();
+    let mut toolbar_surfaces = std::collections::HashMap::new();
     let mut surfaces = std::collections::HashMap::new();
     if let Some(muts) = r.pointer("/frameworkUpdates/entityBatchUpdate/mutations").and_then(Value::as_array) {
         for m in muts {
@@ -1290,6 +1335,8 @@ pub fn comments(token: &str) -> Result<CommentPage> {
                 payloads.insert(key, p.clone());
             } else if let Some(p) = m.pointer("/payload/engagementToolbarStateEntityPayload") {
                 toolbar_states.insert(key, p.clone());
+            } else if let Some(p) = m.pointer("/payload/engagementToolbarSurfaceEntityPayload") {
+                toolbar_surfaces.insert(key, p.clone());
             } else if let Some(p) = m.pointer("/payload/commentSurfaceEntityPayload") {
                 surfaces.insert(key, p.clone());
             }
@@ -1310,6 +1357,7 @@ pub fn comments(token: &str) -> Result<CommentPage> {
     for it in &lists {
         if let Some(h) = it.get("commentsHeaderRenderer") {
             page.count_text = opt_text(h.get("countText"));
+            page.create_params = h.get("createRenderer").and_then(create_comment_params);
             if let Some(items) = h
                 .pointer("/sortMenu/sortFilterSubMenuRenderer/subMenuItems")
                 .and_then(Value::as_array)
@@ -1340,12 +1388,22 @@ pub fn comments(token: &str) -> Result<CommentPage> {
                 let author = p.get("author").cloned().unwrap_or(Value::Null);
                 let toolbar = p.get("toolbar").cloned().unwrap_or(Value::Null);
                 let state_key = vm.get("toolbarStateKey").and_then(Value::as_str).unwrap_or_default();
-                let hearted = toolbar_states
-                    .get(state_key)
+                let state = toolbar_states.get(state_key);
+                let hearted = state
                     .and_then(|s| s.get("heartState"))
                     .and_then(Value::as_str)
                     .map(|s| s.contains("HEARTED") && !s.contains("UNHEARTED"))
                     .unwrap_or(false);
+                let liked = state.and_then(|s| s.get("likeState")).and_then(Value::as_str) == Some("TOOLBAR_LIKE_STATE_LIKED");
+                let surface = vm.get("toolbarSurfaceKey").and_then(Value::as_str).and_then(|key| toolbar_surfaces.get(key));
+                let actions = CommentActions {
+                    like: reaction_actions(surface.and_then(|s| s.get("likeCommand"))),
+                    unlike: reaction_actions(surface.and_then(|s| s.get("unlikeCommand"))),
+                    reply: surface.and_then(|s| s.get("replyCommand")).and_then(create_comment_params),
+                    liked,
+                    unliked_count: s(&toolbar, "/likeCountNotliked").unwrap_or_default().trim().to_string(),
+                    liked_count: s(&toolbar, "/likeCountLiked").unwrap_or_default().trim().to_string(),
+                };
                 let replies_token = thread
                     .and_then(|t| t.pointer("/replies/commentRepliesRenderer/contents"))
                     .and_then(Value::as_array)
@@ -1358,13 +1416,14 @@ pub fn comments(token: &str) -> Result<CommentPage> {
                     author_avatar: s(&author, "/avatarThumbnailUrl"),
                     text: s(&props, "/content/content").unwrap_or_default(),
                     published: s(&props, "/publishedTime").unwrap_or_default(),
-                    likes: s(&toolbar, "/likeCountNotliked").unwrap_or_default().trim().to_string(),
+                    likes: if liked { actions.liked_count.clone() } else { actions.unliked_count.clone() },
                     reply_count: s(&toolbar, "/replyCount").unwrap_or_default(),
                     replies_token,
                     is_creator: author.get("isCreator").and_then(Value::as_bool).unwrap_or(false),
                     is_verified: author.get("isVerified").and_then(Value::as_bool).unwrap_or(false),
                     is_pinned: vm.get("pinnedText").is_some(),
                     hearted,
+                    actions,
                     emojis: comment_emojis(&props),
                     image: vm
                         .get("commentSurfaceKey")
@@ -1383,7 +1442,7 @@ pub fn comments(token: &str) -> Result<CommentPage> {
             page.continuation = continuation_token(c);
         }
     }
-    Ok(page)
+    page
 }
 
 // ───────────────────────── home / explore ─────────────────────────
@@ -1407,6 +1466,48 @@ pub fn explore(channel_id: &str) -> Result<Page> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comment_controls_use_the_commands_youtube_returns() {
+        let response = json!({
+            "onResponseReceivedEndpoints": [{
+                "reloadContinuationItemsCommand": { "continuationItems": [
+                    { "commentsHeaderRenderer": { "createRenderer": { "commentSimpleboxRenderer": {
+                        "submitButton": { "buttonRenderer": { "serviceEndpoint": {
+                            "createCommentEndpoint": { "createCommentParams": "new-comment" }
+                        } } }
+                    } } } },
+                    { "commentViewModel": { "commentKey": "comment", "toolbarStateKey": "state", "toolbarSurfaceKey": "actions" } }
+                ] }
+            }],
+            "frameworkUpdates": { "entityBatchUpdate": { "mutations": [
+                { "entityKey": "comment", "payload": { "commentEntityPayload": {
+                    "properties": { "commentId": "id", "content": { "content": "hello" } },
+                    "toolbar": { "likeCountNotliked": "1", "likeCountLiked": "2" }
+                } } },
+                { "entityKey": "state", "payload": { "engagementToolbarStateEntityPayload": { "likeState": "TOOLBAR_LIKE_STATE_LIKED" } } },
+                { "entityKey": "actions", "payload": { "engagementToolbarSurfaceEntityPayload": {
+                    "likeCommand": { "performCommentActionEndpoint": { "action": "like" } },
+                    "unlikeCommand": { "performCommentActionEndpoint": { "actions": ["unlike"] } },
+                    "replyCommand": { "openPopupAction": { "popup": { "commentReplyDialogRenderer": {
+                        "replyButton": { "buttonRenderer": { "serviceEndpoint": {
+                            "createCommentEndpoint": { "createCommentParams": "reply" }
+                        } } }
+                    } } } }
+                } } }
+            ] } }
+        });
+        let page = parse_comments(&response);
+        assert_eq!(page.create_params.as_deref(), Some("new-comment"));
+        let comment = &page.comments[0];
+        assert_eq!(comment.id, "id");
+        assert_eq!(comment.likes, "2");
+        assert!(comment.actions.liked);
+        assert_eq!(comment.actions.like, ["like"]);
+        assert_eq!(comment.actions.unlike, ["unlike"]);
+        assert_eq!(comment.actions.reply.as_deref(), Some("reply"));
+        assert!(page.account.is_none());
+    }
 
     fn lockup(id: &str, title: &str) -> Value {
         json!({ "lockupViewModel": {

@@ -133,6 +133,17 @@ pub struct Comment {
     pub emojis: Vec<(String, String)>,
     /// GIF or sticker posted with the comment: (URL, width / height)
     pub image: Option<(String, f32)>,
+    pub(crate) actions: CommentActions,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CommentActions {
+    pub like: Vec<String>,
+    pub unlike: Vec<String>,
+    pub reply: Option<String>,
+    pub liked: bool,
+    pub unliked_count: String,
+    pub liked_count: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -142,6 +153,8 @@ pub struct CommentPage {
     pub count_text: Option<String>,
     pub sort_top_token: Option<String>,
     pub sort_new_token: Option<String>,
+    pub(crate) create_params: Option<String>,
+    pub(crate) account: Option<std::sync::Arc<()>>,
 }
 
 #[derive(Clone, Debug, Default)]

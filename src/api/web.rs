@@ -28,6 +28,8 @@ const SIGN_IN_URL: &str = "https://accounts.google.com/ServiceLogin?service=yout
 struct Session {
     cookies: BTreeMap<String, String>,
     account: Option<String>,
+    #[serde(skip)]
+    identity: Arc<()>,
 }
 
 fn session() -> &'static Mutex<Option<Session>> {
@@ -69,7 +71,7 @@ fn connect(cookies: BTreeMap<String, String>) -> Result<String> {
     }
     {
         let mut s = session().lock();
-        *s = Some(Session { cookies, account: None });
+        *s = Some(Session { cookies, ..Default::default() });
     }
     let name = match fetch_account_name() {
         Ok(n) => n,
@@ -115,10 +117,8 @@ pub fn write_cookies_file() -> Option<PathBuf> {
     Some(path)
 }
 
-fn cookie_header() -> Option<String> {
-    let s = session().lock();
-    let s = s.as_ref()?;
-    Some(s.cookies.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; "))
+fn cookie_header(session: &Session) -> String {
+    session.cookies.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ")
 }
 
 fn sha1_hex(s: &str) -> String {
@@ -127,9 +127,8 @@ fn sha1_hex(s: &str) -> String {
 }
 
 /// The `Authorization` header youtube.com sends with its API calls.
-fn sapisid_auth() -> Option<String> {
-    let s = session().lock();
-    let c = &s.as_ref()?.cookies;
+fn sapisid_auth(session: &Session) -> Option<String> {
+    let c = &session.cookies;
     let ts = chrono::Utc::now().timestamp();
     let parts: Vec<String> = [("SAPISIDHASH", "SAPISID"), ("SAPISID1PHASH", "__Secure-1PAPISID"), ("SAPISID3PHASH", "__Secure-3PAPISID")]
         .iter()
@@ -142,9 +141,28 @@ fn sapisid_auth() -> Option<String> {
 }
 
 /// A call to the YouTube website's API as the signed-in user.
-pub fn web_call(endpoint: &str, mut body: Value) -> Result<Value> {
-    let cookie = cookie_header().ok_or_else(|| anyhow!("browser sign-in not connected"))?;
-    let auth = sapisid_auth().ok_or_else(|| anyhow!("browser sign-in not connected"))?;
+pub(crate) fn session_identity() -> Option<Arc<()>> {
+    session().lock().as_ref().map(|connected| connected.identity.clone())
+}
+
+pub(crate) fn is_current_session(identity: &Arc<()>) -> bool {
+    session_identity().is_some_and(|current| Arc::ptr_eq(&current, identity))
+}
+
+pub(crate) fn web_call_for_session(identity: &Arc<()>, endpoint: &str, body: Value) -> Result<Value> {
+    let connected = session().lock().clone().filter(|connected| Arc::ptr_eq(&connected.identity, identity))
+        .ok_or_else(|| anyhow!("browser session changed"))?;
+    web_call_with_session(&connected, endpoint, body)
+}
+
+pub fn web_call(endpoint: &str, body: Value) -> Result<Value> {
+    let connected = session().lock().clone().ok_or_else(|| anyhow!("browser sign-in not connected"))?;
+    web_call_with_session(&connected, endpoint, body)
+}
+
+fn web_call_with_session(session: &Session, endpoint: &str, mut body: Value) -> Result<Value> {
+    let cookie = cookie_header(session);
+    let auth = sapisid_auth(session).ok_or_else(|| anyhow!("browser sign-in not connected"))?;
     let st = crate::store::settings_snapshot();
     body["context"] = json!({ "client": { "clientName": "WEB", "clientVersion": WEB_VERSION, "hl": st.language, "gl": st.region } });
     let (status, v) = http::post_json_status(
@@ -580,7 +598,7 @@ impl Watch {
             }
         }
         let url = format!("{path}?{}", pairs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&"));
-        let cookie = cookie_header().unwrap_or_default();
+        let cookie = session().lock().as_ref().map(cookie_header).unwrap_or_default();
         let referer = format!("https://www.youtube.com/watch?v={}", self.id);
         http::get_bytes(&url, &[("Cookie", &cookie), ("Referer", &referer), ("Origin", ORIGIN)])?;
         Ok(())

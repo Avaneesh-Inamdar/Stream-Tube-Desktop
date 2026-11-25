@@ -10,7 +10,8 @@ use crate::ui::cards::*;
 use crate::ui::widgets::*;
 use crate::ui::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Live chat of a running stream, polled while the page is open.
 struct LiveChat {
@@ -29,6 +30,14 @@ struct LiveChat {
 
 const CHAT_KEEP: usize = 250;
 
+struct CommentDraft {
+    parent: Option<String>,
+    params: String,
+    account: Arc<()>,
+    input: Entity<InputState>,
+    sending: bool,
+}
+
 pub struct WatchPage {
     id: String,
     playlist_id: Option<String>,
@@ -39,6 +48,9 @@ pub struct WatchPage {
     desc_expanded: bool,
     comments: Option<Load<CommentPage>>,
     comments_more_loading: bool,
+    comments_generation: u64,
+    comment_draft: Option<CommentDraft>,
+    sending_reactions: HashSet<String>,
     comment_sort_new: bool,
     /// "Timed" view: comments that mention a timestamp, shown once playback reaches it
     comment_timed: bool,
@@ -130,6 +142,9 @@ impl WatchPage {
             desc_expanded: false,
             comments: None,
             comments_more_loading: false,
+            comments_generation: 0,
+            comment_draft: None,
+            sending_reactions: HashSet::new(),
             comment_sort_new: false,
             comment_timed: false,
             timed_ticker: None,
@@ -554,11 +569,14 @@ impl WatchPage {
 
     fn load_comments(&mut self, token: String, append: bool, cx: &mut Context<Self>) {
         if !append {
+            self.comments_generation += 1;
             self.comments = Some(Load::Loading);
         }
+        let generation = self.comments_generation;
         cx.spawn(async move |this, cx| {
-            let res = blocking(move || innertube::comments(&token)).await;
+            let res = blocking(move || innertube::account_comments(&token)).await;
             let _ = this.update(cx, |this, cx| {
+                if this.comments_generation != generation { return; }
                 this.comments_more_loading = false;
                 match (res, append) {
                     (Ok(page), true) => {
@@ -594,7 +612,7 @@ impl WatchPage {
             self.replies.insert(comment_id.clone(), Load::Loading);
         }
         cx.spawn(async move |this, cx| {
-            let res = blocking(move || innertube::comments(&token)).await;
+            let res = blocking(move || innertube::account_comments(&token)).await;
             let _ = this.update(cx, |this, cx| {
                 match res {
                     Ok(p) => {
@@ -892,6 +910,103 @@ impl WatchPage {
             .into_any_element()
     }
 
+    fn comment_account(&self) -> Option<Arc<()>> {
+        self.comments.as_ref()?.ready()?.account.as_ref()
+            .filter(|account| crate::api::web::is_current_session(account)).cloned()
+    }
+
+    fn compose_comment(&mut self, parent: Option<String>, params: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(account) = self.comment_account() else { return };
+        if self.comment_draft.as_ref().is_some_and(|draft| draft.sending) { return; }
+        let hint = translate(if parent.is_some() { "Write a reply" } else { "Write a comment" });
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(hint));
+        window.focus(&input.read(cx).focus_handle(cx), cx);
+        self.comment_draft = Some(CommentDraft { parent, params, account, input, sending: false });
+        cx.notify();
+    }
+
+    fn submit_comment(&mut self, cx: &mut Context<Self>) {
+        let Some(draft) = self.comment_draft.as_mut().filter(|draft| !draft.sending) else { return };
+        if !crate::api::web::is_current_session(&draft.account) { return; }
+        let text = draft.input.read(cx).value().to_string();
+        if text.trim().is_empty() { return; }
+        let (account, parent, params) = (draft.account.clone(), draft.parent.clone(), draft.params.clone());
+        draft.sending = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = blocking(move || innertube::post_comment(&account, &params, &text)).await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        this.comment_draft = None;
+                        let page = this.comments.as_ref().and_then(Load::ready);
+                        let sorted = page.and_then(|page| page.sort_new_token.clone());
+                        let initial = this.info.ready().and_then(|info| info.comments_token.clone());
+                        if parent.is_none() {
+                            this.comment_sort_new = sorted.is_some();
+                        }
+                        let token = if this.comment_sort_new { sorted.or(initial) } else { initial };
+                        this.replies.clear();
+                        if let Some(token) = token { this.load_comments(token, false, cx); }
+                        toast(cx, translate(if parent.is_some() { "Reply posted" } else { "Comment posted" }));
+                    }
+                    Err(_) => {
+                        if let Some(draft) = this.comment_draft.as_mut() { draft.sending = false; }
+                        toast(cx, translate("Couldn't post the comment"));
+                    }
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    fn comment_editor(&self, parent: Option<&str>, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let draft = self.comment_draft.as_ref().filter(|draft| draft.parent.as_deref() == parent)?;
+        if !crate::api::web::is_current_session(&draft.account) { return None; }
+        Some(div().flex().flex_col().gap_2()
+            .child(Input::new(&draft.input).disabled(draft.sending))
+            .child(div().flex().justify_end().gap_2()
+                .child(pill("comment-cancel", None, "Cancel", cx).when(!draft.sending, |button| {
+                    button.on_click(cx.listener(|this, _, _, cx| { this.comment_draft = None; cx.notify(); }))
+                }))
+                .child(pill("comment-submit", Some("send"), if draft.sending { "Sending…" } else if parent.is_some() { "Reply" } else { "Post comment" }, cx)
+                    .when(!draft.sending, |button| button.on_click(cx.listener(|this, _, _, cx| this.submit_comment(cx)))))
+            ).into_any_element())
+    }
+
+    fn toggle_comment_like(&mut self, comment: Comment, cx: &mut Context<Self>) {
+        let Some(account) = self.comment_account() else { return; };
+        let id = comment.id;
+        let liked = !comment.actions.liked;
+        let actions = if liked { comment.actions.like } else { comment.actions.unlike };
+        if actions.is_empty() || !self.sending_reactions.insert(id.clone()) { return; }
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let connection = account.clone();
+            let result = blocking(move || innertube::react_to_comment(&connection, &actions)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.sending_reactions.remove(&id);
+                if result.is_ok() && crate::api::web::is_current_session(&account) {
+                    let update = |c: &mut Comment| {
+                        c.actions.liked = liked;
+                        c.likes = if liked { &c.actions.liked_count } else { &c.actions.unliked_count }.clone();
+                    };
+                    if let Some(Load::Ready(page)) = this.comments.as_mut() {
+                        page.comments.iter_mut().filter(|c| c.id == id).for_each(update);
+                    }
+                    for replies in this.replies.values_mut() {
+                        if let Load::Ready((list, _)) = replies {
+                            list.iter_mut().filter(|c| c.id == id).for_each(update);
+                        }
+                    }
+                } else if result.is_err() {
+                    toast(cx, translate("Couldn't update the reaction"));
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
     fn render_comment(&mut self, c: &Comment, is_reply: bool, cx: &mut Context<Self>) -> AnyElement {
         self.render_comment_t(c, is_reply, false, cx)
     }
@@ -969,10 +1084,27 @@ impl WatchPage {
                             .gap_4()
                             .text_xs()
                             .text_color(p.text2)
-                            .child(div().flex().items_center().gap_1().child(icon("thumbs-up").size_4().text_color(p.text2)).child(c.likes.clone()))
+                            .child({
+                                let can_react = self.comment_account().is_some()
+                                    && !self.sending_reactions.contains(&c.id)
+                                    && !(if c.actions.liked { &c.actions.unlike } else { &c.actions.like }).is_empty();
+                                let comment = c.clone();
+                                div().id(SharedString::from(format!("comment-like-{}", c.id)))
+                                    .flex().items_center().gap_1().p_1().rounded_md()
+                                    .child(icon("thumbs-up").size_4().text_color(if c.actions.liked { p.link } else { p.text2 }))
+                                    .child(c.likes.clone())
+                                    .when(can_react, |button| button.cursor_pointer().hover(move |s| s.bg(p.hover))
+                                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_comment_like(comment.clone(), cx))))
+                            })
                             .child(icon("thumbs-down").size_4().text_color(p.text2))
+                            .when_some(c.actions.reply.clone().filter(|_| self.comment_account().is_some()), |d, params| {
+                                let id = c.id.clone();
+                                d.child(pill(SharedString::from(format!("comment-reply-{}", id)), None, "Reply", cx)
+                                    .on_click(cx.listener(move |this, _, window, cx| this.compose_comment(Some(id.clone()), params.clone(), window, cx))))
+                            })
                             .when(c.hearted, |d| d.child(icon("heart").size_4().text_color(rgb(0xff0033)))),
                     )
+                    .children(self.comment_editor(Some(&c.id), cx))
                     .when_some(token.filter(|_| !is_reply), |d, tok| {
                         let open = replies.is_some();
                         let cid2 = cid.clone();
@@ -1094,6 +1226,21 @@ impl WatchPage {
                         }),
                 ),
         );
+        if let Some(editor) = self.comment_editor(None, cx) {
+            col = col.child(editor);
+        } else if let Some(params) = data.create_params.clone().filter(|_| self.comment_account().is_some()) {
+            col = col.child(pill("comment-compose", Some("message-square"), "Write a comment", cx).on_click(
+                cx.listener(move |this, _, window, cx| this.compose_comment(None, params.clone(), window, cx)),
+            ));
+        } else if self.comment_account().is_none() && crate::api::web::connected() {
+            if let Some(token) = w.comments_token.clone() {
+                col = col.child(pill("comment-reload", Some("refresh-cw"), "Reload comments", cx)
+                    .on_click(cx.listener(move |this, _, _, cx| this.load_comments(token.clone(), false, cx))));
+            }
+        } else if !crate::api::web::connected() {
+            col = col.child(pill("comment-connect", Some("circle-user"), "Connect to post comments", cx)
+                .on_click(|_, _, cx| crate::ui::app::open_web_sign_in(cx)));
+        }
         if timed {
             // like youtube.com: a comment shows up once the video reaches the moment
             // it's about, the latest one on top
