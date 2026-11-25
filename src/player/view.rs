@@ -402,7 +402,7 @@ impl Render for PlayerView {
                             let _ = this.update(cx, |this, cx| {
                                 if this.press == Some(at) && this.drag_seek.is_none() {
                                     this.press_boosted = true;
-                                    this.player.update(cx, |p, _| p.start_boost());
+                                    this.player.update(cx, |p, cx| p.start_boost(cx));
                                     cx.notify();
                                 }
                             });
@@ -446,9 +446,9 @@ impl Render for PlayerView {
                     if dbl && store::settings_snapshot().double_click_fullscreen {
                         crate::ui::app::toggle_fullscreen(window, cx);
                         // undo the pause toggle from the first click
-                        this.player.update(cx, |p, _| p.toggle_pause());
+                        this.player.update(cx, |p, cx| p.toggle_pause(cx));
                     } else {
-                        this.player.update(cx, |p, _| p.toggle_pause());
+                        this.player.update(cx, |p, cx| p.toggle_pause(cx));
                     }
                     this.poke(cx);
                 })),
@@ -775,7 +775,7 @@ impl PlayerView {
                                 }
                             }
                             Action::Web(url) => {
-                                this.player.update(cx, |p, _| p.set_paused(true));
+                                this.player.update(cx, |p, cx| p.set_paused(true, cx));
                                 let _ = open::that_detached(url);
                             }
                         }
@@ -821,7 +821,7 @@ fn context_items(player: &Entity<Player>, cx: &App) -> Vec<crate::ui::app::MenuI
             })
         }),
         MenuItem::new("pause", translate("Play / pause"), move |_, cx| p4.update(cx, |p, cx| {
-            p.toggle_pause();
+            p.toggle_pause(cx);
             cx.notify()
         })),
     ];
@@ -834,7 +834,7 @@ fn context_items(player: &Entity<Player>, cx: &App) -> Vec<crate::ui::app::MenuI
             items.push(MenuItem::new(icon, format!("{label} ({key})"), move |_, cx| {
                 player.update(cx, |p, cx| {
                     if !p.paused {
-                        p.set_paused(true);
+                        p.set_paused(true, cx);
                     }
                     p.frame_step(forward);
                     cx.notify();
@@ -899,7 +899,7 @@ impl PlayerView {
                                     .on_click(move |_, _, cx| {
                                         cx.stop_propagation();
                                         pp.update(cx, |p, cx| {
-                                            p.toggle_pause();
+                                            p.toggle_pause(cx);
                                             cx.notify()
                                         })
                                     }),
@@ -1187,7 +1187,7 @@ impl PlayerView {
             .gap_1()
             .child(ctl_btn("c-play", if paused { "play" } else { "pause" }).on_click({
                 let pp = pp.clone();
-                move |_, _, cx| pp.update(cx, |p, cx| { p.toggle_pause(); cx.notify() })
+                move |_, _, cx| pp.update(cx, |p, cx| { p.toggle_pause(cx); cx.notify() })
             }))
             .when(has_next, |d| {
                 d.child(ctl_btn("c-next", "skip-forward").on_click(|_, window, cx| crate::ui::app::play_next(window, cx)))
@@ -1631,7 +1631,7 @@ impl PlayerView {
                                 (p.video.as_ref().map(|v| v.id.clone()), p.time)
                             };
                             if let Some(id) = id {
-                                t.player.update(cx, |p, _| p.set_paused(true));
+                                t.player.update(cx, |p, cx| p.set_paused(true, cx));
                                 crate::downloads::open_external_at(&id, time, cx);
                             }
                         })),
