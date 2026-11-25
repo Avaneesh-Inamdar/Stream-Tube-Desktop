@@ -176,11 +176,13 @@ fn lib() -> Result<&'static (Library, Fns)> {
             preload_vulkan_loader();
         }
         let mut candidates = Vec::new();
-        #[cfg(any(windows, target_os = "linux"))]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         if let Ok(exe) = std::env::current_exe() {
             if let Some(d) = exe.parent() {
                 #[cfg(windows)]
                 candidates.extend(LIBRARY_NAMES.iter().map(|name| d.join(name)));
+                #[cfg(target_os = "macos")]
+                candidates.push(d.join("../Frameworks").join(LIBRARY_NAMES[0]));
                 // the AppImage carries its own libmpv in usr/lib, next to usr/bin
                 #[cfg(target_os = "linux")]
                 for &name in &LIBRARY_NAMES[..2] {
@@ -193,6 +195,13 @@ fn lib() -> Result<&'static (Library, Fns)> {
         }
         #[cfg(windows)]
         candidates.push(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/third_party/mpv/libmpv-2.dll")));
+        #[cfg(target_os = "macos")]
+        {
+            // A GUI launch need not inherit Homebrew's paths.
+            let prefix = PathBuf::from(if cfg!(target_arch = "aarch64") { "/opt/homebrew" } else { "/usr/local" });
+            candidates.push(prefix.join("opt/mpv/lib").join(LIBRARY_NAMES[0]));
+            candidates.push(prefix.join("lib").join(LIBRARY_NAMES[0]));
+        }
         candidates.extend(LIBRARY_NAMES.iter().map(PathBuf::from));
         open_library(candidates)
     })
@@ -254,6 +263,16 @@ fn open_library(candidates: impl IntoIterator<Item = PathBuf>) -> Result<(Librar
             return Err(MISSING_WINDOWS_MPV.into());
         }
         Err(first_real_err.unwrap_or(last_err))
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_loader_tests {
+    #[test]
+    #[ignore = "requires Homebrew mpv"]
+    fn initializes_homebrew_video_engine() {
+        let options = [("vo", "libmpv"), ("ao", "null"), ("config", "no")];
+        let _player = super::Mpv::new(&options, |_| {}).expect("initialize the installed libmpv");
     }
 }
 
