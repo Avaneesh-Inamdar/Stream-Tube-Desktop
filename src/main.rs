@@ -68,6 +68,24 @@ pub fn save_window_bounds(window: &Window) {
     store::kv_set("window", &v.to_string());
 }
 
+struct WatchHistoryFlushed;
+impl Global for WatchHistoryFlushed {}
+
+pub(crate) fn flush_watch_history(cx: &mut App) {
+    if cx.try_global::<WatchHistoryFlushed>().is_some() {
+        return;
+    }
+    cx.set_global(WatchHistoryFlushed);
+    player::controller::player(cx).update(cx, |p, _| p.finish_playback_history());
+    // The network worker does not depend on the UI thread. GPUI only allows
+    // 200 ms for async quit handlers, so wait here with a bounded exit delay.
+    if let Some(pending) = api::web::pending_reports() {
+        if pending.recv_timeout(std::time::Duration::from_secs(2)).is_err() {
+            eprintln!("streamtube: YouTube watch reports did not finish before exit");
+        }
+    }
+}
+
 fn main() {
     perf::mark("main");
     // the local stream proxy must never be reached through the user's proxy
@@ -156,10 +174,15 @@ fn main() {
                 // the picture-in-picture window alone doesn't keep the app running
                 let pip = ui::pip::handle(cx);
                 if cx.windows().iter().all(|w| Some(*w) == pip) {
-                    player::controller::player(cx).update(cx, |p, _| p.save_progress(true));
+                    flush_watch_history(cx);
                     idle_inhibit::release(cx);
                     cx.quit();
                 }
+            })
+            .detach();
+            cx.on_app_quit(|cx| {
+                flush_watch_history(cx);
+                async {}
             })
             .detach();
         });

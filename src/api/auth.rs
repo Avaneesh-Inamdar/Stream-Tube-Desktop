@@ -33,6 +33,8 @@ struct Stored {
     account: Option<Account>,
     #[serde(skip)]
     session: Arc<()>,
+    #[serde(default)]
+    history_key: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -46,7 +48,14 @@ pub struct DeviceCode {
 
 fn state() -> &'static Mutex<Option<Stored>> {
     static S: std::sync::OnceLock<Mutex<Option<Stored>>> = std::sync::OnceLock::new();
-    S.get_or_init(|| Mutex::new(crate::store::kv_get("auth").and_then(|s| serde_json::from_str(&s).ok())))
+    S.get_or_init(|| {
+        let mut stored: Option<Stored> = crate::store::kv_get("auth").and_then(|s| serde_json::from_str(&s).ok());
+        if let Some(s) = stored.as_mut().filter(|s| s.history_key.is_none()) {
+            s.history_key = Some(rand::random());
+            persist(&stored);
+        }
+        Mutex::new(stored)
+    })
 }
 
 fn persist(s: &Option<Stored>) {
@@ -138,6 +147,7 @@ pub fn poll_login(dc: &DeviceCode) -> Result<PollResult> {
             expires_at: crate::api::json::now() + expires - 60,
             account: None,
             session: Arc::new(()),
+            history_key: Some(rand::random()),
         });
         persist(&s);
     }
@@ -155,6 +165,10 @@ pub fn poll_login(dc: &DeviceCode) -> Result<PollResult> {
 /// A valid access token, refreshed when needed.
 pub fn access_token() -> Option<String> {
     let cur = state().lock().clone()?;
+    access_token_for(cur)
+}
+
+fn access_token_for(cur: Stored) -> Option<String> {
     if cur.expires_at > crate::api::json::now() && !cur.access_token.is_empty() {
         return Some(cur.access_token);
     }
@@ -169,16 +183,19 @@ pub fn access_token() -> Option<String> {
     if let Some(tok) = v.get("access_token").and_then(Value::as_str) {
         let exp = v.get("expires_in").and_then(Value::as_i64).unwrap_or(3600);
         let mut s = state().lock();
-        if let Some(st) = s.as_mut() {
-            st.access_token = tok.to_string();
-            st.expires_at = crate::api::json::now() + exp - 60;
-        }
+        let st = s.as_mut().filter(|st| Arc::ptr_eq(&st.session, &cur.session))?;
+        st.access_token = tok.to_string();
+        st.expires_at = crate::api::json::now() + exp - 60;
         persist(&s);
         return Some(tok.to_string());
     }
     // the grant was revoked from the Google account page
     if status == 400 || status == 401 {
-        sign_out();
+        let mut s = state().lock();
+        if s.as_ref().is_some_and(|st| Arc::ptr_eq(&st.session, &cur.session)) {
+            *s = None;
+            persist(&s);
+        }
     }
     None
 }
@@ -189,8 +206,12 @@ fn tv_context() -> Value {
 }
 
 /// Authorized call to the TV Innertube client.
-pub fn tv_call(endpoint: &str, mut body: Value) -> Result<Value> {
+pub fn tv_call(endpoint: &str, body: Value) -> Result<Value> {
     let token = access_token().ok_or_else(|| anyhow!("not signed in"))?;
+    tv_call_with(&token, endpoint, body)
+}
+
+fn tv_call_with(token: &str, endpoint: &str, mut body: Value) -> Result<Value> {
     body["context"] = tv_context();
     let auth = format!("Bearer {token}");
     http::post_json(
@@ -204,6 +225,36 @@ pub fn tv_call(endpoint: &str, mut body: Value) -> Result<Value> {
             ("Origin", "https://www.youtube.com"),
         ],
     )
+}
+
+#[derive(Clone)]
+pub(super) struct HistorySession {
+    identity: Arc<()>,
+    pub(super) key: u64,
+}
+
+impl HistorySession {
+    pub(super) fn current() -> Option<Self> {
+        let active = state().lock();
+        let s = active.as_ref().filter(|s| !s.refresh_token.is_empty())?;
+        Some(Self { identity: s.session.clone(), key: s.history_key? })
+    }
+
+    pub(super) fn if_current<T>(&self, f: impl FnOnce() -> T) -> Option<T> {
+        let active = state().lock();
+        active.as_ref().filter(|s| Arc::ptr_eq(&s.session, &self.identity)).map(|_| f())
+    }
+
+    fn access_token(&self) -> Result<String> {
+        let session = state().lock().as_ref().filter(|s| Arc::ptr_eq(&s.session, &self.identity)).cloned();
+        session.and_then(access_token_for).ok_or_else(|| anyhow!("not signed in"))
+    }
+
+    pub(super) fn call(&self, endpoint: &str, body: Value) -> Result<Value> {
+        let token = self.access_token()?;
+        anyhow::ensure!(self.if_current(|| ()).is_some(), "YouTube history account changed");
+        tv_call_with(&token, endpoint, body)
+    }
 }
 
 fn fetch_account() -> Result<Account> {
@@ -343,66 +394,15 @@ pub fn home() -> Result<Page> {
     Ok(videos(collect_items(&r)))
 }
 
-/// The signed-in account's YouTube watch history (newest first).
-pub fn history() -> Result<Page> {
-    let r = tv_call("browse", json!({ "browseId": "FEhistory" }))?;
-    harvest_removal_tokens(&r);
-    Ok(videos(collect_items(&r)))
-}
-
-/// video id -> feedback token of its "Remove from watch history" menu item
-fn removal_tokens() -> &'static Mutex<std::collections::HashMap<String, String>> {
-    static T: std::sync::OnceLock<Mutex<std::collections::HashMap<String, String>>> = std::sync::OnceLock::new();
-    T.get_or_init(Default::default)
-}
-
-/// Remembers the removal tokens of every history tile in a browse response.
-fn harvest_removal_tokens(r: &Value) {
-    fn token_in(v: &Value) -> Option<String> {
-        match v {
-            Value::Object(m) => {
-                if let Some(item) = m.get("menuServiceItemRenderer") {
-                    let text = item.pointer("/text/runs/0/text").and_then(Value::as_str).unwrap_or("").to_lowercase();
-                    if let Some(t) = item.pointer("/serviceEndpoint/feedbackEndpoint/feedbackToken").and_then(Value::as_str) {
-                        if text.contains("history") || text.contains("remove") {
-                            return Some(t.to_string());
-                        }
-                    }
-                }
-                m.values().find_map(token_in)
-            }
-            Value::Array(a) => a.iter().find_map(token_in),
-            _ => None,
-        }
-    }
-    fn walk(v: &Value, out: &mut Vec<(String, String)>) {
-        match v {
-            Value::Object(m) => {
-                if let Some(tile) = m.get("tileRenderer") {
-                    let id = tile.pointer("/onSelectCommand/watchEndpoint/videoId").and_then(Value::as_str);
-                    if let (Some(id), Some(t)) = (id, token_in(tile)) {
-                        out.push((id.to_string(), t));
-                    }
-                    return;
-                }
-                m.values().for_each(|x| walk(x, out));
-            }
-            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    walk(r, &mut out);
-    if !out.is_empty() {
-        removal_tokens().lock().extend(out);
-    }
-}
-
 /// Brings the account's recent searches (made on the phone, TV or web) into the
 /// local search history. YouTube offers them as the suggestions for an empty
 /// query when the request is signed in; signed out the list is empty.
 pub fn sync_search_history() -> Result<usize> {
-    let token = access_token().ok_or_else(|| anyhow!("not signed in"))?;
+    if !crate::store::settings_snapshot().search_history_enabled {
+        return Ok(0);
+    }
+    let session = HistorySession::current().ok_or_else(|| anyhow!("not signed in"))?;
+    let token = session.access_token()?;
     let auth = format!("Bearer {token}");
     let hl = crate::store::settings_snapshot().language.clone();
     let url = format!("https://suggestqueries-clients6.youtube.com/complete/search?client=youtube-lr&ds=yt&xhr=t&q=&hl={}", http::urlencode(&hl));
@@ -418,21 +418,11 @@ pub fn sync_search_history() -> Result<usize> {
         .collect();
     // oldest first so the most recent remote search sorts highest among them
     let base = chrono::Utc::now().timestamp() - 7 * 86400;
-    let mut added = 0;
-    for (i, q) in queries.iter().enumerate() {
-        if crate::store::search_history_merge_remote(q, base - i as i64 * 60) {
-            added += 1;
-        }
-    }
-    Ok(added)
-}
-
-/// Removes a video from the account's YouTube watch history.
-pub fn remove_from_history(video_id: &str) -> Result<()> {
-    let token = removal_tokens().lock().get(video_id).cloned().ok_or_else(|| anyhow!("reload your history and try again"))?;
-    tv_call("feedback", json!({ "feedbackTokens": [token] }))?;
-    removal_tokens().lock().remove(video_id);
-    Ok(())
+    session.if_current(|| {
+        queries.iter().enumerate()
+            .filter(|(i, q)| crate::store::search_history_merge_remote(q, base - *i as i64 * 60))
+            .count()
+    }).ok_or_else(|| anyhow!("YouTube search history account changed"))
 }
 
 /// The signed-in user's subscriptions feed.
@@ -443,7 +433,6 @@ pub fn subscriptions_feed() -> Result<Page> {
 
 pub fn browse_continue(token: &str) -> Result<Page> {
     let r = tv_call("browse", json!({ "continuation": token }))?;
-    harvest_removal_tokens(&r);
     Ok(videos(collect_items(&r)))
 }
 
@@ -662,66 +651,4 @@ pub fn send_live_chat(channel_id: &str, video_id: &str, message: &str) -> Result
         anyhow::bail!(if t.is_empty() { "YouTube did not accept the message".to_string() } else { t });
     }
     Ok(())
-}
-
-/// Brings the account's YouTube watch history (from every device) into the local
-/// history, with resume positions. Returns how many videos were new here.
-pub fn sync_history(max_pages: usize) -> Result<usize> {
-    use crate::api::json::{find_all, parse_duration, text};
-    let mut r = tv_call("browse", json!({ "browseId": "FEhistory" }))?;
-    let now = crate::api::json::now();
-    let mut added = 0;
-    let mut n = 0i64;
-    for page in 0..max_pages {
-        let mut tiles = Vec::new();
-        find_all(&r, "tileRenderer", &mut tiles);
-        for t in tiles {
-            let Some(mut v) = crate::api::innertube::parse_tile(t) else { continue };
-            let resume = t.pointer("/onSelectCommand/watchEndpoint/startTimeSeconds").and_then(Value::as_f64).unwrap_or(0.0);
-            let mut overlays = Vec::new();
-            find_all(t, "thumbnailOverlayTimeStatusRenderer", &mut overlays);
-            let duration = overlays.first().and_then(|o| o.get("text")).map(text).as_deref().and_then(parse_duration).unwrap_or(0) as f64;
-            let mut pct = Vec::new();
-            find_all(t, "thumbnailOverlayResumePlaybackRenderer", &mut pct);
-            let percent = pct.first().and_then(|p| p.get("percentDurationWatched")).and_then(Value::as_f64).unwrap_or(0.0);
-            // a finished video has no start time but 100% watched
-            let progress = if resume > 0.0 { resume } else if percent >= 95.0 { duration } else { duration * percent / 100.0 };
-            if v.duration_secs.is_none() && duration > 0.0 {
-                v.duration_secs = Some(duration as u64);
-            }
-            // newest first: keep the account's order for entries new to this device
-            if crate::store::history_merge_remote(&v, progress, duration, now - n * 60) {
-                added += 1;
-            }
-            n += 1;
-        }
-        let Some(tok) = collect_items(&r).continuation else { break };
-        if page + 1 >= max_pages {
-            break;
-        }
-        r = tv_call("browse", json!({ "continuation": tok }))?;
-    }
-    Ok(added)
-}
-
-#[cfg(test)]
-mod live_tests {
-    #[test]
-    #[ignore]
-    fn history_live() {
-        if !super::signed_in() {
-            eprintln!("not signed in");
-            return;
-        }
-        let r = super::tv_call("browse", serde_json::json!({ "browseId": "FEhistory" })).unwrap();
-        std::fs::write(std::env::temp_dir().join("st_hist.json"), serde_json::to_string_pretty(&r).unwrap()).unwrap();
-        eprintln!("sync added {}", super::sync_history(2).unwrap());
-        let p = super::history().unwrap();
-        eprintln!("items={} cont={}", p.items.len(), p.continuation.is_some());
-        for i in p.items.iter().take(5) {
-            if let crate::api::types::Item::Video(v) = i {
-                eprintln!("  {} | {} | {:?}", v.id, v.title, v.published_text);
-            }
-        }
-    }
 }

@@ -311,10 +311,10 @@ fn portable_dir(executable: &std::path::Path) -> Option<&std::path::Path> {
 fn run_installer(path: &std::path::Path, rel: Release, cx: &mut App) {
     let executable = std::env::current_exe().ok();
     let mut command = installer_command(path, executable.as_deref());
-    crate::player::controller::player(cx).update(cx, |player, _| player.save_progress(true));
     match command.spawn() {
         Ok(_) => {
             store::kv_set("update_skip", "");
+            crate::flush_watch_history(cx);
             cx.quit();
         }
         Err(e) => {
