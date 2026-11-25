@@ -1,6 +1,4 @@
 {
-  "Independent tab playback": "标签页独立播放",
-  "Play up to three tabs at once. Restart Stream Tube to apply.": "最多同时播放三个标签页。重启 Stream Tube 后生效。",
   "Back": "返回",
   "Search languages": "搜索语言",
   "original": "原始语言",
@@ -310,6 +308,8 @@
   "Open in new tab": "在新标签页中打开",
   "New tab": "新建标签页",
   "Close tab": "关闭标签页",
+  "Independent tab playback": "标签页独立播放",
+  "Play up to three tabs at once. Restart Stream Tube to apply.": "最多同时播放三个标签页。重启 Stream Tube 后生效。",
   "No downloads yet": "暂无下载",
   "Waiting…": "等待中…",
   "File missing": "文件丢失",

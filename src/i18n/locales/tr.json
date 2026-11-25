@@ -1,6 +1,4 @@
 {
-  "Independent tab playback": "Bağımsız sekme oynatma",
-  "Play up to three tabs at once. Restart Stream Tube to apply.": "Aynı anda en fazla üç sekmeyi oynatın. Uygulamak için Stream Tube'u yeniden başlatın.",
   "Back": "Geri",
   "Search languages": "Dil ara",
   "original": "orijinal",
@@ -310,6 +308,8 @@
   "Open in new tab": "Yeni sekmede aç",
   "New tab": "Yeni sekme",
   "Close tab": "Sekmeyi Kapat",
+  "Independent tab playback": "Bağımsız sekme oynatma",
+  "Play up to three tabs at once. Restart Stream Tube to apply.": "Aynı anda en fazla üç sekmeyi oynatın. Uygulamak için Stream Tube'u yeniden başlatın.",
   "No downloads yet": "Henüz indirilen yok",
   "Waiting…": "Bekleniyor…",
   "File missing": "Dosya bulunamadı",
