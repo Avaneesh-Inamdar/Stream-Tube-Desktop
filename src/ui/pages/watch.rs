@@ -362,7 +362,7 @@ impl WatchPage {
             list = list.child(row);
         }
         if let (Some(e), false) = (&chat.error, chat.messages.is_empty()) {
-            list = list.child(div().py_2().text_xs().text_color(p.text3).child(e.clone()));
+            list = list.child(div().py_2().text_xs().text_color(p.text3).child(translate(e).to_string()));
         }
         let signed_in = crate::api::auth::signed_in();
         localize_placeholder(&chat.input, if signed_in { "Chat…" } else { "Sign in to chat" }, window, cx);
@@ -990,7 +990,7 @@ impl WatchPage {
                                 .cursor_pointer()
                                 .hover(move |s| s.bg(p.hover))
                                 .child(icon(if open { "chevron-up" } else { "chevron-down" }).size_4().text_color(p.link))
-                                .child(format!("{} {}", c.reply_count, if c.reply_count == "1" { "reply" } else { "replies" }))
+                                .child(reply_count_label(&c.reply_count))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if this.replies.contains_key(&cid2) {
                                         this.replies.remove(&cid2);
@@ -1643,6 +1643,14 @@ pub(crate) fn thread_branch(child: AnyElement, last: bool, avatar: f32, line: Hs
         )
         .child(child)
         .into_any_element()
+}
+
+pub(crate) fn reply_count_label(count: &str) -> String {
+    if count == "1" {
+        tf!("{0} reply", count)
+    } else {
+        tf!("{0} replies", count)
+    }
 }
 
 /// For each reply, the earlier reply it answers: YouTube keeps replies flat and
