@@ -986,6 +986,7 @@ impl AppView {
             col = col.child(div().text_sm().text_color(p.text2).child(err.clone())).child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .justify_end()
                     .gap_2()
                     .child(pill("si-cancel", None, "Cancel", cx).on_click(cx.listener(|this, _, _, cx| {
@@ -1009,7 +1010,7 @@ impl AppView {
                         .text_sm()
                         .text_color(p.text2)
                         .child(
-                            div().flex().gap_1().child(t("1. On any device, go to")).child(
+                            div().flex().flex_wrap().gap_x_1().child(t("1. On any device, go to")).child(
                                 div()
                                     .id("si-url")
                                     .text_color(p.link)
@@ -1042,27 +1043,23 @@ impl AppView {
                         .child(code.clone())
                         .on_click(move |_, _, cx| copy_to_clipboard(code2.clone(), cx)),
                 )
+                .child(div().text_xs().text_color(p.text3).child(t("Waiting for approval…")))
                 .child(
                     div()
                         .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(div().text_xs().text_color(p.text3).child(t("Waiting for approval…")))
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(pill("si-cancel", None, "Cancel", cx).on_click(cx.listener(|this, _, _, cx| {
-                                    this.dialog = None;
-                                    cx.notify();
-                                })))
-                                .child(pill("si-open", Some("external-link"), "Copy code & open", cx).bg(p.link).text_color(white()).on_click(
-                                    move |_, _, cx| {
-                                        copy_to_clipboard(code.clone(), cx);
-                                        let _ = open::that(&url);
-                                    },
-                                )),
-                        ),
+                        .flex_wrap()
+                        .justify_end()
+                        .gap_2()
+                        .child(pill("si-cancel", None, "Cancel", cx).on_click(cx.listener(|this, _, _, cx| {
+                            this.dialog = None;
+                            cx.notify();
+                        })))
+                        .child(pill("si-open", Some("external-link"), "Copy code & open", cx).bg(p.link).text_color(white()).on_click(
+                            move |_, _, cx| {
+                                copy_to_clipboard(code.clone(), cx);
+                                let _ = open::that(&url);
+                            },
+                        )),
                 );
         } else {
             col = col.child(
