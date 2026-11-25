@@ -624,6 +624,9 @@ impl Render for PlayerView {
         let pl = self.player.read(cx);
         let prompt = pl.sb_prompt.clone();
         let highlight = pl.highlight().cloned().filter(|h| pl.time < h.start && pl.time < 30.0);
+        let quick_controls = self.hovering && show && !self.pip && !ui.shorts
+            && pl.video.is_some() && !loading && pl.error.is_none() && pl.init_error.is_none()
+            && prompt.is_none() && highlight.is_none() && self.hover_frac.is_none() && self.menu.is_none();
         if let Some(seg) = prompt {
             let pp = self.player.clone();
             let end = seg.end;
@@ -711,6 +714,9 @@ impl Render for PlayerView {
             }
             root = root.child(self.render_controls(time, duration, ui, window, cx));
         }
+        if quick_controls {
+            root = root.child(self.render_quick_controls(cx));
+        }
         if let Some(m) = self.menu {
             root = root.child(self.render_menu(m, cx));
         }
@@ -721,6 +727,54 @@ impl Render for PlayerView {
 
 /// Items of the menu shown on right-clicking the video.
 impl PlayerView {
+    fn render_quick_controls(&self, cx: &App) -> impl IntoElement {
+        let player = self.player.read(cx);
+        let speed = player.speed;
+        let quality = player.current_height();
+        let (lower, higher) = adjacent_qualities(&player.available_qualities(), quality);
+        let button = |id: &'static str, icon_name: &'static str, label: &'static str, enabled| {
+            div().id(id).flex().justify_center().items_center().size(px(28.)).rounded_md()
+                .child(icon(icon_name).size_4().text_color(if enabled { white() } else { hsla(0., 0., 1., 0.35) }))
+                .when(enabled, |button| button.cursor_pointer().hover(|s| s.bg(hsla(0., 0., 1., 0.18))))
+                .tooltip(move |window, cx| component::tooltip::Tooltip::new(translate(label)).build(window, cx))
+        };
+        let group = || div().flex().items_center().gap_1().px_1().py_0p5().rounded_lg().bg(hsla(0., 0., 0., 0.78));
+        let change_speed = |offset: Option<f64>| {
+            let player = self.player.clone();
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                player.update(cx, |p, cx| {
+                    let speed = offset.map_or(1.0, |offset| p.speed + offset);
+                    p.set_speed(speed);
+                    cx.notify();
+                });
+            }
+        };
+        let change_quality = |quality| {
+            let player = self.player.clone();
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                player.update(cx, |p, cx| { p.set_quality(quality, cx); cx.notify(); });
+            }
+        };
+        div().id("quick-playback-controls").absolute().right_4().bottom(px(70.))
+            .flex().gap_2().text_xs().font_weight(FontWeight::MEDIUM).text_color(white()).occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(group()
+                .child(button("quick-speed-down", "chevron-left", "Decrease playback speed", speed > 0.1)
+                    .when(speed > 0.1, |button| button.on_click(change_speed(Some(-0.5)))))
+                .child(div().id("quick-speed-reset").min_w(px(34.)).text_center().cursor_pointer()
+                    .tooltip(|window, cx| component::tooltip::Tooltip::new(translate("Reset playback speed")).build(window, cx))
+                    .child(format!("{speed:.2}×"))
+                    .on_click(change_speed(None)))
+                .child(button("quick-speed-up", "chevron-right", "Increase playback speed", speed < 5.)
+                    .when(speed < 5., |button| button.on_click(change_speed(Some(0.5))))))
+            .when(!player.audio_only && quality > 0 && (lower.is_some() || higher.is_some()), |row| row.child(group()
+                .child(button("quick-quality-down", "chevron-left", "Lower video quality", lower.is_some())
+                    .when_some(lower, |button, quality| button.on_click(change_quality(quality))))
+                .child(div().min_w(px(38.)).text_center().child(format!("{quality}p")))
+                .child(button("quick-quality-up", "chevron-right", "Raise video quality", higher.is_some())
+                    .when_some(higher, |button, quality| button.on_click(change_quality(quality))))))
+    }
+
     /// Archived annotations over the video picture (letterboxing left out).
     fn render_annotations(&mut self, time: f64, vsize: (f64, f64), cx: &mut Context<Self>) -> Option<AnyElement> {
         use crate::api::annotations::{Action, Kind};
@@ -839,6 +893,26 @@ impl PlayerView {
             layer = layer.child(el);
         }
         Some(layer.into_any_element())
+    }
+}
+
+fn adjacent_qualities(qualities: &[u32], current: u32) -> (Option<u32>, Option<u32>) {
+    let lower = qualities.iter().copied().filter(|&quality| quality < current).max();
+    let higher = qualities.iter().copied().filter(|&quality| quality > current).min();
+    (lower, higher)
+}
+
+#[cfg(test)]
+mod quick_control_tests {
+    use super::adjacent_qualities;
+
+    #[::core::prelude::v1::test]
+    fn quality_arrows_only_offer_the_nearest_available_options() {
+        let available = [2160, 1080, 720, 360];
+        assert_eq!(adjacent_qualities(&available, 1080), (Some(720), Some(2160)));
+        assert_eq!(adjacent_qualities(&available, 2160), (Some(1080), None));
+        assert_eq!(adjacent_qualities(&available, 360), (None, Some(720)));
+        assert_eq!(adjacent_qualities(&available, 540), (Some(360), Some(720)));
     }
 }
 
