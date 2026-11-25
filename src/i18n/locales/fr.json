@@ -1,7 +1,4 @@
 {
-  "Cast over LAN": "Diffuser sur le réseau local",
-  "Send a YouTube link from your phone": "Envoyer un lien YouTube depuis votre téléphone",
-  "Couldn't connect to the local network": "Impossible de se connecter au réseau local",
   "Back": "Retour",
   "Search languages": "Rechercher une langue",
   "original": "original",
@@ -355,6 +352,9 @@
   "Save to playlist…": "Enregistrer à la playlist…",
   "Open in external player": "Ouvrir dans un lecteur externe",
   "Copy link": "Copier le lien",
+  "Cast over LAN": "Diffuser sur le réseau local",
+  "Send a YouTube link from your phone": "Envoyer un lien YouTube depuis votre téléphone",
+  "Couldn't connect to the local network": "Impossible de se connecter au réseau local",
   "Open on YouTube": "Ouvrir sur YouTube",
   "Don't recommend channel": "Ne pas recommander cette chaîne",
   "Channel blocked. Manage in Settings → Content filters": "Chaîne bloquée. Gérer dans Paramètres → Filtres de contenu",

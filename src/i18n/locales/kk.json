@@ -1,7 +1,4 @@
 {
-  "Cast over LAN": "Жергілікті желі арқылы тарату",
-  "Send a YouTube link from your phone": "Телефоннан YouTube сілтемесін жіберу",
-  "Couldn't connect to the local network": "Жергілікті желіге қосылу мүмкін болмады",
   "Back": "Артқа",
   "Search languages": "Тілдерді іздеу",
   "original": "түпнұсқа",
@@ -355,6 +352,9 @@
   "Save to playlist…": "Орындау тізіміне сақтау...",
   "Open in external player": "Сыртқы ойнатқышта ашу",
   "Copy link": "Сілтемені көшіру",
+  "Cast over LAN": "Жергілікті желі арқылы тарату",
+  "Send a YouTube link from your phone": "Телефоннан YouTube сілтемесін жіберу",
+  "Couldn't connect to the local network": "Жергілікті желіге қосылу мүмкін болмады",
   "Open on YouTube": "YouTube-та ашу",
   "Don't recommend channel": "Арнаны ұсынбау",
   "Channel blocked. Manage in Settings → Content filters": "Арна бұғатталған. Басқару үшін Баптау → Мазмұн сүзгілері дегенді таңдаңыз",

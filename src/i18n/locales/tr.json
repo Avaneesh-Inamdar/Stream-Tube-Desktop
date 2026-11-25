@@ -1,7 +1,4 @@
 {
-  "Cast over LAN": "Yerel ağ üzerinden yayınla",
-  "Send a YouTube link from your phone": "Telefonunuzdan YouTube bağlantısı gönderin",
-  "Couldn't connect to the local network": "Yerel ağa bağlanılamadı",
   "Back": "Geri",
   "Search languages": "Dil ara",
   "original": "orijinal",
@@ -355,6 +352,9 @@
   "Save to playlist…": "Oynatma listesine kaydet…",
   "Open in external player": "Harici oynatıcıda aç",
   "Copy link": "Bağlantıyı kopyala",
+  "Cast over LAN": "Yerel ağ üzerinden yayınla",
+  "Send a YouTube link from your phone": "Telefonunuzdan YouTube bağlantısı gönderin",
+  "Couldn't connect to the local network": "Yerel ağa bağlanılamadı",
   "Open on YouTube": "YouTube'da aç",
   "Don't recommend channel": "Kanalı önerme",
   "Channel blocked. Manage in Settings → Content filters": "Kanal engellendi. Ayarlar → İçerik filtreleri bölümünden yönetebilirsiniz",

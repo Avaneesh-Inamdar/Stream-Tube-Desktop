@@ -1,7 +1,4 @@
 {
-  "Cast over LAN": "Lokal şəbəkə ilə yayımla",
-  "Send a YouTube link from your phone": "Telefonunuzdan YouTube keçidi göndərin",
-  "Couldn't connect to the local network": "Lokal şəbəkəyə qoşulmaq mümkün olmadı",
   "Back": "Geri",
   "Search languages": "Dilləri axtar",
   "original": "orijinal",
@@ -355,6 +352,9 @@
   "Save to playlist…": "Playlist'ə Qeyd Et",
   "Open in external player": "Xarici pleyerdə aç",
   "Copy link": "Keçidi kopyala",
+  "Cast over LAN": "Lokal şəbəkə ilə yayımla",
+  "Send a YouTube link from your phone": "Telefonunuzdan YouTube keçidi göndərin",
+  "Couldn't connect to the local network": "Lokal şəbəkəyə qoşulmaq mümkün olmadı",
   "Open on YouTube": "YouTube-da aç",
   "Don't recommend channel": "Kanalı tövsiyə etmə",
   "Channel blocked. Manage in Settings → Content filters": "Kanal bloklanıb. Qurğular → Məzmun filtrləri-də idarə et",

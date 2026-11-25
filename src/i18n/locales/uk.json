@@ -1,7 +1,4 @@
 {
-  "Cast over LAN": "Транслювати локальною мережею",
-  "Send a YouTube link from your phone": "Надіслати посилання YouTube із телефона",
-  "Couldn't connect to the local network": "Не вдалося підключитися до локальної мережі",
   "Back": "Назад",
   "Search languages": "Пошук мов",
   "original": "оригінал",
@@ -355,6 +352,9 @@
   "Save to playlist…": "Зберегти до списку відтворення…",
   "Open in external player": "Відкрити в зовнішньому програвачі",
   "Copy link": "Скопіювати посилання",
+  "Cast over LAN": "Транслювати локальною мережею",
+  "Send a YouTube link from your phone": "Надіслати посилання YouTube із телефона",
+  "Couldn't connect to the local network": "Не вдалося підключитися до локальної мережі",
   "Open on YouTube": "Відкрити в YouTube",
   "Don't recommend channel": "Не рекомендувати канал",
   "Channel blocked. Manage in Settings → Content filters": "Канал заблоковано. Керування за допомогою пункту меню Параметри → Фільтрування вмісту",

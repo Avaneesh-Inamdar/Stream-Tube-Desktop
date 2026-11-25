@@ -1,7 +1,4 @@
 {
-  "Cast over LAN": "通过局域网投放",
-  "Send a YouTube link from your phone": "从手机发送 YouTube 链接",
-  "Couldn't connect to the local network": "无法连接到局域网",
   "Back": "返回",
   "Search languages": "搜索语言",
   "original": "原始语言",
@@ -355,6 +352,9 @@
   "Save to playlist…": "保存到收藏夹",
   "Open in external player": "在外部播放器中打开",
   "Copy link": "复制链接",
+  "Cast over LAN": "通过局域网投放",
+  "Send a YouTube link from your phone": "从手机发送 YouTube 链接",
+  "Couldn't connect to the local network": "无法连接到局域网",
   "Open on YouTube": "在 YouTube 中打开",
   "Don't recommend channel": "不推荐此频道",
   "Channel blocked. Manage in Settings → Content filters": "频道被阻止。 管理设置 → 内容过滤器",

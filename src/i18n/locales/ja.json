@@ -1,7 +1,4 @@
 {
-  "Cast over LAN": "ローカルネットワークでキャスト",
-  "Send a YouTube link from your phone": "スマートフォンから YouTube のリンクを送信",
-  "Couldn't connect to the local network": "ローカルネットワークに接続できませんでした",
   "Back": "戻る",
   "Search languages": "言語を検索",
   "original": "オリジナル",
@@ -355,6 +352,9 @@
   "Save to playlist…": "プレイリストに保存...",
   "Open in external player": "外部プレーヤーで開く",
   "Copy link": "リンクをコピー",
+  "Cast over LAN": "ローカルネットワークでキャスト",
+  "Send a YouTube link from your phone": "スマートフォンから YouTube のリンクを送信",
+  "Couldn't connect to the local network": "ローカルネットワークに接続できませんでした",
   "Open on YouTube": "YouTube で開く",
   "Don't recommend channel": "チャンネルをおすすめに表示しない",
   "Channel blocked. Manage in Settings → Content filters": "チャンネルがブロックされています。設定→コンテンツフィルタで管理してください",
