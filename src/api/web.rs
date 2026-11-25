@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
-const WEB_VERSION: &str = "2.20251120.01.00";
+pub(super) const WEB_VERSION: &str = "2.20251120.01.00";
 const ORIGIN: &str = "https://www.youtube.com";
 const SIGN_IN_URL: &str = "https://accounts.google.com/ServiceLogin?service=youtube&uilel=3&passive=true&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26app%3Ddesktop%26next%3Dhttps%253A%252F%252Fwww.youtube.com%252F";
 
@@ -210,6 +210,10 @@ impl HistorySession {
     pub(super) fn call(&self, endpoint: &str, body: Value) -> Result<Value> {
         anyhow::ensure!(self.if_current(|| ()).is_some(), "YouTube history account changed");
         web_call_with(&self.0, endpoint, body)
+    }
+
+    pub(super) fn cookie_header(&self) -> String {
+        cookie_header(&self.0)
     }
 }
 
@@ -505,7 +509,7 @@ pub fn import_cookies_txt(path: &std::path::Path) -> Result<String> {
     connect(cookies)
 }
 
-mod reporting;
+pub(in crate::api) mod reporting;
 pub use reporting::{PlaybackReport, pending_reports};
 
 #[cfg(test)]

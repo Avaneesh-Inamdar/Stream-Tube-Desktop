@@ -498,7 +498,7 @@ fn android_vr(video_id: &str) -> Result<StreamInfo> {
     Ok(info)
 }
 
-const TV5_VERSION: &str = "5.20251120";
+pub(crate) const TV5_VERSION: &str = "5.20251120";
 const TV5_UA: &str = "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1";
 
 /// Whether the TV client can run here: its stream URLs need JavaScript challenges solved.
@@ -514,10 +514,31 @@ pub fn tv_available() -> bool {
 /// `jsc`, so it needs Deno or Node.js on the machine.
 fn tv(video_id: &str) -> Result<StreamInfo> {
     let rt = crate::api::jsc::runtime().ok_or_else(|| anyhow!("TV: no JavaScript runtime (install Deno or Node.js)"))?;
-    let s = crate::store::settings_snapshot();
     let token = crate::api::auth::access_token();
     let label = if token.is_some() { "TV (signed in)" } else { "TV" };
     let player = crate::api::jsc::player().map_err(|e| anyhow!("{label}: player script: {e}"))?;
+    let t = std::time::Instant::now();
+    let mut r = tv_player_response(video_id, token.as_deref(), player.sts)?;
+    if let Some(err) = playability_error(&r, Some(label)) {
+        return Err(err);
+    }
+    unlock_stream_urls(&mut r, &player).map_err(|e| anyhow!("{label}: {e}"))?;
+    let mut info = parse_player(&r);
+    info.source = if token.is_some() { "tv-account" } else { "tv" };
+    if crate::perf::on() {
+        eprintln!("[streams] {label} ok in {:?} via {}: {} video, {} audio formats", t.elapsed(), rt.describe(), info.video.len(), info.audio.len());
+    }
+    if info.video.is_empty() && info.muxed.is_empty() && info.hls_url.is_none() {
+        return Err(anyhow!("{label}: no playable formats"));
+    }
+    Ok(info)
+}
+
+/// The TV client's player response, as the account when a token is given.
+/// Besides formats it carries the `playbackTracking` URLs the account's watch
+/// history is reported to.
+pub(crate) fn tv_player_response(video_id: &str, token: Option<&str>, sts: Option<u64>) -> Result<Value> {
+    let s = crate::store::settings_snapshot();
     let body = json!({
         "videoId": video_id,
         "contentCheckOk": true,
@@ -529,7 +550,7 @@ fn tv(video_id: &str) -> Result<StreamInfo> {
             "userAgent": TV5_UA,
             "hl": s.language, "gl": s.region
         }},
-        "playbackContext": { "contentPlaybackContext": { "signatureTimestamp": player.sts } }
+        "playbackContext": { "contentPlaybackContext": { "signatureTimestamp": sts } }
     });
     let auth = token.map(|t| format!("Bearer {t}"));
     let mut headers = vec![
@@ -541,21 +562,7 @@ fn tv(video_id: &str) -> Result<StreamInfo> {
     if let Some(a) = &auth {
         headers.push(("Authorization", a));
     }
-    let t = std::time::Instant::now();
-    let mut r = http::post_json("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", &body, &headers)?;
-    if let Some(err) = playability_error(&r, Some(label)) {
-        return Err(err);
-    }
-    unlock_stream_urls(&mut r, &player).map_err(|e| anyhow!("{label}: {e}"))?;
-    let mut info = parse_player(&r);
-    info.source = if auth.is_some() { "tv-account" } else { "tv" };
-    if crate::perf::on() {
-        eprintln!("[streams] {label} ok in {:?} via {}: {} video, {} audio formats", t.elapsed(), rt.describe(), info.video.len(), info.audio.len());
-    }
-    if info.video.is_empty() && info.muxed.is_empty() && info.hls_url.is_none() {
-        return Err(anyhow!("{label}: no playable formats"));
-    }
-    Ok(info)
+    http::post_json("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", &body, &headers)
 }
 
 /// Gives every format a usable `url`: solves the `n` parameter and, for formats
@@ -1003,10 +1010,10 @@ fn with_sign_in_fallback(video_id: &str, res: Result<StreamInfo>) -> Result<Stre
             Some(Ok(info)) => Ok(info),
             Some(Err(e2)) => Err(anyhow!("{e}\nyt-dlp (signed in): {e2}")),
             None if crate::api::auth::signed_in() && !tv_available() => Err(anyhow!(
-                "{e}\nYouTube wants a signed-in viewer for this video. Install Deno or Node.js and Stream Tube will play it with your YouTube account."
+                "{e}\nYouTube wants a signed-in viewer for this video. Install Deno or Node.js and Stream Tube will play it with your YouTube account, or connect a browser session under “YouTube watch history” in Settings to play it through yt-dlp."
             )),
             None if crate::api::auth::signed_in() => Err(anyhow!(
-                "{e}\nYouTube wants a signed-in viewer for this video. Connect “YouTube watch history” in Settings (it signs in through your browser) and Stream Tube will play it with your account through yt-dlp."
+                "{e}\nYouTube wants a signed-in viewer for this video, and playing it with your account failed. Connect a browser session under “YouTube watch history” in Settings and Stream Tube will play it with your account through yt-dlp."
             )),
             None => Err(e),
         },

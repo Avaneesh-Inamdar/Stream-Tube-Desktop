@@ -1,11 +1,16 @@
-use super::{HistorySession, ORIGIN, WEB_VERSION, cookie_header, http};
+//! Reports playback to the account's watch history the way YouTube's own
+//! players do: a playback ping at start, then watchtime pings as it goes. The
+//! account is the browser session when connected, otherwise the TV sign-in.
+use super::{ORIGIN, http};
+use crate::api::history::Account;
 use anyhow::{Result, anyhow};
 use parking_lot::Mutex;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::sync::{OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
-fn sts() -> Option<u64> {
+/// The web player's `signatureTimestamp`, for player requests through a browser session.
+pub(in crate::api) fn sts() -> Option<u64> {
     static STS: Mutex<Option<(u64, Instant)>> = Mutex::new(None);
     if let Some((v, at)) = *STS.lock() {
         if at.elapsed() < Duration::from_secs(6 * 3600) {
@@ -43,7 +48,7 @@ fn sts() -> Option<u64> {
 }
 
 struct Watch {
-    account: HistorySession,
+    account: Account,
     recording_revision: u64,
     id: String,
     playback: String,
@@ -66,15 +71,11 @@ impl Watch {
             position,
             ..
         } = start;
-        let mut body = json!({ "videoId": id, "racyCheckOk": true, "contentCheckOk": true });
-        if let Some(sts) = sts() {
-            body["playbackContext"] = json!({ "contentPlaybackContext": { "signatureTimestamp": sts, "html5Preference": "HTML5_PREF_WANTS" } });
-        }
         anyhow::ensure!(
             enabled(start.recording_revision),
             "history reporting is inactive"
         );
-        let r = account.call("player", body)?;
+        let r = account.player_response(id)?;
         let url = |k: &str| {
             r.pointer(&format!("/playbackTracking/{k}/baseUrl"))
                 .and_then(Value::as_str)
@@ -133,24 +134,33 @@ impl Watch {
             return Err(anyhow!("unexpected stats host"));
         }
         let rt = self.started.elapsed().as_secs_f64();
+        let (client, version, platform) = self.account.ping_client();
         let mut add: Vec<(&str, String)> = vec![
             ("ver", "2".into()),
             ("cpn", self.cpn.clone()),
-            ("c", "WEB".into()),
-            ("cver", WEB_VERSION.into()),
+            ("c", client.into()),
+            ("cver", version.into()),
             ("cplayer", "UNIPLAYER".into()),
-            ("cbr", "Chrome".into()),
-            ("cbrver", "140.0.0.0".into()),
-            ("cos", "Windows".into()),
-            ("cosver", "10.0".into()),
-            ("cplatform", "DESKTOP".into()),
+            ("cplatform", platform.into()),
+        ];
+        if client == "WEB" {
+            add.extend([
+                ("cbr", "Chrome".into()),
+                ("cbrver", "140.0.0.0".into()),
+                ("cos", "Windows".into()),
+                ("cosver", "10.0".into()),
+            ]);
+        } else {
+            add.extend([("cos", "Tizen".into()), ("cosver", "2.4.0".into())]);
+        }
+        add.extend([
             ("fs", "0".into()),
             ("volume", "100".into()),
             ("muted", "0".into()),
             ("lact", "1200".into()),
             ("len", format!("{:.3}", self.len)),
             ("rt", format!("{rt:.3}")),
-        ];
+        ]);
         add.extend(fields.iter().cloned());
         let (path, query) = base.split_once('?').unwrap_or((base, ""));
         let mut pairs: Vec<(String, String)> = query
@@ -175,13 +185,11 @@ impl Watch {
                 .collect::<Vec<_>>()
                 .join("&")
         );
-        let cookie = cookie_header(&self.account.0);
         let referer = format!("https://www.youtube.com/watch?v={}", self.id);
-        let headers = [
-            ("Cookie", cookie.as_str()),
-            ("Referer", referer.as_str()),
-            ("Origin", ORIGIN),
-        ];
+        let account_headers = self.account.ping_headers()?;
+        let mut headers: Vec<(&str, &str)> = account_headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        headers.push(("Referer", referer.as_str()));
+        headers.push(("Origin", ORIGIN));
         let send = || {
             anyhow::ensure!(
                 self.account.if_current(|| ()).is_some() && enabled(self.recording_revision),
@@ -240,7 +248,7 @@ impl Watch {
 }
 
 struct Start {
-    account: HistorySession,
+    account: Account,
     recording_revision: u64,
     id: String,
     serial: u64,
@@ -381,9 +389,9 @@ pub fn pending_reports() -> Option<mpsc::Receiver<()>> {
     Some(receipt)
 }
 
-/// A single playback, tied to the browser account selected when it was opened.
+/// A single playback, tied to the account selected when it was opened.
 pub struct PlaybackReport {
-    account: HistorySession,
+    account: Account,
     recording_revision: u64,
     video_id: String,
     serial: u64,
@@ -393,7 +401,7 @@ pub struct PlaybackReport {
 impl PlaybackReport {
     pub fn new(video_id: String, serial: u64) -> Option<Self> {
         Some(Self {
-            account: HistorySession::current()?,
+            account: Account::current()?,
             recording_revision: crate::store::history_recording_revision()?,
             video_id,
             serial,
@@ -468,6 +476,29 @@ impl PlaybackReport {
                 position,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    /// Reports a short watch of VID with the profile in STREAMTUBE_DATA_DIR, then
+    /// checks the account's history page.
+    #[test]
+    #[ignore = "needs a signed-in profile in STREAMTUBE_DATA_DIR and network"]
+    fn reports_to_the_account() {
+        let id = std::env::var("VID").unwrap_or_else(|_| "aqz-KE-bpKQ".into());
+        let account = Account::current().expect("a signed-in account");
+        let start = Start { account: account.clone(), recording_revision: crate::store::history_recording_revision().unwrap_or(0), id: id.clone(), serial: 1, len: 600.0, position: 3.0 };
+        let mut w = Watch::begin(&start).expect("playback ping");
+        std::thread::sleep(Duration::from_secs(2));
+        w.report(9.0, true, false).expect("watchtime ping");
+        w.report(12.0, false, true).expect("final ping");
+        let page = account.page(None).expect("history page");
+        let first: Vec<_> = page.entries.iter().take(3).map(|e| (e.video.id.clone(), e.progress.map(|p| p.seconds))).collect();
+        println!("history head: {first:?}");
+        assert!(page.entries.iter().take(3).any(|e| e.video.id == id), "watched video not at the top of history");
     }
 }
 

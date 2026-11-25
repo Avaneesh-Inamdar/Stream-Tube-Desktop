@@ -637,6 +637,10 @@ impl SettingsPage {
                         tf!("Connected as {0}. Videos you watch here show in your YouTube history and resume where you stopped on your other devices", name),
                         pill("web-out", Some("unlink"), "Disconnect", cx).on_click(|_, _, cx| crate::ui::app::disconnect_web(cx)),
                     ),
+                    None if crate::api::auth::signed_in() => (
+                        "Your YouTube sign-in already does this: videos you watch here show in your YouTube history and resume on your phone. A browser session is a fallback for when that stops working".to_string(),
+                        pill("web-in", Some("history"), "Connect", cx).on_click(|_, _, cx| crate::ui::app::open_web_sign_in(cx)),
+                    ),
                     None => (
                         "Sign in through your browser so videos you watch here show in your YouTube history and resume on your phone. It also plays age-restricted videos and ones YouTube shows a bot check for".to_string(),
                         pill("web-in", Some("history"), "Connect", cx).on_click(|_, _, cx| crate::ui::app::open_web_sign_in(cx)),
