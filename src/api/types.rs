@@ -80,6 +80,7 @@ pub struct WatchInfo {
     pub date_text: String,
     pub likes_text: Option<String>,
     pub description: String,
+    pub description_links: Vec<DescriptionLink>,
     pub channel: ChannelItem,
     pub chapters: Vec<Chapter>,
     /// "Most replayed" graph: (start s, duration s, intensity 0..1)
@@ -95,6 +96,12 @@ pub struct WatchInfo {
     pub live_chat: Option<(String, String)>,
     /// When watching in a playlist context.
     pub playlist: Option<WatchPlaylist>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DescriptionLink {
+    pub range: std::ops::Range<usize>,
+    pub url: String,
 }
 
 #[derive(Clone, Debug, Default)]

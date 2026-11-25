@@ -798,7 +798,8 @@ impl WatchPage {
         let desc = if expanded {
             w.description.clone()
         } else {
-            w.description.lines().take(3).collect::<Vec<_>>().join("\n")
+            let end = w.description.match_indices('\n').nth(2).map_or(w.description.len(), |(end, _)| end);
+            w.description[..end].trim_end_matches('\r').to_string()
         };
         let chapters = w.chapters.clone();
         div()
@@ -817,7 +818,7 @@ impl WatchPage {
                 }
             }))
             .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(format!("{views}  {}", w.date_text)))
-            .child(div().text_sm().text_color(p.text).child(rich_text("desc-text", desc, cx)))
+            .child(div().text_sm().text_color(p.text).child(rich_text_with_links("desc-text", desc, &w.description_links)))
             .when(expanded && !chapters.is_empty() && !s.hide_chapters, |d| {
                 d.child(
                     div()
