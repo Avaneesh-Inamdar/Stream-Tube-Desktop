@@ -1,6 +1,6 @@
-use crate::player::controller::{Player, player};
+use crate::player::controller::{Player, PlayerHandle, player};
 use futures::{StreamExt, channel::mpsc};
-use gpui_kit::{App, Window};
+use gpui_kit::{App, Entity, Subscription, Window};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Foundation::TypedEventHandler;
 use windows::Media::{
@@ -58,6 +58,15 @@ impl Published {
     }
 }
 
+fn observe_player(active: &Entity<Player>, transport: &SystemMediaTransportControls, cx: &mut App) -> Subscription {
+    let mut published = Published::default();
+    let _ = published.update(transport, active.read(cx));
+    let transport = transport.clone();
+    cx.observe(active, move |entity, cx| {
+        let _ = published.update(&transport, entity.read(cx));
+    })
+}
+
 pub(crate) fn init(window: &Window, cx: &mut App) {
     let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
     let RawWindowHandle::Win32(handle) = handle.as_raw() else { return };
@@ -77,11 +86,13 @@ pub(crate) fn init(window: &Window, cx: &mut App) {
     });
     let Ok(token) = transport.ButtonPressed(&handler) else { return };
     let active = player(cx);
-    let mut published = Published::default();
-    let _ = published.update(&transport, active.read(cx));
+    let mut binding = (active.entity_id(), observe_player(&active, &transport, cx));
     let observed = transport.clone();
-    cx.observe(&active, move |entity, cx| {
-        let _ = published.update(&observed, entity.read(cx));
+    cx.observe_global::<PlayerHandle>(move |cx| {
+        let active = player(cx);
+        if binding.0 != active.entity_id() {
+            binding = (active.entity_id(), observe_player(&active, &observed, cx));
+        }
     }).detach();
     cx.spawn(async move |cx| {
         while let Some(button) = buttons.next().await {
