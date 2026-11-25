@@ -113,6 +113,17 @@ pub fn local_hls(url: &str, max_height: u32, audio: Option<&str>) -> String {
     }
 }
 
+/// Serves a single HTTP(S) resource (such as a caption track) through the
+/// authenticated local proxy so mpv uses the app's configured SOCKS/HTTP proxy.
+pub fn local_pass(url: &str) -> String {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return url.to_string();
+    }
+    let Some(p) = proxy() else { return url.to_string() };
+    let id = register(p, url, None, PASS);
+    format!("{}/p/{id}", p.base())
+}
+
 pub(super) fn hls_attr(line: &str, key: &str) -> Option<String> {
     // match KEY= at an attribute boundary (so AUDIO= doesn't hit "VIDEO-RANGE=..."-like names)
     let mut search = line;
@@ -208,12 +219,15 @@ pub(super) fn select_master(text: &str, max_height: u32, audio_name: Option<&str
 
 /// Rewrites one playlist so all its URLs point back at the proxy. Whether a
 /// URI is another playlist or media is decided by the tag it belongs to.
-fn rewrite_playlist(p: &Proxy, text: &str, max_height: u32) -> String {
+fn rewrite_playlist(p: &Proxy, base: &str, text: &str, max_height: u32) -> String {
     let local = |u: &str, playlist: bool| -> String {
+        let Some(url) = playlist_url(base, u) else {
+            return format!("{}/invalid", p.base());
+        };
         if playlist {
-            format!("{}/h/{}?max=0", p.base(), register(p, u, None, HLS))
+            format!("{}/h/{}?max=0", p.base(), register(p, &url, None, HLS))
         } else {
-            format!("{}/p/{}", p.base(), register(p, u, None, PASS))
+            format!("{}/p/{}", p.base(), register(p, &url, None, PASS))
         }
     };
     let lines: Vec<&str> = text.lines().collect();
@@ -269,6 +283,14 @@ fn rewrite_playlist(p: &Proxy, text: &str, max_height: u32) -> String {
     out
 }
 
+pub(super) fn playlist_url(base: &str, uri: &str) -> Option<String> {
+    if uri.starts_with("https://") || uri.starts_with("http://") {
+        return Some(uri.to_owned());
+    }
+    let resolved = url::Url::parse(base).ok()?.join(uri).ok()?;
+    matches!(resolved.scheme(), "https" | "http").then(|| resolved.into())
+}
+
 fn serve_playlist(conn: &mut TcpStream, p: &Proxy, url: &str, max_height: u32, audio: Option<&str>) -> std::io::Result<()> {
     let cached = super::shorts_preload::cached(url);
     let mut text = cached.and_then(|media| std::str::from_utf8(&media.bytes).ok().map(str::to_owned));
@@ -289,7 +311,7 @@ fn serve_playlist(conn: &mut TcpStream, p: &Proxy, url: &str, max_height: u32, a
         return Ok(());
     };
     let selected = text.contains("#EXT-X-STREAM-INF").then(|| select_master(&text, max_height, audio)).flatten();
-    let body = rewrite_playlist(p, selected.as_deref().unwrap_or(&text), max_height);
+    let body = rewrite_playlist(p, url, selected.as_deref().unwrap_or(&text), max_height);
     let head = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -314,6 +336,7 @@ fn serve_pass(conn: &mut TcpStream, url: &str, range: Option<(u64, Option<u64>)>
             write!(conn, "Content-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", media.mime, end - start + 1)?;
             if !head_only {
                 conn.write_all(&media.bytes[start as usize..=end as usize])?;
+                media.record_served(end - start + 1);
             }
             return conn.flush();
         }
@@ -476,6 +499,7 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
     if let Some(media) = cached.filter(|media| media.total == total && start < media.bytes.len() as u64) {
         let stop = (end + 1).min(media.bytes.len() as u64);
         conn.write_all(&media.bytes[start as usize..stop as usize])?;
+        media.record_served(stop - start);
         pos = stop;
     }
     let mut first = true;
@@ -553,6 +577,17 @@ mod token_tests {
         assert_eq!(super::strip_token("/0123abce/s/5", t), None);
         assert_eq!(super::strip_token("/0123abcds/5", t), None);
         assert_eq!(super::strip_token("/01", t), None);
+    }
+
+    #[test]
+    fn local_pass_proxies_only_http_urls_with_secret() {
+        assert_eq!(super::local_pass("/tmp/local.vtt"), "/tmp/local.vtt");
+        let proxied = super::local_pass("https://www.youtube.com/api/timedtext?v=abc");
+        let rest = proxied.strip_prefix("http://127.0.0.1:").expect("loopback url");
+        let path = rest.split_once('/').expect("path").1;
+        let (token, tail) = path.split_once('/').expect("token prefix");
+        assert_eq!(token.len(), 48, "48-hex-char session secret");
+        assert!(tail.starts_with("p/"), "pass route: {tail}");
     }
 }
 

@@ -521,7 +521,9 @@ fn db() -> &'static Mutex<Connection> {
     static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
     DB.get_or_init(|| {
         let conn = open_checked(&data_dir().join("streamtube.db"));
-        conn.execute_batch(&format!("PRAGMA journal_mode=WAL; {TABLES}"))
+        // WAL mode is crash-safe with synchronous=NORMAL and avoids an fsync
+        // on every 5-second playback progress save.
+        conn.execute_batch(&format!("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; {TABLES}"))
         .expect("init db");
         // built-in playlists
         let n: i64 = conn

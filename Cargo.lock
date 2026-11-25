@@ -6078,7 +6078,7 @@ checksum = "d08889ec5408683408db66ad89e0e1f93dff55c73a4ccc71c427d5b277ee47e6"
 
 [[package]]
 name = "streamtube"
-version = "0.7.4-alpha"
+version = "0.7.5-alpha"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6101,6 +6101,7 @@ dependencies = [
  "sha2 0.11.1",
  "smallvec",
  "ureq",
+ "url",
  "windows 0.62.2",
 ]
 

@@ -148,6 +148,19 @@ pub fn thumbnail(v: &VideoItem, url: String, w: Pixels, h: Pixels, radius: Pixel
         })
 }
 
+pub fn download_menu_items(video: &VideoItem) -> Vec<MenuItem> {
+    crate::downloads::FORMATS
+        .iter()
+        .map(|&(format, label)| {
+            let video = video.clone();
+            let icon = if format == "audio" { "music" } else { "film" };
+            MenuItem::new(icon, t(label), move |_, cx| {
+                crate::downloads::start(video.clone(), Some(format.into()), cx);
+            })
+        })
+        .collect()
+}
+
 pub fn video_menu_items(v: &VideoItem) -> Vec<MenuItem> {
     let mut items = Vec::new();
     {

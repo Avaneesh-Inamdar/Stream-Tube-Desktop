@@ -1,12 +1,13 @@
 //! Video surface + YouTube-style controls.
 use super::aspect;
-use super::controller::Player;
+use super::controller::{KeyboardFeedback, Player};
 use crate::i18n::{t as translate, tf};
 use crate::api::json::format_duration;
 use crate::api::services;
 use crate::store;
-use crate::ui::app::{Route, UiState, navigate};
-use crate::ui::{icon, pal};
+use crate::ui::app::{Route, UiState, navigate, open_menu};
+use crate::ui::cards::download_menu_items;
+use crate::ui::{icon, icon_button, pal};
 use gpui_kit::*;
 use gpui_kit::prelude::*;
 use std::cell::Cell;
@@ -215,7 +216,8 @@ impl Render for PlayerView {
         let view = cx.entity().downgrade();
         let aspect = aspect::Mode::parse(&store::settings_snapshot().aspect_mode);
         let auto_trim = pl.auto_crop.trim;
-        let picture = frame.clone().filter(|_| !audio_only);
+        let short_cover = video.as_ref().filter(|_| ui.shorts && !mini && !self.pip && !audio_only && (pl.loading || frame.is_none()) && error.is_none());
+        let picture = frame.clone().filter(|_| !audio_only && short_cover.is_none());
 
         // ── video surface ──
         let surface = div()
@@ -260,6 +262,9 @@ impl Render for PlayerView {
                 .absolute()
                 .size_full(),
             )
+            .when_some(short_cover, |d, v| {
+                d.child(img(SharedString::from(v.thumbnail.clone())).absolute().size_full().object_fit(ObjectFit::Cover))
+            })
             .when(audio_only, |d| {
                 d.when_some(video.as_ref().map(|v| v.thumbnail.clone()), |d, t| {
                     d.child(
@@ -455,7 +460,19 @@ impl Render for PlayerView {
             }
         }
 
-        if self.player.read(cx).boost.is_some() {
+        let player = self.player.read(cx);
+        let feedback = match player.keyboard_feedback() {
+            Some(KeyboardFeedback::Volume(volume)) => Some(("volume-2", tf!("{0}%", volume.round()))),
+            Some(KeyboardFeedback::Seek(seconds)) => {
+                let icon = if seconds < 0.0 { "arrow-left" } else { "arrow-right" };
+                let seconds = (seconds * 10.0).round() / 10.0;
+                let label = if seconds == 0.0 { "0".into() } else { format!("{seconds:+}") };
+                Some((icon, tf!("{0} s", label)))
+            }
+            None if player.boost.is_some() => Some(("fast-forward", "2x".into())),
+            None => None,
+        };
+        if let Some((feedback_icon, text)) = feedback {
             root = root.child(
                 div().absolute().top_4().left_0().right_0().flex().justify_center().child(
                     div()
@@ -469,8 +486,8 @@ impl Render for PlayerView {
                         .text_color(white())
                         .text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child("2x")
-                        .child(crate::ui::icon("fast-forward").size_4().text_color(white())),
+                        .child(text)
+                        .child(icon(feedback_icon).size_4().text_color(white())),
                 ),
             );
         }
@@ -550,6 +567,23 @@ impl Render for PlayerView {
 
         if mini {
             return root.child(self.render_mini_controls(show, paused, time, duration, cx)).into_any_element();
+        }
+
+        if let Some(video) = video.filter(|v| ui.shorts && !self.pip && v.is_short) {
+            root = root.child(
+                icon_button("sh-download", "download", cx)
+                    .absolute()
+                    .top_3()
+                    .right_3()
+                    .bg(p.chip)
+                    .occlude()
+                    .tooltip(|window, cx| component::tooltip::Tooltip::new(translate("Download")).build(window, cx))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(move |ev, window, cx| {
+                        cx.stop_propagation();
+                        open_menu(ev.position(), download_menu_items(&video), window, cx);
+                    }),
+            );
         }
 
         // SponsorBlock prompt / highlight
@@ -761,9 +795,10 @@ fn context_items(player: &Entity<Player>, cx: &App) -> Vec<crate::ui::app::MenuI
     let t = pl.time.max(0.0) as u64;
     let looping = pl.loop_video;
     let stats = pl.show_stats;
+    let can_step = pl.video.is_some() && !pl.loading && !pl.audio_only;
     let (p1, p2, p3, p4) = (player.clone(), player.clone(), player.clone(), player.clone());
     let (id1, id2) = (id.clone(), id);
-    vec![
+    let mut items = vec![
         MenuItem::new("repeat", translate(if looping { "Loop: on" } else { "Loop: off" }), move |_, cx| {
             p1.update(cx, |p, cx| {
                 p.set_loop(!looping);
@@ -785,13 +820,29 @@ fn context_items(player: &Entity<Player>, cx: &App) -> Vec<crate::ui::app::MenuI
                 cx.notify()
             })
         }),
-    ]
-    .into_iter()
-    .chain(std::iter::once(MenuItem::new("pause", translate("Play / pause"), move |_, cx| p4.update(cx, |p, cx| {
-        p.toggle_pause();
-        cx.notify()
-    }))))
-    .collect()
+        MenuItem::new("pause", translate("Play / pause"), move |_, cx| p4.update(cx, |p, cx| {
+            p.toggle_pause();
+            cx.notify()
+        })),
+    ];
+    if can_step {
+        for (forward, icon, label, key) in [
+            (false, "chevron-left", translate("Previous frame"), ','),
+            (true, "chevron-right", translate("Next frame"), '.'),
+        ] {
+            let player = player.clone();
+            items.push(MenuItem::new(icon, format!("{label} ({key})"), move |_, cx| {
+                player.update(cx, |p, cx| {
+                    if !p.paused {
+                        p.set_paused(true);
+                    }
+                    p.frame_step(forward);
+                    cx.notify();
+                });
+            }));
+        }
+    }
+    items
 }
 
 fn navigate_to_current(this: &mut PlayerView, window: &mut Window, cx: &mut Context<PlayerView>) {
@@ -923,7 +974,7 @@ impl PlayerView {
         let muted = pl.muted;
         let segments = pl.segments.clone();
         let chapters = pl.chapters.clone();
-        let cache = pl.cache_time;
+        let cache = pl.buffered_until();
         let caption_on = pl.caption.is_some();
         let has_captions = pl.streams.as_ref().map(|s| !s.captions.is_empty()).unwrap_or(false);
         let storyboard = pl.storyboard.clone();

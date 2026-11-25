@@ -12,6 +12,14 @@ use crate::ui::widgets::{Load, comment_body};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+const SLIDE_DURATION: Duration = Duration::from_millis(280);
+
+struct ShortSlide {
+    previous: usize,
+    started: Instant,
+    frame: Option<Arc<RenderImage>>,
+}
+
 pub struct ShortsPage {
     list: Vec<VideoItem>,
     idx: usize,
@@ -19,7 +27,7 @@ pub struct ShortsPage {
     initial_play: bool,
     next_meta: Option<String>,
     votes: HashMap<String, services::Votes>,
-    last_step: Instant,
+    slide: Option<ShortSlide>,
     /// wheel / touchpad gesture tracking: one Short per gesture
     wheel_acc: f32,
     last_wheel: Instant,
@@ -54,11 +62,14 @@ impl ShortsPage {
             if matches!(ev, PlayerEvent::PlaybackReadyChanged) {
                 cx.notify();
             }
-            if matches!(ev, crate::player::controller::PlayerEvent::Ended) && store::settings_snapshot().shorts_autoadvance {
-                this.advance(cx);
+            if matches!(ev, PlayerEvent::Ended) && store::settings_snapshot().shorts_autoadvance {
+                if this.list.get(this.idx).zip(pl.read(cx).video.as_ref()).is_some_and(|(short, playing)| short.id == playing.id) {
+                    this.step(1, cx);
+                }
             }
         });
-        cx.on_release(|_, cx| {
+        cx.on_release(|this, cx| {
+            this.clear_slide(None, cx);
             let l = store::settings_snapshot().loop_video;
             player(cx).update(cx, |p, _| p.set_loop(l));
         })
@@ -70,7 +81,7 @@ impl ShortsPage {
             initial_play: true,
             next_meta: None,
             votes: HashMap::new(),
-            last_step: Instant::now(),
+            slide: None,
             wheel_acc: 0.0,
             last_wheel: Instant::now(),
             wheel_used: false,
@@ -515,14 +526,6 @@ impl ShortsPage {
         div().flex().flex_col().child(el).child(col).into_any_element()
     }
 
-    fn advance(&mut self, cx: &mut Context<Self>) {
-        if self.idx + 1 < self.list.len() {
-            self.idx += 1;
-            self.last_step = Instant::now();
-            self.play_current(cx);
-        }
-    }
-
     fn render_comments(&mut self, h: Pixels, cx: &mut Context<Self>) -> AnyElement {
         let p = pal(cx);
         let ready = self.comments.as_ref().and_then(|c| c.ready());
@@ -616,16 +619,53 @@ impl ShortsPage {
             .into_any_element()
     }
 
-    pub fn step(&mut self, d: i32, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.last_step.elapsed() < Duration::from_millis(350) {
+    fn scroll_shorts(&mut self, ev: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // A touchpad swipe is a stream of small deltas and a wheel notch one big one.
+        // Sum them, move one Short past a threshold, and ignore the rest of that
+        // gesture (it ends after a short pause).
+        if !cx.global::<UiState>().fullscreen && self.show_comments && self.comments_bounds.get().contains(&window.mouse_position()) {
             return;
         }
-        let n = self.idx as i32 + d;
-        if n < 0 || n as usize >= self.list.len() {
+        let dy: f32 = ev.delta.pixel_delta(window.line_height()).y.into();
+        if self.last_wheel.elapsed() > Duration::from_millis(220) {
+            self.wheel_acc = 0.0;
+            self.wheel_used = false;
+        }
+        self.last_wheel = Instant::now();
+        if self.wheel_used {
             return;
         }
-        self.last_step = Instant::now();
-        self.idx = n as usize;
+        self.wheel_acc += dy;
+        if self.wheel_acc.abs() >= 48.0 {
+            let d = if self.wheel_acc < 0.0 { 1 } else { -1 };
+            self.wheel_acc = 0.0;
+            self.wheel_used = true;
+            self.step(d, cx);
+        }
+    }
+
+    fn clear_slide(&mut self, window: Option<&mut Window>, cx: &mut App) {
+        if let Some(frame) = self.slide.take().and_then(|slide| slide.frame) {
+            cx.drop_image(frame, window);
+        }
+    }
+
+    pub fn step(&mut self, direction: i32, cx: &mut Context<Self>) {
+        let Some(next) = self.idx.checked_add_signed(direction as isize) else { return };
+        if next >= self.list.len() || self.slide.is_some() {
+            return;
+        }
+        if !cx.reduce_motion() {
+            let pl = player(cx);
+            let playing = pl.read(cx);
+            let frame = if !playing.audio_only && !playing.loading && playing.video.as_ref().is_some_and(|v| v.id == self.list[self.idx].id) {
+                playing.frame.clone()
+            } else {
+                None
+            };
+            self.slide = Some(ShortSlide { previous: self.idx, started: Instant::now(), frame });
+        }
+        self.idx = next;
         self.play_current(cx);
     }
 }
@@ -693,6 +733,49 @@ impl Render for ShortsPage {
                 )
             })
         };
+        // Warm the next cover in the same cache the player uses while waiting for its first frame.
+        if let Some(next) = self.list.get(self.idx + 1).filter(|_| ready) {
+            let images = cx.global::<image_cache::Images>().0.clone();
+            images.update(cx, |cache, cx| {
+                cache.load(&Resource::Uri(next.thumbnail.clone().into()), window, cx);
+            });
+        }
+        let mut offset = px(0.);
+        let mut outgoing = None;
+        if let Some(slide) = &self.slide {
+            let progress = slide.started.elapsed().as_secs_f32() / SLIDE_DURATION.as_secs_f32();
+            if progress < 1. && !cx.reduce_motion() {
+                let stride = (h + px(16.)) * if self.idx > slide.previous { 1. } else { -1. };
+                offset = stride * (1. - ease_in_out(progress));
+                let old = &self.list[slide.previous];
+                let (source, fit) = match slide.frame.as_ref() {
+                    Some(frame) => (ImageSource::Render(frame.clone()), ObjectFit::Contain),
+                    None => (ImageSource::from(old.thumbnail.clone()), ObjectFit::Cover),
+                };
+                outgoing = Some(
+                    div()
+                        .absolute()
+                        .top(offset - stride)
+                        .size_full()
+                        .when(!ui.fullscreen, |d| d.rounded_xl())
+                        .overflow_hidden()
+                        .bg(black())
+                        .child(img(source).absolute().size_full().object_fit(fit)),
+                );
+                window.request_animation_frame();
+            } else {
+                self.clear_slide(Some(window), cx);
+            }
+        }
+        let cards = div().relative().w(w).h(h).children(outgoing);
+        let current = div()
+            .absolute()
+            .top(offset)
+            .size_full()
+            .when(!ui.fullscreen, |d| d.rounded_xl())
+            .overflow_hidden()
+            .bg(black())
+            .child(crate::ui::slot::player_slot(cx));
         if ui.fullscreen {
             return div()
                 .id("shorts-fs")
@@ -702,29 +785,11 @@ impl Render for ShortsPage {
                 .flex()
                 .items_center()
                 .justify_center()
-                .on_scroll(cx.listener(|this, ev: &ScrollEvent, window, cx| {
-                    let dy: f32 = ev.delta.pixel_delta(window.line_height()).y.into();
-                    if this.last_wheel.elapsed() > Duration::from_millis(220) {
-                        this.wheel_acc = 0.0;
-                        this.wheel_used = false;
-                    }
-                    this.last_wheel = Instant::now();
-                    if this.wheel_used {
-                        return;
-                    }
-                    this.wheel_acc += dy;
-                    if this.wheel_acc.abs() >= 48.0 {
-                        let d = if this.wheel_acc < 0.0 { 1 } else { -1 };
-                        this.wheel_acc = 0.0;
-                        this.wheel_used = true;
-                        this.last_step = Instant::now() - Duration::from_secs(1);
-                        this.step(d, window, cx);
-                    }
-                }))
+                .on_scroll(cx.listener(Self::scroll_shorts))
                 .when(!below, |d| d.child(
                     div().absolute().right((ui.viewport.width + w) * 0.5 + rem).bottom_4().w(side_space.min(px(250.))).child(title(white())),
                 ))
-                .child(video_column(div().relative().w_full().h(h).overflow_hidden().bg(black()).child(crate::ui::slot::player_slot(cx))))
+                .child(video_column(cards.child(current)))
                 .into_any_element();
         }
         let votes = self.votes.get(&v.id).cloned();
@@ -825,33 +890,9 @@ impl Render for ShortsPage {
             // Balance the wider title column when there is room beside the controls.
             .when(!below && !self.show_comments, |d| d.pr((side_space - info_width).clamp(px(0.), rem * 4.)))
             .gap_4()
-            .on_scroll(cx.listener(|this, ev: &ScrollEvent, window, cx| {
-                // A touchpad swipe is a stream of small deltas and a wheel notch one big one.
-                // Sum them, move one Short past a threshold, and ignore the rest of that
-                // gesture (it ends after a short pause).
-                if this.show_comments && this.comments_bounds.get().contains(&window.mouse_position()) {
-                    return;
-                }
-                let dy: f32 = ev.delta.pixel_delta(window.line_height()).y.into();
-                if this.last_wheel.elapsed() > Duration::from_millis(220) {
-                    this.wheel_acc = 0.0;
-                    this.wheel_used = false;
-                }
-                this.last_wheel = Instant::now();
-                if this.wheel_used {
-                    return;
-                }
-                this.wheel_acc += dy;
-                if this.wheel_acc.abs() >= 48.0 {
-                    let d = if this.wheel_acc < 0.0 { 1 } else { -1 };
-                    this.wheel_acc = 0.0;
-                    this.wheel_used = true;
-                    this.last_step = Instant::now() - Duration::from_secs(1);
-                    this.step(d, window, cx);
-                }
-            }))
+            .on_scroll(cx.listener(Self::scroll_shorts))
             .children(info_panel)
-            .child(video_column(div().relative().w_full().h(h).rounded_xl().overflow_hidden().bg(black()).child(crate::ui::slot::player_slot(cx))))
+            .child(video_column(cards.child(current)))
             .child(
                 div()
                     .flex()
@@ -894,8 +935,8 @@ impl Render for ShortsPage {
                     .flex_col()
                     .gap_4()
                     .when(edge_nav, |d| d.absolute().right(px(24.)).top_0().bottom_0().justify_center())
-                    .child(icon_button("sh-up", "arrow-up", cx).size_12().bg(p.chip).when(!can_up, |d| d.opacity(0.3)).on_click(cx.listener(|t, _, window, cx| t.step(-1, window, cx))))
-                    .child(icon_button("sh-down", "arrow-down", cx).size_12().bg(p.chip).when(!can_down, |d| d.opacity(0.3)).on_click(cx.listener(|t, _, window, cx| t.step(1, window, cx)))),
+                    .child(icon_button("sh-up", "arrow-up", cx).size_12().bg(p.chip).when(!can_up, |d| d.opacity(0.3)).on_click(cx.listener(|t, _, _, cx| t.step(-1, cx))))
+                    .child(icon_button("sh-down", "arrow-down", cx).size_12().bg(p.chip).when(!can_down, |d| d.opacity(0.3)).on_click(cx.listener(|t, _, _, cx| t.step(1, cx)))),
             )
             .into_any_element()
     }

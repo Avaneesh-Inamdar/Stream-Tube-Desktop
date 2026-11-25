@@ -4,7 +4,7 @@ use crate::i18n::{t, tf};
 use super::*;
 use crate::api::innertube;
 use crate::api::types::VideoItem;
-use crate::player::controller::{Player, player};
+use crate::player::controller::{KeyboardFeedback, Player, player};
 use crate::player::view::PlayerView;
 use crate::store;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -52,6 +52,8 @@ impl Route {
 #[derive(Clone, Copy, Default)]
 pub struct UiState {
     pub fullscreen: bool,
+    /// the Shorts page is showing
+    pub shorts: bool,
     /// fullscreen layout inside the window, without OS fullscreen
     pub windowed: bool,
     pub sidebar_open: bool,
@@ -1972,7 +1974,7 @@ impl AppView {
         if matches!(self.route, Route::Shorts(_)) {
             if let Some(page) = self.page.clone().downcast::<shorts::ShortsPage>().ok() {
                 if k == "down" || k == "up" {
-                    page.update(cx, |s, cx| s.step(if k == "down" { 1 } else { -1 }, window, cx));
+                    page.update(cx, |s, cx| s.step(if k == "down" { 1 } else { -1 }, cx));
                     return;
                 }
             }
@@ -1996,12 +1998,16 @@ impl AppView {
             return;
         }
         let step = store::settings_snapshot().seek_step;
+        let playback_key = match ev.keystroke.key_char.as_deref() {
+            Some(key @ ("-" | "+" | "<" | ">")) => key,
+            _ => k,
+        };
         let held = ev.is_held;
         if k == "space" {
             self.space_down = true;
         }
         let handled = p.update(cx, |pl: &mut Player, cx| {
-            let handled = match (k, m.shift) {
+            let handled = match (playback_key, m.shift) {
                 ("space", _) => {
                     // acted on at release (tap) or while held (2x)
                     if held {
@@ -2027,22 +2033,16 @@ impl AppView {
                     pl.seek_by(10.0);
                     true
                 }
-                ("left", _) => {
-                    pl.seek_by(-step);
+                ("left" | "right", _) => {
+                    let before = pl.time;
+                    pl.seek_by(if k == "left" { -step } else { step });
+                    pl.show_keyboard_feedback(KeyboardFeedback::Seek(pl.time - before), cx);
                     true
                 }
-                ("right", _) => {
-                    pl.seek_by(step);
-                    true
-                }
-                ("up", _) => {
-                    let v = pl.volume;
-                    pl.set_volume(v + 5.0);
-                    true
-                }
-                ("down", _) => {
-                    let v = pl.volume;
-                    pl.set_volume(v - 5.0);
+                ("up" | "down", _) => {
+                    let delta = if k == "up" { 5.0 } else { -5.0 };
+                    pl.set_volume(pl.volume + delta);
+                    pl.show_keyboard_feedback(KeyboardFeedback::Volume(pl.volume), cx);
                     true
                 }
                 ("m", false) => {
@@ -2061,13 +2061,8 @@ impl AppView {
                     pl.frame_step(true);
                     true
                 }
-                (",", true) | ("<", _) => {
-                    pl.set_speed(pl.speed - 0.25);
-                    crate::ui::toast(cx, tf!("Speed {0}x", format_args!("{:.2}", pl.speed)));
-                    true
-                }
-                (".", true) | (">", _) => {
-                    pl.set_speed(pl.speed + 0.25);
+                ("," | "." | "=", true) | ("<" | ">" | "-" | "+", _) => {
+                    pl.step_speed(matches!(playback_key, "." | "=" | ">" | "+"));
                     crate::ui::toast(cx, tf!("Speed {0}x", format_args!("{:.2}", pl.speed)));
                     true
                 }
@@ -3172,10 +3167,11 @@ impl Render for AppView {
         if (f32::from(window.rem_size()) - 16.0 * scale).abs() > 0.01 {
             window.set_rem_size(px(16.0 * scale));
         }
-        let ui = *cx.global::<UiState>();
         let is_watch = matches!(self.route, Route::Watch { .. });
-        cx.global_mut::<UiState>().viewport = window.viewport_size();
         let is_shorts = matches!(self.route, Route::Shorts(_));
+        let ui = cx.global_mut::<UiState>();
+        ui.viewport = window.viewport_size();
+        ui.shorts = is_shorts;
         let fullscreen = ui.fullscreen && (is_watch || is_shorts);
         let mut root = div()
             .image_cache(self.images.clone())

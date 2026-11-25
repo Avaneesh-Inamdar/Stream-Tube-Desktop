@@ -438,7 +438,7 @@ impl SettingsPage {
             };
             (name.to_string(), credit.to_string(), selected, language)
         }).collect();
-        self.select("app-language", label, 280., items, |s, v| s.app_language = v, cx)
+        self.select("app-language", label, 280., items, set_app_language, cx)
     }
 
     /// A dropdown button: `items` are (label, detail, active, value).
@@ -1353,5 +1353,36 @@ mod tests {
     fn settings_search_accepts_dotted_and_dotless_i() {
         assert_eq!(settings_search_text("İzleme"), "izleme");
         assert_eq!(settings_search_text("AYARI"), settings_search_text("ayarı"));
+    }
+}
+
+/// Changes the app language. The YouTube and caption languages follow it while
+/// they still match the previous app language, so a separate choice is kept (#122).
+fn set_app_language(s: &mut Settings, language: AppLanguage) {
+    let old = s.app_language.code();
+    if s.language.eq_ignore_ascii_case(old) {
+        s.language = language.code().to_string();
+    }
+    if s.captions_lang.eq_ignore_ascii_case(old) {
+        s.captions_lang = language.code().to_string();
+    }
+    s.app_language = language;
+}
+
+#[cfg(test)]
+mod app_language_tests {
+    use super::{AppLanguage, Settings, set_app_language};
+
+    #[test]
+    fn youtube_and_caption_languages_follow_unless_chosen_separately() {
+        let mut s = Settings::default();
+        set_app_language(&mut s, AppLanguage::Russian);
+        assert_eq!((s.language.as_str(), s.captions_lang.as_str()), ("ru", "ru"));
+
+        // captions set to something else on purpose stay as they are
+        s.captions_lang = "ja".into();
+        set_app_language(&mut s, AppLanguage::German);
+        assert_eq!((s.language.as_str(), s.captions_lang.as_str()), ("de", "ja"));
+        assert_eq!(s.app_language, AppLanguage::German);
     }
 }
