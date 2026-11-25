@@ -918,6 +918,24 @@ mod playback_tests {
     }
 
     #[gpui::test]
+    fn shutdown_requests_exit_when_watch_history_reporter_disconnects(cx: &mut TestAppContext) {
+        let video_id = "test-watch-history-shutdown-disconnect";
+        let (main, reports) = open_main_window_with_watch_history(cx, video_id);
+        main.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        let flushed = take_final_report_and_flush(&reports, video_id);
+        assert!(!cx.read(|cx| cx.has_global::<PlatformQuitRequested>()),
+            "platform exit must wait while the flush is pending");
+
+        drop(reports);
+        drop(flushed);
+        // Process the channel closure without advancing the shutdown deadline.
+        cx.run_until_parked();
+        assert!(cx.read(|cx| cx.has_global::<PlatformQuitRequested>()),
+            "closing the flush acknowledgement channel must release platform exit immediately");
+    }
+
+    #[gpui::test]
     fn shutdown_requests_exit_at_three_seconds_if_watch_history_flush_stalls(cx: &mut TestAppContext) {
         let video_id = "test-watch-history-shutdown-timeout";
         let (main, reports) = open_main_window_with_watch_history(cx, video_id);
