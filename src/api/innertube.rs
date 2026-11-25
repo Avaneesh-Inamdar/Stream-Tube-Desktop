@@ -183,6 +183,18 @@ pub(crate) fn parse_tile(t: &Value) -> Option<VideoItem> {
         .cloned();
     let channel_name = parts.iter().find(|p| Some(*p) != views.as_ref() && Some(*p) != published.as_ref()).cloned().unwrap_or_default();
     let duration_secs = badge.as_deref().and_then(parse_duration);
+    // A show (podcast, series) is a tile too: it opens a playlist, its badge counts
+    // episodes instead of giving a length, its title is the show's name and its two lines
+    // are the latest episode and the channel. Show that episode like a video, with the
+    // show and its size where the views would be.
+    let is_show = t.pointer("/onSelectCommand/browseEndpoint/browseId").and_then(Value::as_str).is_some_and(|b| b.starts_with("VL"));
+    let (title, channel_name, views) = if is_show && parts.len() == 2 && views.is_none() && published.is_none() {
+        let size = badge.clone().filter(|_| duration_secs.is_none());
+        let note = [Some(title), size].into_iter().flatten().collect::<Vec<_>>().join(" • ");
+        (parts[0].clone(), parts[1].clone(), Some(note))
+    } else {
+        (title, channel_name, views)
+    };
     Some(VideoItem {
         id,
         title,
@@ -1520,6 +1532,54 @@ mod heatmap_tests {
             let w = super::watch_next(id, None).unwrap();
             println!("{id}: heatmap={} chapters={}", w.heatmap.len(), w.chapters.len());
         }
+    }
+}
+
+#[cfg(test)]
+mod tile_tests {
+    use serde_json::json;
+
+    /// A show from the account's home feed: the tile's title is the show, the lines are the
+    /// latest episode and the channel, and the badge counts episodes.
+    #[test]
+    fn a_show_tile_reads_as_its_latest_episode() {
+        let tile = json!({
+            "contentType": "TILE_CONTENT_TYPE_VIDEO",
+            "contentId": "rTjvNXrxtas",
+            "onSelectCommand": { "browseEndpoint": { "browseId": "VLPLgZ8mBDMf-VTsBkM3YatTRCblZjbIBN0Q" } },
+            "header": { "tileHeaderRenderer": { "thumbnailOverlays": [
+                { "thumbnailOverlayTimeStatusRenderer": { "text": { "runs": [{ "text": "13" }, { "text": " episodes" }] } } }
+            ] } },
+            "metadata": { "tileMetadataRenderer": {
+                "title": { "simpleText": "Point" },
+                "lines": [
+                    { "lineRenderer": { "items": [{ "lineItemRenderer": { "text": { "simpleText": "Episode two" } } }] } },
+                    { "lineRenderer": { "items": [{ "lineItemRenderer": { "text": { "simpleText": "Some Channel" } } }] } }
+                ]
+            } }
+        });
+        let v = super::parse_tile(&tile).unwrap();
+        assert_eq!(v.title, "Episode two");
+        assert_eq!(v.channel_name, "Some Channel");
+        assert_eq!(v.views_text.as_deref(), Some("Point • 13 episodes"));
+        assert!(v.duration_text.is_none());
+    }
+
+    /// An ordinary tile keeps its own title, channel, views and date.
+    #[test]
+    fn a_video_tile_is_unchanged() {
+        let line = |t: &str| json!({ "lineRenderer": { "items": [{ "lineItemRenderer": { "text": { "simpleText": t } } }] } });
+        let tile = json!({
+            "contentType": "TILE_CONTENT_TYPE_VIDEO",
+            "contentId": "abc",
+            "onSelectCommand": { "watchEndpoint": { "videoId": "abc" } },
+            "metadata": { "tileMetadataRenderer": { "title": { "simpleText": "A video" }, "lines": [line("Some Channel"), line("340K views"), line("4 days ago")] } }
+        });
+        let v = super::parse_tile(&tile).unwrap();
+        assert_eq!(v.title, "A video");
+        assert_eq!(v.channel_name, "Some Channel");
+        assert_eq!(v.views_text.as_deref(), Some("340K views"));
+        assert_eq!(v.published_text.as_deref(), Some("4 days ago"));
     }
 }
 
