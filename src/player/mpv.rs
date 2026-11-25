@@ -100,7 +100,7 @@ fn lib() -> Result<&'static (Library, Fns)> {
             preload_vulkan_loader();
         }
         let mut candidates = Vec::new();
-        #[cfg(any(windows, target_os = "linux"))]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         if let Ok(exe) = std::env::current_exe() {
             if let Some(d) = exe.parent() {
                 #[cfg(windows)]
@@ -112,6 +112,28 @@ fn lib() -> Result<&'static (Library, Fns)> {
                     if p.is_file() {
                         candidates.push(p);
                     }
+                }
+                // macOS: libmpv shipped inside the .app bundle (Contents/Frameworks)
+                // — dyld does not search there by default, and a bare dylib name
+                // only resolves from system paths, so probe explicitly.
+                #[cfg(target_os = "macos")]
+                for &name in LIBRARY_NAMES {
+                    for rel in ["../Frameworks", "../Resources", "."] {
+                        let p = d.join(rel).join(name);
+                        if p.is_file() {
+                            candidates.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        // macOS: Homebrew locations (Intel + Apple Silicon)
+        #[cfg(target_os = "macos")]
+        for &name in LIBRARY_NAMES {
+            for dir in ["/opt/homebrew/lib", "/usr/local/lib"] {
+                let p = std::path::PathBuf::from(dir).join(name);
+                if p.is_file() {
+                    candidates.push(p);
                 }
             }
         }
