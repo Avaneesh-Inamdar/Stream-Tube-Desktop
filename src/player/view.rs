@@ -70,6 +70,7 @@ enum Menu {
     Speed,
     Captions,
     Audio,
+    Equalizer,
     Aspect,
 }
 
@@ -1638,6 +1639,11 @@ impl PlayerView {
                         let cur = translate(aspect::label(&store::settings_snapshot().aspect_mode)).to_string();
                         d.child(row("m-ar".into(), Some("ratio"), translate("Aspect ratio").into(), Some(cur), false).on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::Aspect); cx.notify() })))
                     })
+                    .child({
+                        let cur = translate(crate::player::controller::eq_label(&store::settings_snapshot().eq_preset)).to_string();
+                        row("m-eq".into(), Some("sliders-horizontal"), translate("Equalizer").into(), Some(cur), false)
+                            .on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::Equalizer); cx.notify() }))
+                    })
                     .child(
                         row("m-ao".into(), Some("headphones"), translate("Audio only (background)").into(), Some(translate(if audio_only { "On" } else { "Off" }).into()), false)
                             .on_click(cx.listener(move |t, _, _, cx| t.player.update(cx, |p, cx| p.set_audio_only(!audio_only, cx)))),
@@ -1768,6 +1774,19 @@ impl PlayerView {
                             this.player.update(cx, |p, cx| p.set_audio_track(Some(t3), cx));
                         })),
                     );
+                }
+            }
+            Menu::Equalizer => {
+                let cur = store::settings_snapshot().eq_preset.clone();
+                panel = panel.child(header("Equalizer", cx));
+                for &(value, label, _) in crate::player::controller::EQ_PRESETS {
+                    panel = panel.child(row(SharedString::from(format!("eq-{value}")), None, translate(label).into(), None, cur == value).on_click(cx.listener(move |t, _, _, cx| {
+                        t.menu = None;
+                        t.player.update(cx, |p, cx| {
+                            p.set_eq_preset(value);
+                            cx.notify();
+                        });
+                    })));
                 }
             }
             Menu::Aspect => {

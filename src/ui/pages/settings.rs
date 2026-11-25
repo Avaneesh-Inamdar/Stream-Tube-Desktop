@@ -936,6 +936,24 @@ impl SettingsPage {
                     })),
             );
         }
+        let mut hidden = div().flex().flex_col();
+        for (id, title) in s.hidden_videos.iter() {
+            let id2 = id.clone();
+            hidden = hidden.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .py_1()
+                    .child(div().min_w_0().flex_1().truncate().text_sm().child(title.clone()))
+                    .child(pill(SharedString::from(format!("unh-{id}")), None, "Unhide", cx).on_click(move |_, _, cx| {
+                        let i = id2.clone();
+                        store::update_settings(|s| s.hidden_videos.retain(|(v, _)| *v != i));
+                        cx.refresh_windows();
+                    })),
+            );
+        }
         div()
             .flex()
             .flex_col()
@@ -964,6 +982,11 @@ impl SettingsPage {
                 card(cx)
                     .child(row("Blocked channels", "", div(), cx))
                     .child(div().py_2().child(if s.blocked_channels.is_empty() { div().text_xs().text_color(p.text2).child(t("None")).into_any_element() } else { chans.into_any_element() })),
+            )
+            .child(
+                card(cx)
+                    .child(row("Hidden videos", "", div(), cx))
+                    .child(div().py_2().child(if s.hidden_videos.is_empty() { div().text_xs().text_color(p.text2).child(t("None")).into_any_element() } else { hidden.into_any_element() })),
             )
     }
 

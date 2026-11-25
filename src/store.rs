@@ -68,6 +68,8 @@ pub struct Settings {
     pub blocked_keywords: Vec<String>,
     /// (channel_id, name)
     pub blocked_channels: Vec<(String, String)>,
+    /// (video_id, title) hidden via "Not interested"
+    pub hidden_videos: Vec<(String, String)>,
     // Privacy
     pub history_enabled: bool,
     pub search_history_enabled: bool,
@@ -139,6 +141,8 @@ pub struct Settings {
     pub show_player_title: bool,
     /// group subscriptions feed videos into day buckets (Today, Yesterday, ...)
     pub feed_group_by_day: bool,
+    /// audio equalizer preset ("flat", "bass", "voice", "treble", "warm")
+    pub eq_preset: String,
 }
 
 impl Default for Settings {
@@ -203,6 +207,7 @@ impl Default for Settings {
             hide_explore: false,
             blocked_keywords: Vec::new(),
             blocked_channels: Vec::new(),
+            hidden_videos: Vec::new(),
             history_enabled: true,
             search_history_enabled: true,
             check_updates: true,
@@ -211,6 +216,7 @@ impl Default for Settings {
             feed_include_live: true,
             feed_group_by_day: true,
             show_player_title: false,
+            eq_preset: "flat".into(),
             download_dir: dirs::download_dir()
                 .map(|d| d.join("Stream Tube").to_string_lossy().into_owned())
                 .unwrap_or_default(),
@@ -1039,6 +1045,9 @@ pub fn is_filtered(v: &VideoItem, s: &Settings) -> bool {
         return true;
     }
     if s.hide_upcoming && v.is_upcoming {
+        return true;
+    }
+    if s.hidden_videos.iter().any(|(id, _)| id == &v.id) {
         return true;
     }
     if let Some(cid) = &v.channel_id {

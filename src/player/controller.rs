@@ -138,6 +138,22 @@ pub fn enqueue(v: VideoItem, cx: &mut App) {
     });
 }
 
+pub const EQ_PRESETS: &[(&str, &str, &str)] = &[
+    ("flat", "Flat", ""),
+    ("bass", "Bass boost", "equalizer=f=60:width_type=o:w=1.5:g=6,equalizer=f=150:width_type=o:w=1.5:g=4"),
+    ("voice", "Voice", "equalizer=f=300:width_type=o:w=1.5:g=-3,equalizer=f=1500:width_type=o:w=2:g=4,equalizer=f=3500:width_type=o:w=1.5:g=3"),
+    ("treble", "Treble boost", "equalizer=f=4000:width_type=o:w=1.5:g=4,equalizer=f=10000:width_type=o:w=1.5:g=6"),
+    ("warm", "Warm", "equalizer=f=100:width_type=o:w=1.5:g=3,equalizer=f=8000:width_type=o:w=1.5:g=-3"),
+];
+
+pub fn eq_label(id: &str) -> &'static str {
+    EQ_PRESETS.iter().find(|&&(k, _, _)| k == id).map(|&(_, l, _)| l).unwrap_or("Flat")
+}
+
+fn eq_filter(id: &str) -> &'static str {
+    EQ_PRESETS.iter().find(|&&(k, _, _)| k == id).map(|&(_, _, f)| f).unwrap_or("")
+}
+
 impl Player {
     fn new(cx: &mut Context<Self>) -> Self {
         let s = store::settings_snapshot();
@@ -249,6 +265,7 @@ impl Player {
             ("hr-seek", "yes"),
             ("force-seekable", "yes"),
             ("audio-client-name", "Stream Tube"),
+            ("af", eq_filter(&s.eq_preset)),
             ("sub-font-size", "42"),
             ("sub-border-size", "2.5"),
             ("sub-auto", "no"),
@@ -1347,6 +1364,15 @@ impl Player {
             }
         }
         store::update_settings(|s| s.volume = v.min(100.0));
+    }
+
+    pub fn set_eq_preset(&mut self, preset: &str) {
+        let filter = eq_filter(preset);
+        if let Some(m) = &self.mpv {
+            m.set("af", filter);
+        }
+        let p = if EQ_PRESETS.iter().any(|&(k, _, _)| k == preset) { preset } else { "flat" };
+        store::update_settings(|s| s.eq_preset = p.to_string());
     }
 
     pub fn toggle_mute(&mut self) {

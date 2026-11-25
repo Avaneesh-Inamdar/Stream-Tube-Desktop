@@ -214,6 +214,18 @@ pub fn video_menu_items(v: &VideoItem) -> Vec<MenuItem> {
     items.push(MenuItem::new("globe", t("Open on YouTube"), move |_, _| {
         let _ = open::that(format!("https://www.youtube.com/watch?v={id2}"));
     }));
+    let hid_id = v.id.clone();
+    let hid_title = v.title.clone();
+    items.push(MenuItem::new("eye-off", t("Not interested"), move |_, cx| {
+        let (id, title) = (hid_id.clone(), hid_title.clone());
+        store::update_settings(|s| {
+            if !s.hidden_videos.iter().any(|(i, _)| *i == id) {
+                s.hidden_videos.push((id, title));
+            }
+        });
+        toast(cx, t("Video hidden. Manage in Settings → Content filters"));
+        cx.refresh_windows();
+    }));
     if let Some(cid) = v.channel_id.clone() {
         let name = v.channel_name.clone();
         items.push(MenuItem::new("ban", t("Don't recommend channel"), move |_, cx| {
