@@ -770,7 +770,7 @@ impl Render for ShortsPage {
                         description: None,
                     })
                 });
-            let subs_text = ch.as_ref().and_then(|c| c.subscribers_text.clone()).filter(|s| !s.is_empty());
+            let subs_text = ch.as_ref().and_then(|c| c.subscribers_text.clone()).filter(|s| !s.is_empty() && !store::settings_snapshot().hide_subscriber_counts);
             let sub_btn = if show_subscribe {
                 ch.as_ref().map(|c| crate::ui::cards::subscribe_button("sh-sub".into(), c, store::is_subscribed(&c.id), cx))
             } else {

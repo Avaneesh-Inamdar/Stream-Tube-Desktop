@@ -700,7 +700,7 @@ impl WatchPage {
                                             .flex()
                                             .flex_col()
                                             .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(w.channel.name.clone()))
-                                            .when_some(w.channel.subscribers_text.clone(), |d, t| d.child(div().text_xs().text_color(p.text2).child(t))),
+                                            .when_some(w.channel.subscribers_text.clone().filter(|_| !store::settings_snapshot().hide_subscriber_counts), |d, t| d.child(div().text_xs().text_color(p.text2).child(t))),
                                     ),
                             )
                             .child(div().ml_3().child(subscribe_button("w-sub".into(), &channel, subscribed, cx))),
