@@ -688,6 +688,10 @@ impl AppView {
         }));
         window.on_window_should_close(cx, |window, _| {
             crate::save_window_bounds(window);
+            #[cfg(windows)]
+            if crate::tray::hide(window) {
+                return false;
+            }
             true
         });
         let mini_view = cx.new(|cx| PlayerView::new(p.clone(), true, cx));
@@ -3406,6 +3410,10 @@ fn strip_download_section(notes: &str) -> String {
 
 /// Brings a minimized window back (leaves maximized/normal windows as they are).
 pub fn restore_window(window: &mut Window) {
+    #[cfg(windows)]
+    if crate::tray::restore(window) {
+        return;
+    }
     if !window_minimized(window) {
         return;
     }
@@ -3465,11 +3473,17 @@ fn window_controls(maximized: bool, cx: &App) -> impl IntoElement {
             .on_click(move |_, window, cx| {
                 cx.stop_propagation();
                 match area {
-                    WindowControlArea::Min => window.minimize_window(),
+                    WindowControlArea::Min => {
+                        if !crate::tray::hide(window) {
+                            window.minimize_window();
+                        }
+                    }
                     WindowControlArea::Max => toggle_maximize(window),
                     WindowControlArea::Close => {
                         crate::save_window_bounds(window);
-                        window.remove_window();
+                        if !crate::tray::hide(window) {
+                            window.remove_window();
+                        }
                     }
                     WindowControlArea::Drag => {}
                 }

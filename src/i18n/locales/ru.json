@@ -263,6 +263,8 @@
   "Movie": "Фильм",
   "You": "Вы",
   "Watch later": "Смотреть позже",
+  "Minimize to tray": "Сворачивать в область уведомлений",
+  "Keep Stream Tube open in the Windows notification area when you minimize or close it": "Оставлять Stream Tube в области уведомлений при сворачивании или закрытии окна",
   "Favorites": "Избранное",
   "Podcasts": "Подкасты",
   "Courses": "Курсы",

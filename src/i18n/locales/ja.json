@@ -1,4 +1,6 @@
 {
+  "Minimize to tray": "通知領域に最小化",
+  "Keep Stream Tube open in the Windows notification area when you minimize or close it": "ウィンドウを最小化または閉じたときに Stream Tube を Windows の通知領域に残す",
   "Back": "戻る",
   "Search languages": "言語を検索",
   "original": "オリジナル",

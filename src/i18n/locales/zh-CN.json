@@ -1,4 +1,6 @@
 {
+  "Minimize to tray": "最小化到通知区域",
+  "Keep Stream Tube open in the Windows notification area when you minimize or close it": "最小化或关闭窗口时，让 Stream Tube 在 Windows 通知区域保持运行",
   "Back": "返回",
   "Search languages": "搜索语言",
   "original": "原始语言",

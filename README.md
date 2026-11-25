@@ -55,6 +55,7 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 - Resumes where you left off, remembers your last quality, autoplays the next video or loops, and plays whole playlists as a queue
 - A miniplayer while you browse that you can drag anywhere and resize (it remembers where you put it), a picture-in-picture window, theater mode and fullscreen. Theater mode is saved between launches and can be set in *Settings → Player*.
 - Keeps playing when minimized, or pauses and resumes when you come back. On Windows, active video playback keeps the display awake.
+- On Windows, *Settings → General → Minimize to tray* keeps Stream Tube in the notification area when you minimize or close the window. Use the tray icon to reopen or quit the app.
 - Live streams with live chat (Top chat or every message), and chatting when signed in
 - Shorts in a vertical player that moves to the next one by itself, or open them in the regular player. Shorts comments open their replies as threads too
 - Hold Space or press and hold the main video to play at 2x

@@ -653,6 +653,12 @@ impl SettingsPage {
             .child(row("Theme", "", self.choice("theme", &[("dark".to_string(), "Dark"), ("light".to_string(), "Light"), ("system".to_string(), "System")], s.theme.clone(), |s, v| s.theme = v, cx), cx))
             .child(row("Accent color", "Switches, highlights, progress and the seek bar", accent_swatches(s.accent, cx), cx))
             .child(row("Start page", "", self.choice("start", &[("home".to_string(), "Home"), ("subscriptions".to_string(), "Subscriptions"), ("history".to_string(), "History")], s.start_page.clone(), |s, v| s.start_page = v, cx), cx))
+            .when(cfg!(windows), |card| card.child(row(
+                "Minimize to tray",
+                "Keep Stream Tube open in the Windows notification area when you minimize or close it",
+                switch("minimize-to-tray", s.minimize_to_tray, |s, v| s.minimize_to_tray = v, cx),
+                cx,
+            )))
             .child(row("Interface size", "", self.choice("scale", &[(0.9f32, "90%"), (1.0, "100%"), (1.1, "110%"), (1.25, "125%")], s.ui_scale, |s, v| s.ui_scale = v, cx), cx))
             .child(row(
                 "Always show scrollbars",
