@@ -154,8 +154,8 @@ pub fn thumbnail(v: &VideoItem, url: String, w: Pixels, h: Pixels, radius: Pixel
         })
 }
 
-pub fn download_menu_items(video: &VideoItem) -> Vec<MenuItem> {
-    crate::downloads::FORMATS
+pub fn download_menu_items(video: &VideoItem, anchor: Point<Pixels>) -> Vec<MenuItem> {
+    let mut items: Vec<_> = crate::downloads::FORMATS
         .iter()
         .map(|&(format, label)| {
             let video = video.clone();
@@ -164,7 +164,14 @@ pub fn download_menu_items(video: &VideoItem) -> Vec<MenuItem> {
                 crate::downloads::start(video.clone(), Some(format.into()), cx);
             })
         })
-        .collect()
+        .collect();
+    for &(format, label) in crate::downloads::TRANSCRIPTS {
+        let video = video.clone();
+        items.push(MenuItem::new("captions", t(label), move |window, cx| {
+            super::transcript_menu::open_picker(anchor, &video, format, window, cx);
+        }));
+    }
+    items
 }
 
 pub fn video_menu_items(v: &VideoItem) -> Vec<MenuItem> {

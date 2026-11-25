@@ -603,7 +603,7 @@ impl Render for PlayerView {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |ev, window, cx| {
                         cx.stop_propagation();
-                        open_menu(ev.position(), download_menu_items(&video), window, cx);
+                        open_menu(ev.position(), download_menu_items(&video, ev.position()), window, cx);
                     }),
             );
         }

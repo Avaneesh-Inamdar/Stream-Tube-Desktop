@@ -96,6 +96,7 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 
 **Downloads**
 - Download video or audio in any quality through yt-dlp, with SponsorBlock chapters, from a download manager with progress
+- Save a transcript as plain text (.txt) or timestamped subtitles (.srt) from the Download menu. A single caption track downloads immediately. If several tracks are available, choose the language; automatically generated tracks are labeled in the picker.
 - Without yt-dlp it falls back to the built-in downloader (360p/720p or audio)
 - yt-dlp and FFmpeg can be fetched from inside the app, on Windows and Linux (*Settings → Downloads*), with a progress bar, so nothing has to be installed by hand
 
