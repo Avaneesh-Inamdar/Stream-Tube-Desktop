@@ -1272,14 +1272,20 @@ impl PlayerView {
                             .id("vol-slider")
                             .relative()
                             .w(if compact { px(40.) } else { px(64.) })
-                            .h(px(4.))
+                            .py_2()
                             .mx_2()
-                            .rounded_full()
-                            .bg(hsla(0., 0., 1., 0.3))
                             .cursor_pointer()
                             .child(canvas(move |b, _, _| vol_b.set(b), |_, _, _, _| {}).absolute().size_full())
-                            .child(div().h_full().rounded_full().w(relative(vol_frac)).bg(white()))
-                            .child(div().absolute().top(px(-4.)).left(relative(vol_frac)).ml(px(-6.)).size(px(12.)).rounded_full().bg(white()))
+                            .child(
+                                div()
+                                    .relative()
+                                    .w_full()
+                                    .h(px(4.))
+                                    .rounded_full()
+                                    .bg(hsla(0., 0., 1., 0.3))
+                                    .child(div().h_full().rounded_full().w(relative(vol_frac)).bg(white()))
+                                    .child(div().absolute().top(px(-4.)).left(relative(vol_frac)).ml(px(-6.)).size(px(12.)).rounded_full().bg(white())),
+                            )
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, ev: &MouseDownEvent, _, cx| {
