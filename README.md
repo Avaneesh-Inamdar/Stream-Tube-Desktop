@@ -89,6 +89,7 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 **Your data stays yours**
 - Subscriptions can live locally. The feed is built by fetching each channel directly, no account needed
 - Sign in with your Google account to get your own Home feed, subscriptions, playlists, likes and subscribe button. Stream Tube opens youtube.com/activate in your default browser with the sign-in code already filled in, so you only pick your account and allow access. Stream Tube imports your YouTube watch history and recent searches automatically after sign-in
+- Signed in, videos play through YouTube's TV client as your account when [Deno](https://deno.com) or [Node.js](https://nodejs.org) is installed: no "confirm you're not a bot" checks, and age-restricted videos play. The runtime solves the small JavaScript puzzles in YouTube's stream URLs, with the solver scripts from [yt-dlp/ejs](https://github.com/yt-dlp/ejs)
 - To send videos and resume positions from Stream Tube back to YouTube, connect a browser session under *Settings → General → YouTube watch history*. That session supports watch history in both directions. Sign in with a fresh browser profile (Chrome, Edge, Brave or Chromium) that is deleted afterwards, or load a `cookies.txt` file
 - Your YouTube watch history refreshes in the background and when you return to Stream Tube
 - History, watch later, favourites and playlists are stored in a local SQLite database, and you can pause or clear history at any time
@@ -107,7 +108,7 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 **Network**
 - A proxy setting (HTTP or SOCKS) that covers browsing, playback, thumbnails, downloads and sign-in
 - On Linux, a choice of Wayland or X11, with an automatic switch to X11 if a Wayland window never shows up (ChromeOS)
-- IPv4-only mode applies to new requests as soon as you change it. You can also choose a playback client (visionOS, Android VR or yt-dlp).
+- IPv4-only mode applies to new requests as soon as you change it. You can also choose a playback client (TV, visionOS, Android VR or yt-dlp).
 
 **Looks the way you like**
 - Dark, light or follow Windows
@@ -296,8 +297,9 @@ src/
 
 ## Known issues
 
-- YouTube sometimes answers with "Sign in to confirm you're not a bot". When that
-  happens, signing in inside the app or updating yt-dlp usually fixes it.
+- YouTube sometimes answers with "Sign in to confirm you're not a bot". Signing in
+  inside the app with Deno or Node.js installed avoids it; otherwise updating yt-dlp
+  usually fixes it.
 - Windows is the main platform. The Linux build is new and less tested; macOS isn't built yet.
 
 ## Contributing

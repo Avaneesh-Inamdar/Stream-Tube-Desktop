@@ -1,10 +1,10 @@
 //! Browser sign-in: the YouTube website's own session cookies.
 //!
-//! The TV sign-in can read the account (feeds, history, likes), but YouTube no
-//! longer lets it play videos, so nothing watched through it reaches the account.
-//! With the website's cookies the app reports playback the way youtube.com does:
-//! the video lands in the account's watch history and the position you stopped at
-//! is what other devices resume from.
+//! The TV sign-in reads the account (feeds, history, likes) and, through the TV
+//! client in `streams`, plays videos as the account when a JavaScript runtime is
+//! installed. Without one, the website's cookies are the way to report playback
+//! the way youtube.com does: the video lands in the account's watch history and
+//! the position you stopped at is what other devices resume from.
 //!
 //! Signing in happens in a real browser (Edge, Chrome, Brave or Chromium) started
 //! with its own empty profile. The app reads that profile's youtube.com cookies over

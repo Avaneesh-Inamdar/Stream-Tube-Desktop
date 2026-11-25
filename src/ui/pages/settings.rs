@@ -1036,6 +1036,7 @@ impl SettingsPage {
                     "sb2",
                     &[
                         ("auto".to_string(), "Auto (recommended)"),
+                        ("tv".to_string(), "TV (plays with your sign-in)"),
                         ("visionos".to_string(), "visionOS"),
                         ("android_vr".to_string(), "Android VR"),
                         ("ytdlp".to_string(), "yt-dlp"),
