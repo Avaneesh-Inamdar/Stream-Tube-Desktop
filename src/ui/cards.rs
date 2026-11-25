@@ -138,14 +138,18 @@ pub fn thumbnail(v: &VideoItem, url: String, w: Pixels, h: Pixels, radius: Pixel
         .children(badge(v, cx))
         .when_some(progress.filter(|p| *p > 0.01), |d, pr| {
             d.child(
+                // a rectangle would stick out past the rounded bottom corners, so the bar
+                // stops short of them
                 div()
                     .absolute()
                     .bottom_0()
-                    .left_0()
-                    .w_full()
+                    .left(radius * 0.5)
+                    .right(radius * 0.5)
                     .h(px(4.))
+                    .rounded_full()
+                    .overflow_hidden()
                     .bg(hsla(0., 0., 0.6, 0.6))
-                    .child(div().h_full().w(relative(pr)).bg(p.accent)),
+                    .child(div().h_full().w(relative(pr)).rounded_full().bg(p.accent)),
             )
         })
 }
