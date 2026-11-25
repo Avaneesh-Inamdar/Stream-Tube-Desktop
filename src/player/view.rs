@@ -65,6 +65,7 @@ pub struct PlayerView {
     pub pip: bool,
     show_until: Instant,
     hovering: bool,
+    hovering_controls: bool,
     menu: Option<Menu>,
     menu_closed_at: std::time::Instant,
     seek_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -90,8 +91,10 @@ pub struct PlayerView {
     pip_move_echo: bool,
     /// the player's area, for placing annotations over the picture
     area: Rc<Cell<Bounds<Pixels>>>,
-    /// the annotation under the pointer (shows a highlight's rollover text)
+    /// the area's annotation under the pointer (shows a highlight's rollover text)
     hover_annotation: Option<String>,
+    was_playing: bool,
+    pointer_hidden: bool,
     _sub: Subscription,
 }
 
@@ -105,6 +108,7 @@ impl PlayerView {
             pip: false,
             show_until: Instant::now() + Duration::from_secs(3),
             hovering: false,
+            hovering_controls: false,
             menu: None,
             menu_closed_at: std::time::Instant::now() - std::time::Duration::from_secs(5),
             seek_bounds: Rc::new(Cell::new(Bounds::default())),
@@ -122,23 +126,22 @@ impl PlayerView {
             pip_move_echo: false,
             area: Rc::new(Cell::new(Bounds::default())),
             hover_annotation: None,
+            was_playing: false,
+            pointer_hidden: false,
             _sub: sub,
         }
     }
 
-    fn poke(&mut self, cx: &mut Context<Self>) {
-        let hide = Duration::from_millis(store::settings_snapshot().controls_hide_ms.max(800));
+    fn schedule_hide(&mut self, hide: Duration, cx: &mut Context<Self>) {
         self.show_until = Instant::now() + hide;
-        cx.notify();
         let until = self.show_until;
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(hide + Duration::from_millis(100)).await;
+            cx.background_executor().timer(hide + Duration::from_millis(80)).await;
             let _ = this.update(cx, |v, cx| {
                 if v.show_until == until {
-                    // the pointer goes with the controls while it's over the video,
-                    // and comes back with them when the mouse moves
                     let paused = v.player.read(cx).paused;
                     if v.hovering && !v.mini && !v.controls_visible(paused) {
+                        v.pointer_hidden = true;
                         hide_pointer_until_moved();
                     }
                     cx.notify();
@@ -146,6 +149,13 @@ impl PlayerView {
             });
         })
         .detach();
+    }
+
+    fn poke(&mut self, cx: &mut Context<Self>) {
+        self.pointer_hidden = false;
+        let hide = Duration::from_millis(store::settings_snapshot().controls_hide_ms.max(800));
+        self.schedule_hide(hide, cx);
+        cx.notify();
     }
 
     fn frac_in(b: Bounds<Pixels>, x: Pixels) -> f32 {
@@ -158,7 +168,7 @@ impl PlayerView {
     }
 
     fn controls_visible(&self, paused: bool) -> bool {
-        paused || self.menu.is_some() || self.drag_seek.is_some() || Instant::now() < self.show_until
+        paused || self.menu.is_some() || self.drag_seek.is_some() || self.hovering_controls || Instant::now() < self.show_until
     }
 
     fn finish_pointer_press(&mut self, cx: &mut Context<Self>) {
@@ -171,7 +181,7 @@ impl PlayerView {
 
 /// Hides the mouse pointer until it moves again. GPUI has no public call for
 /// this, so it's per platform; Linux keeps the pointer for now.
-fn hide_pointer_until_moved() {
+pub(crate) fn hide_pointer_until_moved() {
     #[cfg(target_os = "macos")]
     unsafe {
         let _: () = objc2::msg_send![objc2::class!(NSCursor), setHiddenUntilMouseMoves: true];
@@ -210,19 +220,44 @@ impl Render for PlayerView {
         let video = pl.video.clone();
         let mpv = pl.mpv();
         let vsize = pl.video_size;
+        let auto_trim = pl.auto_crop.trim;
+        let pl_loading = pl.loading;
+        let playing = !paused && !loading && frame.is_some() && !mini && error.is_none();
+        if playing && !self.was_playing {
+            self.was_playing = true;
+            if !self.hovering_controls && self.menu.is_none() && self.drag_seek.is_none() {
+                self.schedule_hide(Duration::from_millis(600), cx);
+            }
+        } else if !playing {
+            self.was_playing = false;
+            self.pointer_hidden = false;
+        }
         let show = self.controls_visible(paused) || mini && self.hovering;
+        if show {
+            self.pointer_hidden = false;
+        } else if playing && self.hovering && !self.pointer_hidden {
+            self.pointer_hidden = true;
+            hide_pointer_until_moved();
+        }
         let ui = *cx.global::<UiState>();
+        let theater = store::settings_snapshot().theater_mode;
         let scale = window.scale_factor();
+        let player_radius = if ui.fullscreen || theater || self.pip {
+            px(0.)
+        } else {
+            px(store::settings_snapshot().thumb_radius)
+        };
         let view = cx.entity().downgrade();
         let aspect = aspect::Mode::parse(&store::settings_snapshot().aspect_mode);
-        let auto_trim = pl.auto_crop.trim;
-        let short_cover = video.as_ref().filter(|_| ui.shorts && !mini && !self.pip && !audio_only && (pl.loading || frame.is_none()) && error.is_none());
+        let short_cover = video.as_ref().filter(|_| ui.shorts && !mini && !self.pip && !audio_only && (pl_loading || frame.is_none()) && error.is_none());
         let picture = frame.clone().filter(|_| !audio_only && short_cover.is_none());
 
         // ── video surface ──
         let surface = div()
             .absolute()
             .inset_0()
+            .rounded(player_radius)
+            .overflow_hidden()
             .bg(black())
             .child(
                 canvas(
@@ -250,7 +285,7 @@ impl Render for PlayerView {
                             let (region, fit) = aspect::resolve(aspect, fsize, (vsize.0 as f32, vsize.1 as f32), auto_trim);
                             let (x, y, w, h) = aspect::layout((f32::from(bounds.size.width), f32::from(bounds.size.height)), fsize, region, fit);
                             let image = Bounds::new(bounds.origin + point(px(x), px(y)), size(px(w), px(h)));
-                            let _ = window.paint_image(bounds, image, Corners::default(), f, 0, false);
+                            let _ = window.paint_image(bounds, image, Corners::all(player_radius), f, 0, false);
                         }
                         window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
@@ -263,7 +298,7 @@ impl Render for PlayerView {
                 .size_full(),
             )
             .when_some(short_cover, |d, v| {
-                d.child(img(SharedString::from(v.thumbnail.clone())).absolute().size_full().object_fit(ObjectFit::Cover))
+                d.child(img(SharedString::from(v.thumbnail.clone())).absolute().size_full().rounded(player_radius).object_fit(ObjectFit::Cover))
             })
             .when(audio_only, |d| {
                 d.when_some(video.as_ref().map(|v| v.thumbnail.clone()), |d, t| {
@@ -274,7 +309,7 @@ impl Render for PlayerView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(img(SharedString::from(t)).h(relative(0.7)).rounded_xl().object_fit(ObjectFit::Contain))
+                            .child(img(SharedString::from(t)).h(relative(0.7)).rounded(player_radius).object_fit(ObjectFit::Contain))
                             .child(
                                 div()
                                     .absolute()
@@ -300,13 +335,22 @@ impl Render for PlayerView {
             .id(if mini { "player-mini" } else { "player-main" })
             .relative()
             .size_full()
+            .rounded(player_radius)
             .overflow_hidden()
             .bg(black())
             .on_hover(cx.listener(|this, h: &bool, _, cx| {
                 this.hovering = *h;
                 if !*h {
                     this.hover_frac = None;
+                    this.hovering_controls = false;
+                    this.pointer_hidden = false;
                     this.finish_pointer_press(cx);
+                } else {
+                    let paused = this.player.read(cx).paused;
+                    if !paused && !this.mini && !this.controls_visible(paused) {
+                        this.pointer_hidden = true;
+                        hide_pointer_until_moved();
+                    }
                 }
                 cx.notify();
             }))
@@ -655,7 +699,7 @@ impl Render for PlayerView {
             self.vol_hover = false;
         }
         if show {
-            root = root.child(self.render_controls(time, duration, ui, window, cx));
+            root = root.child(self.render_controls(time, duration, player_radius, ui, window, cx));
         }
         if let Some(m) = self.menu {
             root = root.child(self.render_menu(m, cx));
@@ -879,6 +923,8 @@ impl PlayerView {
                                 div()
                                     .id("mini-prev")
                                     .cursor_pointer()
+                                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Previous").build(window, cx))
+                                    .tooltip_show_delay(Duration::from_millis(1200))
                                     .child(icon("skip-back").size_6().text_color(white()))
                                     .on_click(move |_, _, cx| {
                                         cx.stop_propagation();
@@ -895,6 +941,8 @@ impl PlayerView {
                                 div()
                                     .id("mini-play")
                                     .cursor_pointer()
+                                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(if paused { "Play" } else { "Pause" }).build(window, cx))
+                                    .tooltip_show_delay(Duration::from_millis(1200))
                                     .child(icon(if paused { "play" } else { "pause" }).size_10().text_color(white()))
                                     .on_click(move |_, _, cx| {
                                         cx.stop_propagation();
@@ -908,6 +956,8 @@ impl PlayerView {
                                 div()
                                     .id("mini-next")
                                     .cursor_pointer()
+                                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Next").build(window, cx))
+                                    .tooltip_show_delay(Duration::from_millis(1200))
                                     .child(icon("skip-forward").size_6().text_color(white()))
                                     .on_click(move |_, _, cx| {
                                         cx.stop_propagation();
@@ -931,6 +981,8 @@ impl PlayerView {
                                     .rounded_full()
                                     .cursor_pointer()
                                     .hover(|s| s.bg(hsla(0., 0., 1., 0.2)))
+                                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Expand").build(window, cx))
+                                    .tooltip_show_delay(Duration::from_millis(1200))
                                     .child(icon("maximize-2").size_5().text_color(white()))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         cx.stop_propagation();
@@ -946,6 +998,8 @@ impl PlayerView {
                                 .rounded_full()
                                 .cursor_pointer()
                                 .hover(|s| s.bg(hsla(0., 0., 1., 0.2)))
+                                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Close").build(window, cx))
+                                .tooltip_show_delay(Duration::from_millis(1200))
                                 .child(icon("x").size_5().text_color(white()))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     cx.stop_propagation();
@@ -966,7 +1020,7 @@ impl PlayerView {
             )
     }
 
-    fn render_controls(&mut self, time: f64, duration: f64, ui: UiState, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_controls(&mut self, time: f64, duration: f64, player_radius: Pixels, ui: UiState, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = pal(cx);
         let pl = self.player.read(cx);
         let paused = pl.paused;
@@ -1158,7 +1212,7 @@ impl PlayerView {
         });
 
         let pp = self.player.clone();
-        let ctl_btn = |id: &'static str, name: &str| {
+        let ctl_btn = |id: &'static str, name: &str, tip: &'static str| {
             div()
                 .id(id)
                 .flex()
@@ -1169,6 +1223,8 @@ impl PlayerView {
                 .rounded_full()
                 .cursor_pointer()
                 .hover(|s| s.bg(hsla(0., 0., 1., 0.15)))
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(translate(tip)).build(window, cx))
+                .tooltip_show_delay(Duration::from_millis(1200))
                 .child(icon(name).size(if compact { px(20.) } else { px(24.) }).text_color(white()))
         };
         let vol_icon = if muted || volume <= 0.0 { "volume-x" } else if volume < 50.0 { "volume-1" } else { "volume-2" };
@@ -1185,12 +1241,12 @@ impl PlayerView {
             .min_w_0()
             .items_center()
             .gap_1()
-            .child(ctl_btn("c-play", if paused { "play" } else { "pause" }).on_click({
+            .child(ctl_btn("c-play", if paused { "play" } else { "pause" }, if paused { "Play" } else { "Pause" }).on_click({
                 let pp = pp.clone();
                 move |_, _, cx| pp.update(cx, |p, cx| { p.toggle_pause(); cx.notify() })
             }))
             .when(has_next, |d| {
-                d.child(ctl_btn("c-next", "skip-forward").on_click(|_, window, cx| crate::ui::app::play_next(window, cx)))
+                d.child(ctl_btn("c-next", "skip-forward", "Next").on_click(|_, window, cx| crate::ui::app::play_next(window, cx)))
             })
             .child(
                 div()
@@ -1205,7 +1261,7 @@ impl PlayerView {
                             cx.notify();
                         }
                     }))
-                    .child(ctl_btn("c-mute", vol_icon).on_click({
+                    .child(ctl_btn("c-mute", vol_icon, if muted || volume <= 0.0 { "Unmute" } else { "Mute" }).on_click({
                         let pp = pp.clone();
                         move |_, _, cx| pp.update(cx, |p, cx| { p.toggle_mute(); cx.notify() })
                     }))
@@ -1306,7 +1362,12 @@ impl PlayerView {
             })
             .when(has_captions, |d| {
                 d.child(
-                    ctl_btn("c-cc", if caption_on { "captions" } else { "captions-off" }).on_click(cx.listener(|this, _, _, cx| {
+                    ctl_btn(
+                        "c-cc",
+                        if caption_on { "captions" } else { "captions-off" },
+                        if caption_on { "Turn off captions" } else { "Subtitles/closed captions" },
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
                         let caption = this.player.read(cx).caption;
                         if caption.is_some() {
                             this.player.update(cx, |p, cx| p.set_caption(None, cx));
@@ -1318,39 +1379,60 @@ impl PlayerView {
                 )
             })
             .when(!narrow && !self.player.read(cx).audio_only, |d| {
-                d.child(ctl_btn("c-shot", "camera").on_click(cx.listener(|this, _, _, cx| {
+                d.child(ctl_btn("c-shot", "camera", "Screenshot").on_click(cx.listener(|this, _, _, cx| {
                     this.player.update(cx, |p, cx| p.screenshot(cx));
                     this.poke(cx);
                 })))
             })
-            .child(ctl_btn("c-settings", "settings").on_click(cx.listener(|this, _, _, cx| {
+            .child(ctl_btn("c-settings", "settings", "Settings").on_click(cx.listener(|this, _, _, cx| {
                 // a mouse-down here already closed an open menu (outside click); don't reopen it
                 let just_closed = this.menu_closed_at.elapsed() < std::time::Duration::from_millis(400);
                 this.menu = if this.menu.is_some() || just_closed { None } else { Some(Menu::Main) };
                 cx.notify();
             })))
             .when(!self.pip && !narrow, |d| {
-                d.child(ctl_btn("c-mini", "picture-in-picture-2").on_click(|_, window, cx| {
+                d.child(ctl_btn("c-mini", "picture-in-picture-2", "Miniplayer").on_click(|_, window, cx| {
                     crate::ui::app::go_back_keep_playing(window, cx);
                 }))
             })
             .when(!self.pip && !narrow, |d| {
-                d.child(ctl_btn("c-pip", "picture-in-picture").on_click(|_, _, cx| crate::ui::pip::open(cx)))
+                d.child(ctl_btn("c-pip", "picture-in-picture", "Picture-in-Picture").on_click(|_, _, cx| crate::ui::pip::open(cx)))
             })
             .when(!ui.fullscreen && !self.pip && !narrow, |d| {
-                d.child(ctl_btn("c-theater", "rectangle-horizontal").on_click(|_, _, cx| {
-                    crate::ui::app::toggle_theater_mode(cx);
-                }))
+                d.child(
+                    ctl_btn(
+                        "c-theater",
+                        "rectangle-horizontal",
+                        if store::settings_snapshot().theater_mode { "Default view" } else { "Theater mode" },
+                    )
+                    .on_click(|_, _, cx| {
+                        crate::ui::app::toggle_theater_mode(cx);
+                    }),
+                )
             })
             .when(!self.pip && !narrow, |d| {
-                d.child(ctl_btn("c-wfs", if ui.windowed { "shrink" } else { "expand" }).on_click(|_, window, cx| {
-                    crate::ui::app::toggle_windowed_fullscreen(window, cx);
-                }))
+                d.child(
+                    ctl_btn(
+                        "c-wfs",
+                        if ui.windowed { "shrink" } else { "expand" },
+                        if ui.windowed { "Exit windowed full screen" } else { "Windowed full screen" },
+                    )
+                    .on_click(|_, window, cx| {
+                        crate::ui::app::toggle_windowed_fullscreen(window, cx);
+                    }),
+                )
             })
             .when(!self.pip, |d| {
-                d.child(ctl_btn("c-fs", if ui.fullscreen { "minimize" } else { "maximize" }).on_click(|_, window, cx| {
-                    crate::ui::app::toggle_fullscreen(window, cx);
-                }))
+                d.child(
+                    ctl_btn(
+                        "c-fs",
+                        if ui.fullscreen { "minimize" } else { "maximize" },
+                        if ui.fullscreen { "Exit full screen" } else { "Full screen" },
+                    )
+                    .on_click(|_, window, cx| {
+                        crate::ui::app::toggle_fullscreen(window, cx);
+                    }),
+                )
             });
 
         let _ = p;
@@ -1359,6 +1441,7 @@ impl PlayerView {
             .left_0()
             .right_0()
             .bottom_0()
+            .rounded_b(player_radius)
             .flex()
             .flex_col()
             .px_3()
@@ -1400,6 +1483,10 @@ impl PlayerView {
                     .items_center()
                     .justify_between()
                     .h_12()
+                    .on_hover(cx.listener(|this, h: &bool, _, cx| {
+                        this.hovering_controls = *h;
+                        cx.notify();
+                    }))
                     // keep clicks on the control row from reaching the click-to-pause layer,
                     // and presses from starting its press-and-hold 2x timer: the row eats
                     // the release, so the layer would think the button is still held

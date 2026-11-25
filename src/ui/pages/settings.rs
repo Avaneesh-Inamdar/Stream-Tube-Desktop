@@ -729,6 +729,12 @@ impl SettingsPage {
             })
             .child(row("Preview", "", caption_preview(&s), cx))
             .child(row("Hide controls after", "", self.choice("hide", &[(1500u64, "1.5s"), (2500, "2.5s"), (4000, "4s"), (8000, "8s")], s.controls_hide_ms, |s, v| s.controls_hide_ms = v, cx), cx))
+            .child(row(
+                "Up next thumbnail size",
+                "Size of video thumbnails on the right side of the player",
+                self.choice("relthumb", &[(168.0f32, "Small"), (210.0, "Medium"), (250.0, "Large"), (290.0, "Extra large")], s.related_thumb_width, |s, v| s.related_thumb_width = v, cx),
+                cx,
+            ))
             .child(row("Seek bar preview thumbnails", "", switch("sbprev", s.show_storyboard, |s, v| s.show_storyboard = v, cx), cx))
             .child(row("Arrow key seek step", "", self.choice("step", &[(5.0f64, "5s"), (10.0, "10s"), (15.0, "15s"), (30.0, "30s")], s.seek_step, |s, v| s.seek_step = v, cx), cx))
             .child(row(
@@ -1266,6 +1272,7 @@ impl Render for SettingsPage {
                     .child(t(name).to_string())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.section = sec;
+                        this.scroll.set_offset(point(px(0.), px(0.)));
                         cx.notify();
                     })),
             );
@@ -1291,11 +1298,27 @@ impl Render for SettingsPage {
                 all = all.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text2).child(t(name).to_uppercase())).child(render_section(self, *sec, cx));
             }
             QUERY.with(|q| q.borrow_mut().clear());
-            return page_scroll("settings-scroll", &self.scroll).child(
-                div().flex().justify_center().gap_8().px_6().pt_6().pb_24().child(nav).child(
-                    div().flex().flex_col().gap_4().flex_1().max_w(px(860.)).min_w_0().child(section_title(tf!("Results for “{0}”", query), cx).text_2xl()).child(all),
-                ),
-            );
+            return div()
+                .size_full()
+                .flex()
+                .justify_center()
+                .gap_8()
+                .px_6()
+                .pt_6()
+                .child(nav)
+                .child(
+                    div().flex_1().max_w(px(860.)).min_w_0().h_full().child(
+                        page_scroll("settings-scroll", &self.scroll).child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_4()
+                                .pb_24()
+                                .child(section_title(tf!("Results for “{0}”", query), cx).text_2xl())
+                                .child(all),
+                        ),
+                    ),
+                );
         }
         let content = match self.section {
             Section::General => self.general(cx),
@@ -1312,18 +1335,27 @@ impl Render for SettingsPage {
             Section::About => self.about(cx),
         };
         let title = SECTIONS.iter().find(|s| s.0 == self.section).map(|s| t(s.1)).unwrap_or("");
-        page_scroll("settings-scroll", &self.scroll).child(
-            div().flex().justify_center().gap_8().px_6().pt_6().pb_24().child(nav).child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .flex_1().max_w(px(860.))
-                    .min_w_0()
-                    .child(section_title(title, cx).text_2xl())
-                    .child(content),
-            ),
-        )
+        div()
+            .size_full()
+            .flex()
+            .justify_center()
+            .gap_8()
+            .px_6()
+            .pt_6()
+            .child(nav)
+            .child(
+                div().flex_1().max_w(px(860.)).min_w_0().h_full().child(
+                    page_scroll("settings-scroll", &self.scroll).child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_4()
+                            .pb_24()
+                            .child(section_title(title, cx).text_2xl())
+                            .child(content),
+                    ),
+                ),
+            )
     }
 }
 

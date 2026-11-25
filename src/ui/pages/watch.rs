@@ -976,29 +976,31 @@ impl WatchPage {
                         let open = replies.is_some();
                         let cid2 = cid.clone();
                         d.child(
-                            div()
-                                .id(SharedString::from(format!("cr-btn-{}", c.id)))
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .px_3()
-                                .py_1p5()
-                                .rounded_full()
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(p.link)
-                                .cursor_pointer()
-                                .hover(move |s| s.bg(p.hover))
-                                .child(icon(if open { "chevron-up" } else { "chevron-down" }).size_4().text_color(p.link))
-                                .child(format!("{} {}", c.reply_count, if c.reply_count == "1" { "reply" } else { "replies" }))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if this.replies.contains_key(&cid2) {
-                                        this.replies.remove(&cid2);
-                                        cx.notify();
-                                    } else {
-                                        this.load_replies(cid2.clone(), tok.clone(), cx);
-                                    }
-                                })),
+                            div().flex().child(
+                                div()
+                                    .id(SharedString::from(format!("cr-btn-{}", c.id)))
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .px_3()
+                                    .py_1p5()
+                                    .rounded_full()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(p.link)
+                                    .cursor_pointer()
+                                    .hover(move |s| s.bg(p.hover))
+                                    .child(icon(if open { "chevron-up" } else { "chevron-down" }).size_4().text_color(p.link))
+                                    .child(format!("{} {}", c.reply_count, if c.reply_count == "1" { "reply" } else { "replies" }))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if this.replies.contains_key(&cid2) {
+                                            this.replies.remove(&cid2);
+                                            cx.notify();
+                                        } else {
+                                            this.load_replies(cid2.clone(), tok.clone(), cx);
+                                        }
+                                    })),
+                            ),
                         )
                     }),
             )
@@ -1386,8 +1388,8 @@ impl WatchPage {
                         .child(translate("Autoplay"))
                         .child(
                             div()
-                                .w(px(36.))
-                                .h(px(14.))
+                                .w(px(43.))
+                                .h(px(18.))
                                 .rounded_full()
                                 .bg(if autoplay { p.text2 } else { p.hover })
                                 .relative()
@@ -1407,6 +1409,8 @@ impl WatchPage {
                 Item::Video(v) => col = col.child(compact_row(v, false, None, cx)),
                 Item::Playlist(pl) => {
                     let id = pl.id.clone();
+                    let thumb_w = px(s.related_thumb_width);
+                    let thumb_h = thumb_w * (9. / 16.);
                     col = col.child(
                         div()
                             .id(SharedString::from(format!("rp-{}", pl.id)))
@@ -1415,7 +1419,7 @@ impl WatchPage {
                             .p_1()
                             .cursor_pointer()
                             .on_click(move |_, window, cx| navigate(Route::Playlist(id.clone()), window, cx))
-                            .child(playlist_thumb(pl.thumbnail.clone(), pl.video_count_text.clone(), px(168.), px(94.), cx))
+                            .child(playlist_thumb(pl.thumbnail.clone(), pl.video_count_text.clone(), thumb_w, thumb_h, cx))
                             .child(
                                 div()
                                     .flex()
@@ -1474,7 +1478,8 @@ impl Render for WatchPage {
         }
         let vp = ui.viewport;
         let avail = vp.width - px(48.);
-        let side_w = px(402.);
+        let s = store::settings_snapshot();
+        let side_w = px((s.related_thumb_width + 234.0).clamp(402.0, 540.0));
         let two_col = avail > px(1000.);
         let primary_w = if two_col { (avail - side_w - px(24.)).min(px(1280.)) } else { avail };
         let player_h = if theater {
@@ -1521,7 +1526,7 @@ impl Render for WatchPage {
             .w(if theater { vp.width } else { primary_w })
             .h(player_h)
             .flex_none()
-            .when(!theater, |d| d.rounded_xl().overflow_hidden())
+            .when(!theater, |d| d.rounded(px(s.thumb_radius)).overflow_hidden())
             .when_some(glow, |d, color| {
                 d.shadow(vec![BoxShadow { color, offset: point(px(0.), px(0.)), blur_radius: px(90.), spread_radius: px(12.), inset: false }])
             })

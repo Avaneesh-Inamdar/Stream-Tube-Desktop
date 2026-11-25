@@ -132,6 +132,20 @@ fn recently_uploaded() -> anyhow::Result<Vec<Item>> {
 /// Only the first home load of a session starts from the cache.
 static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[derive(Clone)]
+struct HomeCacheEntry {
+    items: Arc<Vec<Item>>,
+    continuation: Option<String>,
+}
+
+static HOME_CACHE: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashMap<usize, HomeCacheEntry>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+/// Clears cached home feed so the next visit reloads from network (e.g. when reload icon is tapped).
+pub fn clear_home_cache() {
+    HOME_CACHE.lock().clear();
+}
+
 pub struct HomePage {
     chip: usize,
     items: Load<Arc<Vec<Item>>>,
@@ -220,6 +234,18 @@ fn render_feed_row(row: &FeedRow, items: &[Item], card_width: Pixels, cx: &mut A
 
 impl HomePage {
     pub fn new(chip: usize, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+        if let Some(cached) = HOME_CACHE.lock().get(&chip).cloned() {
+            return Self {
+                chip,
+                items: Load::Ready(cached.items),
+                continuation: cached.continuation,
+                loading_more: false,
+                scroll: ListState::new(0, ListAlignment::Top, px(0.)),
+                rows: Arc::default(),
+                row_size: (px(0.), px(0.)),
+                serial: 0,
+            };
+        }
         let mut s = Self {
             chip,
             items: Load::Loading,
@@ -358,10 +384,14 @@ impl HomePage {
                         if chip == 0 && !items.is_empty() {
                             save_home(&items);
                         }
+                        let items = Arc::new(items);
                         // the cached feed stays if the user is already scrolling through it
                         let scrolled = this.scroll.scroll_px_offset_for_scrollbar().y < px(-40.);
                         if !(from_cache && scrolled) {
-                            this.items = Load::Ready(Arc::new(items));
+                            this.items = Load::Ready(items.clone());
+                            HOME_CACHE.lock().insert(chip, HomeCacheEntry { items, continuation: cont.clone() });
+                        } else if let Some(cur) = this.items.ready() {
+                            HOME_CACHE.lock().insert(chip, HomeCacheEntry { items: cur.clone(), continuation: cont.clone() });
                         }
                         this.continuation = cont;
                     }
@@ -406,10 +436,20 @@ impl HomePage {
                 if let Ok(p) = res {
                     if let Some(items) = this.items.ready_mut() {
                         Arc::make_mut(items).extend(p.items);
+                        HOME_CACHE.lock().insert(this.chip, HomeCacheEntry {
+                            items: items.clone(),
+                            continuation: p.continuation.clone(),
+                        });
                     }
                     this.continuation = p.continuation;
                 } else {
                     this.continuation = None;
+                    if let Some(items) = this.items.ready() {
+                        HOME_CACHE.lock().insert(this.chip, HomeCacheEntry {
+                            items: items.clone(),
+                            continuation: None,
+                        });
+                    }
                 }
                 cx.notify();
             });

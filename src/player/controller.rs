@@ -823,30 +823,8 @@ impl Player {
 
     /// Applies caption styling settings to mpv (see [`caption_font`] and [`mpv_color`]).
     fn apply_caption_style(&self) {
-        let Some(mpv) = &self.mpv else { return };
-        let s = store::settings_snapshot();
-        mpv.set("sub-font-size", &s.caption_size.to_string());
-        mpv.set("sub-font", caption_font(&s.caption_font));
-        mpv.set("sub-bold", "no");
-        mpv.set("sub-margin-y", "40");
-        mpv.set("sub-color", &mpv_color(s.caption_color, s.caption_opacity));
-        if s.caption_background {
-            mpv.set("sub-border-style", "background-box");
-            mpv.set("sub-back-color", &mpv_color(s.caption_bg_color, s.caption_bg_opacity));
-            mpv.set("sub-border-size", "2");
-            mpv.set("sub-shadow-offset", "0");
-        } else {
-            mpv.set("sub-border-style", "outline-and-shadow");
-            mpv.set("sub-border-color", "#FF000000");
-            mpv.set("sub-shadow-color", "#80000000");
-            let (border, shadow) = match s.caption_edge.as_str() {
-                "outline" => ("2.5", "0"),
-                "shadow" => ("0", "2"),
-                "none" => ("0", "0"),
-                _ => ("2.5", "1"),
-            };
-            mpv.set("sub-border-size", border);
-            mpv.set("sub-shadow-offset", shadow);
+        if let Some(mpv) = &self.mpv {
+            apply_caption_style_to(mpv);
         }
     }
 
@@ -1249,6 +1227,34 @@ impl Player {
 
     pub fn highlight(&self) -> Option<&Segment> {
         self.segments.iter().find(|s| s.action == "poi" || s.category == "poi_highlight")
+    }
+}
+
+/// Applies the user's caption styling (including background box) to an mpv instance.
+pub(crate) fn apply_caption_style_to(mpv: &Mpv) {
+    let s = store::settings_snapshot();
+    mpv.set("sub-font-size", &s.caption_size.to_string());
+    mpv.set("sub-font", caption_font(&s.caption_font));
+    mpv.set("sub-bold", "no");
+    mpv.set("sub-margin-y", "40");
+    mpv.set("sub-color", &mpv_color(s.caption_color, s.caption_opacity));
+    if s.caption_background {
+        mpv.set("sub-border-style", "background-box");
+        mpv.set("sub-back-color", &mpv_color(s.caption_bg_color, s.caption_bg_opacity));
+        mpv.set("sub-border-size", "2");
+        mpv.set("sub-shadow-offset", "0");
+    } else {
+        mpv.set("sub-border-style", "outline-and-shadow");
+        mpv.set("sub-border-color", "#FF000000");
+        mpv.set("sub-shadow-color", "#80000000");
+        let (border, shadow) = match s.caption_edge.as_str() {
+            "outline" => ("2.5", "0"),
+            "shadow" => ("0", "2"),
+            "none" => ("0", "0"),
+            _ => ("2.5", "1"),
+        };
+        mpv.set("sub-border-size", border);
+        mpv.set("sub-shadow-offset", shadow);
     }
 }
 

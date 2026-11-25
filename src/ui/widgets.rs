@@ -35,8 +35,8 @@ pub fn page_scroll(id: &'static str, handle: &ScrollHandle) -> PageScroll {
     }
 }
 
-/// A page's scroll area. The scrollbar is added after the page's content so it
-/// is drawn, and takes clicks, on top of it.
+/// A page's scroll area. The scrollbar is rendered as a stationary sibling overlay
+/// outside the scrolling container so the thumb tracks scroll position properly.
 #[derive(IntoElement)]
 pub struct PageScroll {
     id: &'static str,
@@ -298,11 +298,16 @@ pub(crate) fn tokenize(text: &str) -> Vec<(std::ops::Range<usize>, Token)> {
     while i < text.len() {
         let rest = &text[i..];
         let at_word_start = i == 0 || !text[..i].chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false);
-        if rest.starts_with("http://") || rest.starts_with("https://") {
+        if at_word_start && (rest.starts_with("http://") || rest.starts_with("https://") || rest.starts_with("www.") || rest.starts_with("youtube.com/") || rest.starts_with("youtu.be/")) {
             let end = rest.find(|c: char| c.is_whitespace() || c == ')' || c == '"').unwrap_or(rest.len());
-            let url = rest[..end].trim_end_matches(['.', ',', '!', '?']).to_string();
-            out.push((i..i + url.len(), Token::Url(url.clone())));
-            i += url.len().max(1);
+            let raw_url = rest[..end].trim_end_matches(['.', ',', '!', '?']).to_string();
+            let url = if raw_url.starts_with("http://") || raw_url.starts_with("https://") {
+                raw_url.clone()
+            } else {
+                format!("https://{raw_url}")
+            };
+            out.push((i..i + raw_url.len(), Token::Url(url)));
+            i += raw_url.len().max(1);
             continue;
         }
         if at_word_start && bytes[i].is_ascii_digit() {
@@ -326,6 +331,24 @@ pub(crate) fn tokenize(text: &str) -> Vec<(std::ops::Range<usize>, Token)> {
                 let tok = if bytes[i] == b'#' { Token::Hashtag(word.to_string()) } else { Token::Handle(word.to_string()) };
                 out.push((i..i + word.len(), tok));
                 i += word.len();
+                continue;
+            }
+        }
+        if at_word_start && bytes[i] == b'/' && rest.len() > 1 {
+            // Channel link in description/comments formatted as "/ channelname", "/channelname", "/@handle", etc.
+            let after_slash = &rest[1..];
+            let trimmed = after_slash.trim_start();
+            let spaces = after_slash.len() - trimmed.len();
+            let cand = trimmed.strip_prefix('@').unwrap_or(trimmed);
+            let end = cand
+                .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-' || c == '.'))
+                .unwrap_or(cand.len());
+            let name = cand[..end].trim_end_matches(['.', ',', '!', '?', ';', ':']);
+            if name.len() >= 2 && name.chars().any(|c| c.is_alphabetic()) {
+                let full_span_len = 1 + spaces + (trimmed.len() - cand.len()) + name.len();
+                let handle = if trimmed.starts_with('@') { format!("@{name}") } else { name.to_string() };
+                out.push((i..i + full_span_len, Token::Handle(handle)));
+                i += full_span_len;
                 continue;
             }
         }
@@ -386,9 +409,16 @@ fn open_link(url: &str, window: &mut Window, cx: &mut App) {
     } else if let Some(h) = url.strip_prefix("st-tag:") {
         crate::ui::app::navigate(crate::ui::app::Route::Search(crate::api::http::urldecode(h)), window, cx);
     } else if let Some(h) = url.strip_prefix("st-handle:") {
-        let url = format!("https://www.youtube.com/{}", crate::api::http::urldecode(h));
+        let raw = crate::api::http::urldecode(h);
+        let clean = raw.trim_start_matches('@').trim_start_matches('/').trim().to_string();
         cx.spawn(async move |cx| {
-            if let Ok(crate::api::innertube::ResolvedUrl::Channel(id)) = blocking(move || crate::api::innertube::resolve_url(&url)).await {
+            let url1 = format!("https://www.youtube.com/@{clean}");
+            let url2 = format!("https://www.youtube.com/{clean}");
+            let res = blocking(move || {
+                crate::api::innertube::resolve_url(&url1)
+                    .or_else(|_| crate::api::innertube::resolve_url(&url2))
+            }).await;
+            if let Ok(crate::api::innertube::ResolvedUrl::Channel(id)) = res {
                 let _ = cx.update(|cx| {
                     if let Some(w) = cx.active_window() {
                         let _ = w.update(cx, |_, window, cx| crate::ui::app::navigate(crate::ui::app::Route::Channel(id), window, cx));
@@ -531,19 +561,32 @@ pub fn comment_body(id: impl Into<SharedString>, c: &crate::api::types::Comment,
 
 #[cfg(test)]
 mod clamp_tests {
-    use super::clamp_text;
+    use super::{clamp_text, tokenize, Token};
     #[test]
     fn clamps() {
         assert_eq!(clamp_text("short", 5, 400), None);
-        assert_eq!(clamp_text("a
-b
-c", 2, 400).as_deref(), Some("a
-b…"));
+        assert_eq!(clamp_text("a\nb\nc", 2, 400).as_deref(), Some("a\nb…"));
         let long = "word ".repeat(200);
         let c = clamp_text(&long, 5, 400).unwrap();
         assert!(c.chars().count() <= 401 && c.ends_with("word…"));
         // multi-byte text is cut on a char boundary
         assert!(clamp_text(&"é".repeat(500), 5, 400).is_some());
+    }
+
+    #[test]
+    fn tokenizes_handles_and_channels() {
+        let text = "Click here to subscribe: / sonyliv and @youtube";
+        let tokens = tokenize(text);
+        let handles: Vec<_> = tokens
+            .into_iter()
+            .filter_map(|(r, t)| match t {
+                Token::Handle(h) => Some((&text[r], h)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(handles.len(), 2);
+        assert_eq!(handles[0].1, "sonyliv");
+        assert_eq!(handles[1].1, "@youtube");
     }
 }
 

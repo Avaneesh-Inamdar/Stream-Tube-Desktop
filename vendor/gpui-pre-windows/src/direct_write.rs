@@ -677,10 +677,15 @@ impl DirectWriteState {
             )?;
         }
         // We rasterize into bitmaps, which outline rendering can't produce.
+        // GDI modes apply harsh pixel snapping and low-res hinting, making fonts thin and jagged.
+        // DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC with grid fitting disabled produces clean, crisp, smooth typography.
         let rendering_mode = match rendering_mode {
-            DWRITE_RENDERING_MODE1_OUTLINE => DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC,
+            DWRITE_RENDERING_MODE1_OUTLINE
+            | DWRITE_RENDERING_MODE1_GDI_CLASSIC
+            | DWRITE_RENDERING_MODE1_GDI_NATURAL => DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC,
             mode => mode,
         };
+        let grid_fit_mode = DWRITE_GRID_FIT_MODE_DISABLED;
         Ok((rendering_mode, grid_fit_mode))
     }
 
@@ -1760,7 +1765,12 @@ fn get_system_ui_font_name() -> SharedString {
             "Segoe UI".into()
         } else {
             let font_name = String::from_utf16_lossy(&info.lfFaceName);
-            font_name.trim_matches(char::from(0)).to_owned().into()
+            let name = font_name.trim_matches(char::from(0)).to_owned();
+            if name.is_empty() {
+                "Segoe UI".into()
+            } else {
+                name.into()
+            }
         };
         log::info!("Use {} as UI font.", font_family);
         font_family

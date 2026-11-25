@@ -11,11 +11,72 @@ use std::rc::Rc;
 use futures::channel::oneshot;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 
-/// Web images are decoded to at most this many pixels (854x480), keeping their
-/// shape: cards get 1280x720 thumbnails but draw them about 350 px wide, so
-/// decoding them whole took 3.7 MB each (and as much again on the GPU). Wide
-/// channel banners still come out about 1570 px wide.
-const MAX_PIXELS: u64 = 854 * 480;
+static THUMB_COLORS: std::sync::LazyLock<parking_lot::RwLock<HashMap<String, Rgba>>> =
+    std::sync::LazyLock::new(|| parking_lot::RwLock::new(HashMap::new()));
+
+/// Samples a balanced ambient RGB color from decoded RGBA8 image bytes and caches it for hover cards.
+fn record_thumb_color(url: &str, img: &image::RgbaImage) {
+    let (w, h) = img.dimensions();
+    if w < 8 || h < 8 {
+        return;
+    }
+    let data = img.as_raw();
+    let (mut r_sum, mut g_sum, mut b_sum, mut n) = (0f32, 0f32, 0f32, 0f32);
+    let (mut r_all, mut g_all, mut b_all, mut n_all) = (0f32, 0f32, 0f32, 0f32);
+    for gy in 0..8 {
+        for gx in 0..12 {
+            let x = w * (15 + gx * 70 / 11) / 100;
+            let y = h * (15 + gy * 70 / 7) / 100;
+            let idx = ((y.min(h - 1) * w + x.min(w - 1)) * 4) as usize;
+            let r = data[idx] as f32 / 255.0;
+            let g = data[idx + 1] as f32 / 255.0;
+            let b = data[idx + 2] as f32 / 255.0;
+            r_all += r;
+            g_all += g;
+            b_all += b;
+            n_all += 1.0;
+            let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            if lum > 0.08 && lum < 0.94 {
+                r_sum += r;
+                g_sum += g;
+                b_sum += b;
+                n += 1.0;
+            }
+        }
+    }
+    let color = if n >= 6.0 {
+        Rgba { r: r_sum / n, g: g_sum / n, b: b_sum / n, a: 1.0 }
+    } else if n_all > 0.0 {
+        Rgba { r: r_all / n_all, g: g_all / n_all, b: b_all / n_all, a: 1.0 }
+    } else {
+        return;
+    };
+    let mut map = THUMB_COLORS.write();
+    if map.len() > 2000 {
+        map.clear();
+    }
+    map.insert(url.to_string(), color);
+}
+
+/// Returns a smooth, light pastel card-hover tint matching a cached thumbnail's color.
+pub fn thumb_hover_bg(url: &str, dark: bool) -> Option<Hsla> {
+    let c = THUMB_COLORS.read().get(url).copied()?;
+    let mut h: Hsla = c.into();
+    if dark {
+        h.s = (h.s * 0.42).clamp(0.05, 0.32);
+        h.l = h.l.clamp(0.52, 0.72);
+        h.a = 0.14;
+    } else {
+        h.s = (h.s * 0.35).clamp(0.04, 0.28);
+        h.l = h.l.clamp(0.76, 0.90);
+        h.a = 0.28;
+    }
+    Some(h)
+}
+
+/// Web images are decoded no larger than this (keeping HD thumbnails sharp).
+const MAX_W: u32 = 1920;
+const MAX_H: u32 = 1080;
 
 type LoadResult = Result<Arc<RenderImage>, ImageCacheError>;
 
@@ -111,13 +172,14 @@ fn fetch_decode(url: &str) -> anyhow::Result<Arc<RenderImage>> {
     }
     let img = image::load_from_memory(&bytes)?;
     let (w, h) = (img.width(), img.height());
-    let mut rgba = if w as u64 * h as u64 > MAX_PIXELS {
-        let k = (MAX_PIXELS as f64 / (w as f64 * h as f64)).sqrt() as f32;
+    let mut rgba = if w > MAX_W || h > MAX_H {
+        let k = (MAX_W as f32 / w as f32).min(MAX_H as f32 / h as f32);
         let (nw, nh) = (((w as f32 * k).round() as u32).max(1), ((h as f32 * k).round() as u32).max(1));
-        image::imageops::resize(&img.into_rgba8(), nw, nh, image::imageops::FilterType::Triangle)
+        image::imageops::resize(&img.into_rgba8(), nw, nh, image::imageops::FilterType::CatmullRom)
     } else {
         img.into_rgba8()
     };
+    record_thumb_color(url, &rgba);
     for px in rgba.chunks_exact_mut(4) {
         px.swap(0, 2);
     }
