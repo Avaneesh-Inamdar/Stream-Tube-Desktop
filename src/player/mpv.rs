@@ -42,7 +42,71 @@ struct mpv_event_end_file {
 
 const MPV_FORMAT_STRING: c_int = 1;
 const MPV_FORMAT_FLAG: c_int = 3;
+const MPV_FORMAT_INT64: c_int = 4;
 const MPV_FORMAT_DOUBLE: c_int = 5;
+const MPV_FORMAT_NODE: c_int = 6;
+const MPV_FORMAT_NODE_ARRAY: c_int = 7;
+const MPV_FORMAT_NODE_MAP: c_int = 8;
+
+#[repr(C)]
+struct Node {
+    value: NodeValue,
+    format: c_int,
+}
+
+#[repr(C)]
+union NodeValue {
+    number: f64,
+    integer: i64,
+    list: *const NodeList,
+}
+
+#[repr(C)]
+struct NodeList {
+    num: c_int,
+    values: *const Node,
+    keys: *const *const c_char,
+}
+
+impl Node {
+    // All nodes and strings in an observed property belong to the current
+    // mpv event and are consumed before the next call to mpv_wait_event.
+    unsafe fn entries(&self, format: c_int) -> Option<(&NodeList, &[Node])> {
+        if self.format != format { return None }
+        let list = unsafe { self.value.list.as_ref()? };
+        let values = if list.num <= 0 { &[] } else {
+            unsafe { std::slice::from_raw_parts(list.values, list.num as usize) }
+        };
+        Some((list, values))
+    }
+
+    unsafe fn field(&self, key: &[u8]) -> Option<&Node> {
+        let (list, values) = unsafe { self.entries(MPV_FORMAT_NODE_MAP)? };
+        values.iter().enumerate().find_map(|(i, value)| {
+            let name = unsafe { CStr::from_ptr(*list.keys.add(i)) };
+            (name.to_bytes() == key).then_some(value)
+        })
+    }
+
+    fn number(&self) -> Option<f64> {
+        (self.format == MPV_FORMAT_DOUBLE).then(|| unsafe { self.value.number })
+    }
+
+    unsafe fn cache_state(&self) -> Option<PropValue> {
+        let ranges = unsafe { self.field(b"seekable-ranges")? };
+        let (_, ranges) = unsafe { ranges.entries(MPV_FORMAT_NODE_ARRAY)? };
+        let ranges = ranges.iter().filter_map(|entry| {
+            let start = unsafe { entry.field(b"start")? }.number()?;
+            let end = unsafe { entry.field(b"end")? }.number()?;
+            (start.is_finite() && end.is_finite() && end > start).then_some((start, end))
+        }).collect();
+        let disk_bytes = unsafe { self.field(b"file-cache-bytes") }
+            .filter(|n| n.format == MPV_FORMAT_INT64)
+            .and_then(|n| u64::try_from(unsafe { n.value.integer }).ok())
+            .unwrap_or(0);
+        Some(PropValue::Cache { ranges, disk_bytes })
+    }
+}
 
 const EV_SHUTDOWN: c_int = 1;
 const EV_END_FILE: c_int = 7;
@@ -252,6 +316,7 @@ pub enum PropValue {
     Double(f64),
     Flag(bool),
     Str(String),
+    Cache { ranges: Vec<(f64, f64)>, disk_bytes: u64 },
 }
 
 const OBSERVED: &[(&str, c_int)] = &[
@@ -262,6 +327,7 @@ const OBSERVED: &[(&str, c_int)] = &[
     ("paused-for-cache", MPV_FORMAT_FLAG),
     ("seeking", MPV_FORMAT_FLAG),
     ("demuxer-cache-time", MPV_FORMAT_DOUBLE),
+    ("demuxer-cache-state", MPV_FORMAT_NODE),
     ("speed", MPV_FORMAT_DOUBLE),
     ("volume", MPV_FORMAT_DOUBLE),
     ("mute", MPV_FORMAT_FLAG),
@@ -422,6 +488,7 @@ impl Mpv {
                                     match p.format {
                                         MPV_FORMAT_DOUBLE => Some(PropValue::Double(*(p.data as *const f64))),
                                         MPV_FORMAT_FLAG => Some(PropValue::Flag(*(p.data as *const c_int) != 0)),
+                                        MPV_FORMAT_NODE => (&*p.data.cast::<Node>()).cache_state(),
                                         MPV_FORMAT_STRING => {
                                             let s = *(p.data as *const *const c_char);
                                             (!s.is_null()).then(|| PropValue::Str(CStr::from_ptr(s).to_string_lossy().into_owned()))

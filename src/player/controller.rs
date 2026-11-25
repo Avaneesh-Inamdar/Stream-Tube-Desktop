@@ -24,6 +24,9 @@ pub enum KeyboardFeedback {
     Seek(f64),
 }
 
+const SEEK_DISK_CACHE_LIMIT: u64 = 128 * 1024 * 1024;
+const BACK_CACHE_SIZE: &str = "12MiB";
+
 pub struct Player {
     /// speed to go back to while a press-and-hold plays at 2x
     pub boost: Option<f64>,
@@ -42,6 +45,10 @@ pub struct Player {
     pub buffering: bool,
     pub seeking: bool,
     cache_time: f64,
+    cache_ranges: Option<Vec<(f64, f64)>>,
+    // End of contiguous data from the last seek, and the farthest buffered end to reconnect.
+    seek_cache_target: Option<(f64, f64)>,
+    seek_disk_bytes: u64,
     preloaded_until: f64,
     pub volume: f64,
     pub muted: bool,
@@ -132,6 +139,9 @@ impl Player {
             buffering: false,
             seeking: false,
             cache_time: 0.0,
+            cache_ranges: None,
+            seek_cache_target: None,
+            seek_disk_bytes: 0,
             preloaded_until: 0.0,
             volume: s.volume,
             muted: false,
@@ -194,7 +204,7 @@ impl Player {
             ("osc", "no"),
             ("cache", "yes"),
             ("demuxer-max-bytes", "48MiB"),
-            ("demuxer-max-back-bytes", "12MiB"),
+            ("demuxer-max-back-bytes", BACK_CACHE_SIZE),
             ("demuxer-readahead-secs", "40"),
             ("network-timeout", "20"),
             ("user-agent", ua),
@@ -224,6 +234,16 @@ impl Player {
         let opts: Vec<(&str, &str)> = opts.into_iter().collect();
         let proxy = s.proxy.clone();
         let mut opts_owned: Vec<(String, String)> = opts.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        // Embedded libmpv can have no default cache directory.
+        let cache_dir = store::data_dir().join("playback-cache");
+        let cache_dir = match std::fs::create_dir_all(&cache_dir) {
+            Ok(()) => cache_dir,
+            Err(e) => {
+                eprintln!("[player] Could not create playback cache directory: {e}");
+                std::env::temp_dir()
+            }
+        };
+        opts_owned.push(("demuxer-cache-dir".into(), cache_dir.to_string_lossy().into_owned()));
         // normal videos reach mpv through the app's local stream proxy, which already
         // uses the user's proxy; mpv itself only fetches live streams directly, and can
         // only use HTTP proxies (127.0.0.1 is excluded through no_proxy, see main)
@@ -352,7 +372,7 @@ impl Player {
             MpvEvent::Prop(name, val) => {
                 // While frames are flowing, the frame event already redraws the player;
                 // only redraw for clock/cache updates when no video frames arrive.
-                let quiet = matches!(name, "time-pos" | "demuxer-cache-time")
+                let quiet = matches!(name, "time-pos" | "demuxer-cache-time" | "demuxer-cache-state")
                     && !self.paused
                     && !self.audio_only
                     && self.frame.is_some()
@@ -382,6 +402,19 @@ impl Player {
                     }
                     ("seeking", PropValue::Flag(b)) => self.seeking = b,
                     ("demuxer-cache-time", PropValue::Double(c)) => self.cache_time = c,
+                    ("demuxer-cache-state", PropValue::Cache { ranges, disk_bytes }) if !self.loading && self.streams.is_some() => {
+                        self.seek_disk_bytes = self.seek_disk_bytes.max(disk_bytes);
+                        if let Some((from, end)) = self.seek_cache_target {
+                            // Follow only the range that actually covers our last seek or
+                            // refill point. A separate range ahead may itself be shrinking.
+                            let filled = ranges.iter().filter(|&&(a, b)| a <= from && from <= b)
+                                .map(|&(_, b)| b).fold(from, f64::max);
+                            let target = (filled < end && self.seek_disk_bytes < SEEK_DISK_CACHE_LIMIT)
+                                .then_some((filled, end));
+                            self.set_seek_cache_target(target);
+                        }
+                        self.cache_ranges = Some(ranges);
+                    }
                     ("speed", PropValue::Double(s)) => self.speed = s,
                     ("volume", PropValue::Double(v)) => self.volume = v,
                     ("mute", PropValue::Flag(m)) => self.muted = m,
@@ -732,6 +765,11 @@ impl Player {
 
     /// (Re)loads current streams into mpv with current quality/audio settings.
     fn load_current(&mut self, start: Option<f64>, keep_pause: bool, cx: &mut Context<Self>) {
+        // mpv restores file-local options when the previous file closes.
+        self.seek_cache_target = None;
+        self.seek_disk_bytes = 0;
+        self.cache_ranges = None;
+        self.cache_time = 0.0;
         self.preloaded_until = 0.0;
         self.set_playback_ready(false, cx);
         let (Some(mpv), Some(info)) = (self.mpv.clone(), self.streams.clone()) else { return };
@@ -789,6 +827,10 @@ impl Player {
             // opening segments libavformat reads before it can start or resume.
             opts.push("demuxer-lavf-analyzeduration=0.8".into());
         }
+        // Bound network readahead so previously buffered ranges survive a seek.
+        if !info.is_live {
+            opts.push("cache-secs=40".into());
+        }
         if let Some(t) = start.filter(|t| *t > 0.0) {
             opts.push(format!("start={t}"));
         }
@@ -814,11 +856,19 @@ impl Player {
         cx.notify();
     }
 
-    pub fn buffered_until(&self) -> f64 {
-        if self.loading && self.video.as_ref().is_some_and(|v| v.is_short) {
-            return self.preloaded_until;
+    pub fn buffered_ranges(&self) -> Vec<(f64, f64)> {
+        let mut ranges = Vec::new();
+        if !self.loading {
+            if let Some(cached) = &self.cache_ranges {
+                ranges.extend_from_slice(cached);
+            } else if self.cache_time > self.time {
+                ranges.push((self.time, self.cache_time));
+            }
         }
-        self.cache_time.max(self.preloaded_until)
+        if self.preloaded_until > 0.0 {
+            ranges.push((0.0, self.preloaded_until));
+        }
+        ranges
     }
 
     /// Applies caption styling settings to mpv (see [`caption_font`] and [`mpv_color`]).
@@ -1094,10 +1144,30 @@ impl Player {
     pub fn seek_to(&mut self, t: f64) {
         self.preloaded_until = 0.0;
         let t = if self.duration > 0.0 { t.clamp(0.0, (self.duration - 0.1).max(0.0)) } else { t.max(0.0) };
+        if (t < self.time || self.seek_cache_target.is_some()) && !self.loading
+            && self.seek_disk_bytes < SEEK_DISK_CACHE_LIMIT && self.streams.as_ref().is_some_and(|s| !s.is_live)
+        {
+            let ranges = self.cache_ranges.as_deref().unwrap_or_default();
+            let end = ranges.iter().filter(|&&(start, _)| start > t).map(|&(_, end)| end)
+                .chain(self.seek_cache_target.map(|(_, end)| end)).fold(t, f64::max);
+            self.set_seek_cache_target((t < end).then_some((t, end)));
+        }
         self.time = t;
         if let Some(m) = &self.mpv {
             let _ = m.command(&["seek", &format!("{t}"), "absolute+exact"]);
         }
+    }
+
+    fn set_seek_cache_target(&mut self, target: Option<(f64, f64)>) {
+        if self.seek_cache_target.is_some() != target.is_some() {
+            if let Some(mpv) = &self.mpv {
+                // Write incoming packets to a temporary file while closing the gap.
+                // Their headers still use RAM even when the payload is on disk.
+                mpv.set("file-local-options/demuxer-max-back-bytes", if target.is_some() { "20MiB" } else { BACK_CACHE_SIZE });
+                mpv.set("file-local-options/cache-on-disk", if target.is_some() { "yes" } else { "no" });
+            }
+        }
+        self.seek_cache_target = target;
     }
 
     pub fn seek_by(&mut self, d: f64) {
