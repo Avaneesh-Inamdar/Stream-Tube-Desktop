@@ -485,6 +485,14 @@ fn probe_len(url: &str) -> Option<u64> {
     cr.rsplit('/').next()?.trim().parse().ok()
 }
 
+fn fetch_range(url: &str, start: u64, end: u64) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+    agent()
+        .get(url)
+        .header("User-Agent", crate::api::http::BROWSER_UA)
+        .header("Range", &format!("bytes={start}-{end}"))
+        .call()
+}
+
 fn serve(mut conn: TcpStream) -> std::io::Result<()> {
     conn.set_nodelay(true).ok();
     let mut reader = BufReader::new(conn.try_clone()?);
@@ -556,10 +564,10 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
         return Ok(());
     };
     let (start, end) = match range {
-        Some((a, b)) => (a.min(total), b.unwrap_or(total - 1).min(total - 1)),
+        Some((a, b)) => (a.min(total), b.unwrap_or(total.saturating_sub(1)).min(total.saturating_sub(1))),
         None => (0, total.saturating_sub(1)),
     };
-    if start >= total {
+    if start >= total || end < start {
         let h = format!("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{total}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         conn.write_all(h.as_bytes())?;
         return Ok(());
@@ -586,17 +594,17 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
     let mut first = true;
     let mut stalls = 0;
     let mut buf = vec![0u8; 64 * 1024];
+    let mut upcoming: Option<(u64, std::thread::JoinHandle<_>)> = None;
     while pos <= end {
         let size = if first { FIRST_CHUNK } else { CHUNK };
         first = false;
-        let chunk_end = (pos + size - 1).min(end);
+        let chunk_end = pos.saturating_add(size - 1).min(end);
         let mut attempt = 0;
         loop {
-            let resp = agent()
-                .get(&url)
-                .header("User-Agent", crate::api::http::BROWSER_UA)
-                .header("Range", &format!("bytes={pos}-{chunk_end}"))
-                .call();
+            let resp = upcoming.take()
+                .filter(|(start, _)| *start == pos)
+                .and_then(|(_, task)| task.join().ok())
+                .unwrap_or_else(|| fetch_range(&url, pos, chunk_end));
             if crate::perf::on() {
                 match &resp {
                     Ok(r) => eprintln!("[proxy] {pos}-{chunk_end} -> {}", r.status()),
@@ -605,6 +613,14 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
             }
             match resp {
                 Ok(r) if r.status().as_u16() == 206 || r.status().as_u16() == 200 => {
+                    // Overlap the next request's setup with forwarding this body.
+                    if r.status().as_u16() == 206 && chunk_end < end {
+                        let start = chunk_end + 1;
+                        let stop = chunk_end.saturating_add(CHUNK).min(end);
+                        let url = url.clone();
+                        upcoming = std::thread::Builder::new().spawn(move || fetch_range(&url, start, stop))
+                            .ok().map(|task| (start, task));
+                    }
                     let mut body = r.into_body().into_reader();
                     loop {
                         let n = match body.read(&mut buf) {
@@ -669,6 +685,63 @@ mod token_tests {
         let (token, tail) = path.split_once('/').expect("token prefix");
         assert_eq!(token.len(), 48, "48-hex-char session secret");
         assert!(tail.starts_with("p/"), "pass route: {tail}");
+    }
+}
+
+#[cfg(test)]
+mod range_prefetch_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn request(socket: &TcpStream) -> String {
+        socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut reader = BufReader::new(socket);
+        let mut request = String::new();
+        while !request.ends_with("\r\n\r\n") {
+            assert_ne!(reader.read_line(&mut request).unwrap(), 0);
+        }
+        request.to_ascii_lowercase()
+    }
+
+    #[test]
+    fn requests_the_next_range_before_the_first_body_finishes() {
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let total = FIRST_CHUNK + 3;
+        let proxy = proxy().unwrap();
+        let url = format!("http://{}/data", upstream.local_addr().unwrap());
+        let id = register(proxy, &url, Some(total), "application/octet-stream");
+        let server = std::thread::spawn(move || {
+            let (mut first, _) = upstream.accept().unwrap();
+            assert!(request(&first).contains(&format!("range: bytes=0-{}", FIRST_CHUNK - 1)));
+            write!(first, "HTTP/1.1 206 Partial Content\r\nContent-Length: {FIRST_CHUNK}\r\nConnection: close\r\n\r\n").unwrap();
+            upstream.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let second = loop {
+                match upstream.accept() {
+                    Ok((socket, _)) => break Some(socket),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break None,
+                }
+            };
+            let Some(mut second) = second else { return false };
+            assert!(request(&second).contains(&format!("range: bytes={FIRST_CHUNK}-{}", total - 1)));
+            second.write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\nConnection: close\r\n\r\nend").unwrap();
+            first.write_all(&vec![b'a'; FIRST_CHUNK as usize]).unwrap();
+            true
+        });
+        let mut client = TcpStream::connect(("127.0.0.1", proxy.port)).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(client, "GET /{}/s/{id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", proxy.token).unwrap();
+        let mut result = Vec::new();
+        let bytes = client.read_to_end(&mut result);
+        assert!(server.join().unwrap(), "next request started after the first body");
+        bytes.unwrap();
+        let body = result.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        assert_eq!(result.len() - body, total as usize);
+        assert!(result[body..body + FIRST_CHUNK as usize].iter().all(|&b| b == b'a'));
+        assert!(result.ends_with(b"end"));
     }
 }
 
