@@ -29,6 +29,7 @@ pub struct Settings {
     pub proxy: String,
     // Player
     pub theater_mode: bool,
+    pub pip_always_on_top: bool,
     pub default_quality: u32,
     pub codec_pref: String,
     pub default_speed: f64,
@@ -171,6 +172,7 @@ impl Default for Settings {
             ytdlp_path: String::new(),
             proxy: String::new(),
             theater_mode: false,
+            pip_always_on_top: false,
             default_quality: 1080,
             codec_pref: "vp9".into(),
             default_speed: 1.0,

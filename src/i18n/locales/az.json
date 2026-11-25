@@ -838,5 +838,6 @@
   "{0} hours": "{0} saat",
   "{0} minute": "{0} dəq.",
   "{0} minutes": "{0} dəq.",
-  "Imported {0} subscriptions, {1} history entries, {2} playlists ({3} videos)": "{0} abunə, {1} tarixçə daxilolmaları, {2} ifa siyahıları ({3} videolar) idxal edildi"
+  "Imported {0} subscriptions, {1} history entries, {2} playlists ({3} videos)": "{0} abunə, {1} tarixçə daxilolmaları, {2} ifa siyahıları ({3} videolar) idxal edildi",
+  "Picture-in-picture above other apps": "Digər tətbiqlərin üzərində şəkil içində şəkil"
 }
