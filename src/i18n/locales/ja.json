@@ -347,6 +347,7 @@
   "Channel blocked. Manage in Settings → Content filters": "チャンネルがブロックされています。設定→コンテンツフィルタで管理してください",
   "Remove from history": "履歴から削除",
   "Remove from playlist": "プレイリストから削除",
+  "Remove from queue": "キューから削除",
   "Couldn't update the subscription on your YouTube account": "YouTube アカウントの購読を更新できませんでした",
   "Subscribed": "登録済み",
   "Subscribe": "チャンネル登録",
