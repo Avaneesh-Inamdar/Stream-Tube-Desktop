@@ -688,8 +688,7 @@ impl AppView {
         }));
         window.on_window_should_close(cx, |window, _| {
             crate::save_window_bounds(window);
-            #[cfg(windows)]
-            if crate::tray::hide(window) {
+            if hide_to_tray(window) {
                 return false;
             }
             true
@@ -3408,6 +3407,13 @@ fn strip_download_section(notes: &str) -> String {
     out.join("\n").trim().to_string()
 }
 
+fn hide_to_tray(window: &Window) -> bool {
+    #[cfg(windows)]
+    { crate::tray::hide(window) }
+    #[cfg(not(windows))]
+    { let _ = window; false }
+}
+
 /// Brings a minimized window back (leaves maximized/normal windows as they are).
 pub fn restore_window(window: &mut Window) {
     #[cfg(windows)]
@@ -3474,14 +3480,14 @@ fn window_controls(maximized: bool, cx: &App) -> impl IntoElement {
                 cx.stop_propagation();
                 match area {
                     WindowControlArea::Min => {
-                        if !crate::tray::hide(window) {
+                        if !hide_to_tray(window) {
                             window.minimize_window();
                         }
                     }
                     WindowControlArea::Max => toggle_maximize(window),
                     WindowControlArea::Close => {
                         crate::save_window_bounds(window);
-                        if !crate::tray::hide(window) {
+                        if !hide_to_tray(window) {
                             window.remove_window();
                         }
                     }
