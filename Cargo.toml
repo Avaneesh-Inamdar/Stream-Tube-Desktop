@@ -18,6 +18,7 @@ sha2 = "0.11"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 dirs = "6"
+if-addrs = { version = "0.15", features = ["link-local"] }
 libloading = "0.9"
 image = { version = "0.25", default-features = false }
 futures = "0.3"

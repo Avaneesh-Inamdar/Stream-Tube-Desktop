@@ -661,9 +661,22 @@ impl SettingsPage {
                         .child(pill("cast-copy", Some("copy"), "Copy link", cx).on_click(move |_, _, cx| copy_to_clipboard(url.clone(), cx)))
                         .child(pill("cast-stop", None, "Stop", cx).on_click(|_, _, cx| crate::lan_cast::stop(cx)))
                 } else {
-                    div().child(pill("cast-start", Some("play"), "Start", cx).on_click(|_, window, cx| {
-                        if crate::lan_cast::start(window.window_handle(), cx).is_err() {
-                            toast(cx, t("Couldn't connect to the local network"));
+                    div().child(pill("cast-start", Some("play"), "Start", cx).on_click(|event, window, cx| {
+                        let launch = |address, window: &mut Window, cx: &mut App| {
+                            if crate::lan_cast::start(address, window.window_handle(), cx).is_err() {
+                                toast(cx, t("Couldn't connect to the local network"));
+                            }
+                        };
+                        let addresses = crate::lan_cast::addresses().unwrap_or_default();
+                        match addresses.as_slice() {
+                            [] => toast(cx, t("Couldn't connect to the local network")),
+                            [address] => launch(*address, window, cx),
+                            _ => {
+                                let choices = addresses.into_iter().map(|address| {
+                                    crate::ui::app::MenuItem::new("network", address.to_string(), move |window, cx| launch(address, window, cx))
+                                }).collect();
+                                crate::ui::app::open_menu(event.position(), choices, window, cx);
+                            }
                         }
                     }))
                 },

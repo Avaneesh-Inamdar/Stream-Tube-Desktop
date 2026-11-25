@@ -2,7 +2,7 @@ use crate::ui::app::{Route, navigate, restore_window, route_from_link};
 use futures::{StreamExt, channel::mpsc};
 use gpui_kit::{AnyWindowHandle, App, Global};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, TcpListener, TcpStream, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
 
@@ -32,16 +32,24 @@ pub(crate) fn stop(cx: &mut App) {
     cx.refresh_windows();
 }
 
-pub(crate) fn start(window: AnyWindowHandle, cx: &mut App) -> anyhow::Result<()> {
+pub(crate) fn addresses() -> std::io::Result<Vec<Ipv4Addr>> {
+    let mut addresses: Vec<_> = if_addrs::get_if_addrs()?.into_iter()
+        .filter(|interface| interface.is_oper_up() && !interface.is_p2p())
+        .filter_map(|interface| match interface.ip() {
+            IpAddr::V4(ip) if ip.is_private() || ip.is_link_local() => Some(ip),
+            _ => None,
+        }).collect();
+    addresses.sort_unstable();
+    addresses.dedup();
+    Ok(addresses)
+}
+
+pub(crate) fn start(address: Ipv4Addr, window: AnyWindowHandle, cx: &mut App) -> anyhow::Result<()> {
     if url(cx).is_some() {
         return Ok(());
     }
-    let route = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
-    // Only select the outbound interface. Connecting UDP here sends no packets.
-    route.connect("192.0.2.1:9")?;
-    let std::net::IpAddr::V4(ip) = route.local_addr()?.ip() else { anyhow::bail!("No IPv4 LAN address") };
-    anyhow::ensure!(ip.is_private() || ip.is_link_local(), "No private LAN address");
-    let listener = TcpListener::bind((ip, 0))?;
+    anyhow::ensure!(address.is_private() || address.is_link_local(), "No private LAN address");
+    let listener = TcpListener::bind((address, 0))?;
     listener.set_nonblocking(true)?;
     let token: [u8; 24] = rand::random();
     let secret = token.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
