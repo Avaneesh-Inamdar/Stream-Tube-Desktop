@@ -18,13 +18,13 @@
 </p>
 
 > [!WARNING]
-> **Community branch — not maintained or tested by the project owner.**
+> **Community branch — unofficial macOS support.**
 > The macOS (Apple Silicon) support on this branch was contributed by
 > [William Wessex](https://github.com/wwessex) ([pull request #22](https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop/pull/22)).
-> The maintainer doesn't have a Mac, so keeping this branch up to date with each
-> release and packaging it was done with the help of AI.
-> It has not been built, run or reviewed on a Mac by the maintainer, it is not part
-> of any official release, and it may lag behind `main`. Use it at your own risk.
+> The maintainer doesn't have a Mac. The published **0.7.3-alpha** macOS ZIP and
+> a local build of this branch were run on a physical Apple M4 Mac on 2026-11-25;
+> see the [verification report](docs/macos-0.7.3-verification.md) for the exact
+> builds, hardware, tests and screenshots. This branch may lag behind `main`.
 > Official builds are Windows and Linux only.
 
 <p align="center">
@@ -214,29 +214,24 @@ sudo pacman -S mpv            # Arch
 **macOS (Apple Silicon), unofficial.** Releases may include a
 `StreamTube-<version>-macos-arm64-UNOFFICIAL.zip`. It is built from the
 [`community/macos-apple-silicon`](https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop/tree/community/macos-apple-silicon)
-branch, contributed by [William Wessex](https://github.com/wwessex). I don't have a
-Mac, so keeping that branch up to date and packaging it is done with the help of AI.
-It is **not tested on a real Mac by the maintainer** and isn't supported: use it at
-your own risk.
-It needs `brew install mpv`, and since it isn't notarised, macOS will warn before
-opening it.
+branch, contributed by [William Wessex](https://github.com/wwessex). The
+[0.7.3-alpha verification report](docs/macos-0.7.3-verification.md) records checks
+on a physical Apple M4 Mac. macOS support remains unofficial and community maintained.
+Install mpv with `brew install mpv`, extract the ZIP, and open `Stream Tube.app`.
+The bundle uses Homebrew's libmpv at runtime and is ad hoc signed. Standard
+Gatekeeper acceptance of a downloaded app requires
+[Developer ID signing and notarisation](https://developer.apple.com/developer-id/).
+The [local build instructions](#macos-local-build) also produce a runnable bundle.
 
 Downloads above 360p need yt-dlp and FFmpeg. The app offers to fetch both the first
 time you need them, on Windows and Linux, or get them any time from *Settings → Downloads*.
 You can also install them with your package manager instead.
 
-**macOS (Apple Silicon preview).** Install mpv with `brew install mpv`, then
-extract `StreamTube-<version>-macos-arm64.zip` if it is available for the release.
-The bundle uses Homebrew's libmpv at runtime. GitHub builds are ad hoc signed.
-Standard Gatekeeper acceptance of a downloaded app requires
-[Developer ID signing and notarisation](https://developer.apple.com/developer-id/).
-The [local build instructions](#macos-local-build) also produce a runnable bundle.
-
 ### Verifying a download
 
-Every file on a release is built by the public [Release workflow](.github/workflows/release.yml)
-on GitHub's runners. Each release lists the files' SHA-256 checksums in `SHA256SUMS.txt`,
-and each file has a signed build provenance attestation that ties it to the workflow
+Windows and Linux release files are built by the public [Release workflow](.github/workflows/release.yml)
+on GitHub's runners. Their SHA-256 checksums are listed in `SHA256SUMS.txt`,
+and each has a signed build provenance attestation that ties it to the workflow
 run that built it. With the [GitHub CLI](https://cli.github.com):
 
 ```sh
@@ -245,6 +240,11 @@ gh attestation verify StreamTube-0.7.4-alpha-setup.exe --repo Avaneesh-Inamdar/S
 
 Check a download against those before running it. The in-app updater also checks
 the installer's SHA-256 before running it.
+
+The unofficial macOS ZIP attached to **0.7.3-alpha** is absent from that release's
+checksum file and has no provenance attestation. Its
+[verification report](docs/macos-0.7.3-verification.md#package-checks) records the
+SHA-256 checked against GitHub's release asset metadata.
 
 ## Building
 
@@ -302,7 +302,11 @@ release builds collect that ZIP in the project's draft release.
 
 #### macOS release checklist
 
-The following foreground checks passed on Apple Silicon for **0.7.2-alpha**
+**0.7.3-alpha**, physical Apple M4, macOS 26.6.2:
+[build, automated tests and foreground checks](docs/macos-0.7.3-verification.md).
+The report distinguishes the published ZIP from the newer community branch build.
+
+Earlier foreground checks passed on Apple Silicon for **0.7.2-alpha**
 (`c48a333`). [GitHub Actions build](https://github.com/wwessex/Stream-Tube-Desktop/actions/runs/45294866908)
 and [Apple Silicon ZIP](https://github.com/wwessex/Stream-Tube-Desktop/actions/runs/45294866908/artifacts/14875972585).
 
@@ -318,14 +322,15 @@ and [Apple Silicon ZIP](https://github.com/wwessex/Stream-Tube-Desktop/actions/r
 #### Check hardware decoding
 
 Enable *Settings → Player → Hardware decoding*, restart Stream Tube, and play a
-video. Open *Stats for nerds* from the right-click menu or press Shift+I. A
-**Hardware decoding** value of `videotoolbox-copy` means libmpv is using Apple's
-VideoToolbox decoder. libmpv copies the decoded frames into system memory for
-the app's software render path. If a codec or format is unavailable in hardware,
-libmpv falls back to software decoding.
+video. Open *Stats for nerds* from the right-click menu or press Shift+I. On the
+current community branch, **Hardware decoding** shows `videotoolbox` and
+**Rendering** shows `GPU, zero-copy (OpenGL → IOSurface)` when the GPU path is
+active. The published **0.7.3-alpha** ZIP uses the earlier software render path:
+`videotoolbox-copy` means decoded frames are copied into system memory. If a codec
+or format is unavailable in hardware, libmpv falls back to software decoding.
 
-To check the same render path without opening a window, use a local H.264 video
-and run the opt-in software and VideoToolbox tests:
+To check rendering without opening a window, use a local H.264 video and run the
+opt-in software, VideoToolbox-copy and OpenGL/IOSurface tests:
 
 ```sh
 STREAMTUBE_MPV_TEST_VIDEO="/absolute/path/to/video.mp4" \
