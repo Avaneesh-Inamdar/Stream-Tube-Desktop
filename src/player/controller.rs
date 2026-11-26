@@ -274,17 +274,7 @@ impl Player {
     }
 
     pub(crate) fn set_foreground(&mut self, active: bool, cx: &mut Context<Self>) {
-        if self.foreground != active {
-            if let Some(video) = &self.video {
-                if active {
-                    crate::api::web::report_start(&video.id, self.duration);
-                    crate::api::web::report_progress(&video.id, self.time, !self.paused);
-                } else {
-                    crate::api::web::report_stop(&video.id, self.time);
-                }
-            }
-            self.foreground = active;
-        }
+        self.foreground = active;
         self.update_video_output(cx);
     }
 
@@ -895,7 +885,7 @@ impl Player {
         self.sb_prompt = prompt;
     }
 
-    fn save_progress(&mut self, force: bool) {
+    pub(crate) fn save_progress(&mut self, force: bool) {
         if let Some(v) = &self.video {
             if self.time > 0.0 || (force && (self.playback_ready || self.last_progress_save > 0.0 || self.eof)) {
                 // the periodic save goes to a background thread; a forced one (switching

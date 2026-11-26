@@ -631,7 +631,7 @@ fn search_continuation_page(response: &Value) -> Page {
             .iter()
             .filter_map(|command| command.pointer("/appendContinuationItemsAction/continuationItems"))
         {
-            walk_items(items, &mut page);
+            walk_items(items, &mut page, &mut |_, _| {});
         }
     }
     page

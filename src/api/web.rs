@@ -237,7 +237,7 @@ impl HistorySession {
 
     pub(super) fn call(&self, endpoint: &str, body: Value) -> Result<Value> {
         anyhow::ensure!(self.if_current(|| ()).is_some(), "YouTube history account changed");
-        web_call_with(&self.0, endpoint, body)
+        web_call_with_session(&self.0, endpoint, body)
     }
 
     pub(super) fn cookie_header(&self) -> String {
@@ -637,11 +637,10 @@ mod page_id_tests {
         let old: Session = serde_json::from_value(json!({"cookies": {}, "account": "Test"})).unwrap();
         let mut headers = Vec::new();
         add_page_id(&mut headers, &old);
-#[cfg(test)]
-mod page_id_tests {
-    use super::*;
-    #[test]
-    fn devtools_uses_the_youtube_tab_and_keeps_its_page_id() {
+        assert!(headers.is_empty());
+    }
+}
+pub(in crate::api) mod reporting;
 pub use reporting::{PlaybackReport, pending_reports};
 
 #[cfg(test)]

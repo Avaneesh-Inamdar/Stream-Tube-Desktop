@@ -716,6 +716,7 @@ pub struct AppView {
     /// downloads dropdown under the topbar button
     dl_panel: bool,
     _subs: Vec<Subscription>,
+    had_video: bool,
 }
 
 impl AppView {
@@ -927,6 +928,7 @@ impl AppView {
             active_tab,
             next_tab_id,
             independent_tab_playback,
+            had_video: false,
             route: start,
             page,
             history: Vec::new(),
@@ -2678,7 +2680,6 @@ impl AppView {
         bar
     }
 
-<<<<<<< HEAD
     fn sync_account_playlists(&mut self, cx: &mut Context<Self>) {
         let session = auth::session_identity();
         let unchanged = match (&self.yt_playlist_session, &session) {
@@ -2772,7 +2773,6 @@ impl AppView {
         }
     }
 
->>>>>>> pr/204
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let p = pal(cx);
         let ui = *cx.global::<UiState>();
@@ -2877,9 +2877,9 @@ impl AppView {
             )
             .child(entry("s-hist", "history", "History", Route::History, route == Route::History, cx))
             .child(entry("s-pl", "list-video", "Playlists", Route::Library, route == Route::Library, cx));
+        let SidebarData { playlists, subs, .. } = self.sidebar_data();
         let account = self.yt_playlist_session.is_some();
         let favorites = self.yt_playlists.as_deref().and_then(account_favorites);
-        let SidebarData { playlists, subs, .. } = self.sidebar_data();
         for pl in playlists {
             let watch_later = pl.name == "Watch later";
             let name = if watch_later { "clock" } else { "bookmark" };
