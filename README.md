@@ -89,7 +89,7 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 **Your data stays yours**
 - Subscriptions can live locally. The feed is built by fetching each channel directly, no account needed
 - Sign in with your Google account to get your own Home feed, subscriptions, playlists, likes and subscribe button. Stream Tube opens youtube.com/activate in your default browser with the sign-in code already filled in, so you only pick your account and allow access. Stream Tube imports your YouTube watch history and recent searches automatically after sign-in
-- Signed in, videos play through YouTube's TV client as your account when [Deno](https://deno.com) or [Node.js](https://nodejs.org) is installed: no "confirm you're not a bot" checks, and age-restricted videos play. The runtime solves the small JavaScript puzzles in YouTube's stream URLs, with the solver scripts from [yt-dlp/ejs](https://github.com/yt-dlp/ejs)
+- Signed in, videos play through YouTube's TV client as your account: no "confirm you're not a bot" checks, and age-restricted videos play. The JavaScript puzzles in YouTube's stream URLs are solved with the scripts from [yt-dlp/ejs](https://github.com/yt-dlp/ejs) in a built-in QuickJS engine, or in [Deno](https://deno.com) or [Node.js](https://nodejs.org) when one is installed, which is a few times faster
 - Videos you watch in Stream Tube and the positions you stop at go back to your YouTube account through the same sign-in, so other devices resume where you left off. If you prefer, connect a browser session instead under *Settings → General → YouTube watch history*: sign in with a fresh browser profile (Chrome, Edge, Brave or Chromium) that is deleted afterwards, or load a `cookies.txt` file
 - Your YouTube watch history refreshes in the background and when you return to Stream Tube
 - History, watch later, favourites and playlists are stored in a local SQLite database, and you can pause or clear history at any time
@@ -298,8 +298,7 @@ src/
 ## Known issues
 
 - YouTube sometimes answers with "Sign in to confirm you're not a bot". Signing in
-  inside the app with Deno or Node.js installed avoids it; otherwise updating yt-dlp
-  usually fixes it.
+  inside the app avoids it; otherwise updating yt-dlp usually fixes it.
 - Windows is the main platform. The Linux build is new and less tested; macOS isn't built yet.
 
 ## Contributing

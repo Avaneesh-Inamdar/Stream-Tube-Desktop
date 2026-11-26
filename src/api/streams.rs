@@ -81,7 +81,7 @@ fn resolve_anonymous(video_id: &str) -> Result<StreamInfo> {
             // PO token nor JS challenge solving: fast, and works signed out.
             // Signed in, the TV client plays as the account: no bot check, and
             // the view reaches the account. Anonymous, it is one more fallback.
-            let signed_in = crate::api::auth::signed_in() && tv_available();
+            let signed_in = crate::api::auth::signed_in();
             let mut tv_err = None;
             if signed_in {
                 match tv(video_id) {
@@ -115,7 +115,7 @@ fn resolve_anonymous(video_id: &str) -> Result<StreamInfo> {
                 Ok(info) => return Ok(info),
                 Err(e) => anyhow!("{vision_err}\n{e}"),
             };
-            let vision_err = if signed_in || !tv_available() {
+            let vision_err = if signed_in {
                 vision_err
             } else {
                 match tv(video_id) {
@@ -501,19 +501,13 @@ fn android_vr(video_id: &str) -> Result<StreamInfo> {
 pub(crate) const TV5_VERSION: &str = "5.20251120";
 const TV5_UA: &str = "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1";
 
-/// Whether the TV client can run here: its stream URLs need JavaScript challenges solved.
-pub fn tv_available() -> bool {
-    crate::api::jsc::runtime().is_some()
-}
-
 /// TV client, as an older Samsung TV app build (the current 7.x build answers
 /// "The page needs to be reloaded" outside the real app). It is the one client
 /// that accepts the TV sign-in's token: signed in, YouTube skips the "not a bot"
 /// check, plays age-restricted videos and counts the view for the account.
-/// Its stream URLs carry `n` and signature challenges that are solved with
-/// `jsc`, so it needs Deno or Node.js on the machine.
+/// Its stream URLs carry `n` and signature challenges that `jsc` solves.
 fn tv(video_id: &str) -> Result<StreamInfo> {
-    let rt = crate::api::jsc::runtime().ok_or_else(|| anyhow!("TV: no JavaScript runtime (install Deno or Node.js)"))?;
+    let rt = crate::api::jsc::runtime();
     let token = crate::api::auth::access_token();
     let label = if token.is_some() { "TV (signed in)" } else { "TV" };
     let player = crate::api::jsc::player().map_err(|e| anyhow!("{label}: player script: {e}"))?;
@@ -1009,9 +1003,6 @@ fn with_sign_in_fallback(video_id: &str, res: Result<StreamInfo>) -> Result<Stre
         Err(e) if needs_sign_in(&format!("{e:#}")) => match ytdlp_signed_in(video_id) {
             Some(Ok(info)) => Ok(info),
             Some(Err(e2)) => Err(anyhow!("{e}\nyt-dlp (signed in): {e2}")),
-            None if crate::api::auth::signed_in() && !tv_available() => Err(anyhow!(
-                "{e}\nYouTube wants a signed-in viewer for this video. Install Deno or Node.js and Stream Tube will play it with your YouTube account, or connect a browser session under “YouTube watch history” in Settings to play it through yt-dlp."
-            )),
             None if crate::api::auth::signed_in() => Err(anyhow!(
                 "{e}\nYouTube wants a signed-in viewer for this video, and playing it with your account failed. Connect a browser session under “YouTube watch history” in Settings and Stream Tube will play it with your account through yt-dlp."
             )),

@@ -26,6 +26,9 @@ rand = "0.9"
 open = "5"
 raw-window-handle = "0.6"
 sha1 = "0.11"
+# QuickJS, to solve the JavaScript challenges in YouTube stream URLs when no
+# Deno or Node.js is installed; see src/api/jsc.rs
+rquickjs = "0.14"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # already in the tree through GPUI; used to hide the pointer with the player controls

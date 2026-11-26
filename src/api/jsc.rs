@@ -1,8 +1,11 @@
 //! JavaScript challenges in YouTube stream URLs: the `n` parameter and the
 //! `signatureCipher` of the TV client's formats are scrambled by YouTube's player
 //! script, and a URL left unsolved is answered with 403. They are solved with
-//! yt-dlp's challenge solver scripts (github.com/yt-dlp/ejs, public domain) in a
-//! JavaScript runtime already on the machine: Deno or Node.js.
+//! yt-dlp's challenge solver scripts (github.com/yt-dlp/ejs, public domain).
+//! The scripts run the whole player script, so a JavaScript engine is needed:
+//! Deno or Node.js when one is on the machine (a V8 start solves a new player
+//! in half a second), otherwise the QuickJS engine built into the app (about
+//! two seconds, once per player version; the results are cached).
 use super::http;
 use anyhow::{Context, Result, anyhow};
 use parking_lot::Mutex;
@@ -70,6 +73,8 @@ fn signature_timestamp(js: &str) -> Option<u64> {
 enum Kind {
     Deno,
     Node,
+    /// QuickJS linked into the app, through `rquickjs`
+    Embedded,
 }
 
 #[derive(Clone, Debug)]
@@ -82,23 +87,32 @@ pub struct Runtime {
 impl Runtime {
     pub fn describe(&self) -> String {
         let (a, b, c) = self.version;
-        format!("{} {a}.{b}.{c}", match self.kind { Kind::Deno => "Deno", Kind::Node => "Node.js" })
+        match self.kind {
+            Kind::Deno => format!("Deno {a}.{b}.{c}"),
+            Kind::Node => format!("Node.js {a}.{b}.{c}"),
+            Kind::Embedded => "built-in QuickJS".into(),
+        }
+    }
+
+    fn embedded() -> Runtime {
+        Runtime { kind: Kind::Embedded, path: PathBuf::new(), version: (0, 0, 0) }
     }
 }
 
 static RUNTIME: Mutex<Option<(Option<Runtime>, Instant)>> = Mutex::new(None);
 
-/// A supported JavaScript runtime on this machine, if any. A miss is rechecked
-/// after a minute so installing one takes effect without a restart.
-pub fn runtime() -> Option<Runtime> {
+/// The JavaScript runtime to solve with: Deno or Node.js from this machine when
+/// one is found, else the built-in engine. A miss is rechecked after a minute
+/// so installing one takes effect without a restart.
+pub fn runtime() -> Runtime {
     if let Some((r, t)) = RUNTIME.lock().clone() {
         if r.is_some() || t.elapsed() < Duration::from_secs(60) {
-            return r;
+            return r.unwrap_or_else(Runtime::embedded);
         }
     }
     let found = find_runtime();
     *RUNTIME.lock() = Some((found.clone(), Instant::now()));
-    found
+    found.unwrap_or_else(Runtime::embedded)
 }
 
 /// Directories the runtimes are usually installed to, for when the app was
@@ -268,7 +282,7 @@ pub fn solve(player: &Player, n: &[String], sig: &[String]) -> Result<Solved> {
     if todo_n.is_empty() && todo_sig.is_empty() {
         return Ok(out);
     }
-    let rt = runtime().ok_or_else(|| anyhow!("no JavaScript runtime (install Deno or Node.js)"))?;
+    let rt = runtime();
     let scripts = scripts()?;
     let mut requests = Vec::new();
     if !todo_n.is_empty() {
@@ -312,8 +326,11 @@ pub fn solve(player: &Player, n: &[String], sig: &[String]) -> Result<Solved> {
     Ok(out)
 }
 
-/// Runs the program in the runtime with the script on stdin, returning stdout.
+/// Runs the program in the runtime, returning what it logged to the console.
 fn run(rt: &Runtime, program: String) -> Result<String> {
+    if rt.kind == Kind::Embedded {
+        return run_embedded(program);
+    }
     let mut cmd = Command::new(&rt.path);
     match rt.kind {
         Kind::Deno => {
@@ -328,6 +345,7 @@ fn run(rt: &Runtime, program: String) -> Result<String> {
             }
             cmd.arg("-");
         }
+        Kind::Embedded => unreachable!(),
     }
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     crate::api::streams::hide_window(&mut cmd);
@@ -370,6 +388,41 @@ fn read_all(pipe: Option<&mut impl std::io::Read>) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
+/// Runs the program in the built-in QuickJS engine. The player script recurses
+/// deeply, so it gets its own thread with a large stack; `console.log` is the
+/// one browser API the solver's output needs.
+fn run_embedded(program: String) -> Result<String> {
+    use rquickjs::{Context, Function, Object, Runtime};
+    let worker = std::thread::Builder::new().name("quickjs".into()).stack_size(64 << 20).spawn(move || -> Result<String> {
+        let rt = Runtime::new().context("QuickJS runtime")?;
+        rt.set_max_stack_size(48 << 20);
+        let ctx = Context::full(&rt).context("QuickJS context")?;
+        ctx.with(|ctx| {
+            let logged = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+            let console = Object::new(ctx.clone())?;
+            let sink = logged.clone();
+            console.set(
+                "log",
+                Function::new(ctx.clone(), move |line: String| {
+                    let mut s = sink.borrow_mut();
+                    s.push_str(&line);
+                    s.push('\n');
+                })?,
+            )?;
+            ctx.globals().set("console", console)?;
+            if let Err(e) = ctx.eval::<(), _>(program.as_bytes()) {
+                let detail = match ctx.catch().into_exception() {
+                    Some(exc) => exc.message().unwrap_or_default(),
+                    None => String::new(),
+                };
+                return Err(anyhow!("QuickJS failed: {e} {detail}"));
+            }
+            Ok(logged.take())
+        })
+    })?;
+    worker.join().map_err(|_| anyhow!("QuickJS thread panicked"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,12 +446,35 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs network and Deno or Node.js"]
+    fn embedded_engine_runs_a_program() {
+        let out = run_embedded("var a = [3, 1, 2]; a.sort(); console.log(JSON.stringify({ a: a, s: 'x'.padStart(3, 'y') }));".into()).unwrap();
+        assert_eq!(out.trim(), r#"{"a":[1,2,3],"s":"yyx"}"#);
+        let err = run_embedded("null.x".into()).unwrap_err().to_string();
+        assert!(err.contains("QuickJS failed"), "{err}");
+    }
+
+    #[test]
+    #[ignore = "needs network"]
     fn solves_live_challenges() {
         let p = player().unwrap();
-        println!("player {} sts {:?} runtime {:?}", p.id, p.sts, runtime().map(|r| r.describe()));
+        println!("player {} sts {:?} runtime {}", p.id, p.sts, runtime().describe());
         let s = solve(&p, &["Ah-_xXRqTGCumKp9a".into()], &[]).unwrap();
         println!("{s:?}");
         assert_eq!(s.n.len(), 1);
+    }
+
+    /// The built-in engine against the live player, whatever else is installed.
+    #[test]
+    #[ignore = "needs network; takes a couple of seconds"]
+    fn embedded_engine_solves_live_challenges() {
+        let p = player().unwrap();
+        let scripts = scripts().unwrap();
+        let data = json!({ "type": "player", "player": p.js, "requests": [{ "type": "n", "challenges": ["Ah-_xXRqTGCumKp9a"] }], "output_preprocessed": false });
+        let program = format!("{}\nObject.assign(globalThis, lib);\n{}\nconsole.log(JSON.stringify(jsc({})));\n", scripts.0, scripts.1, data);
+        let t = Instant::now();
+        let out = run_embedded(program).unwrap();
+        println!("{out} in {:?}", t.elapsed());
+        let v: Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["responses"][0]["type"], "result");
     }
 }
