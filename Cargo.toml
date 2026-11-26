@@ -54,6 +54,6 @@ opt-level = 1
 embed-resource = "3"
 
 # GPUI's Windows text backend with one fix: right-to-left text (Arabic, Hebrew)
-# was drawn mirrored. See vendor/gpui-pre-windows/PATCHES.md.
+# needs visual glyph ordering. See vendor/gpui-pre-windows/PATCHES.md.
 [patch.crates-io]
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
