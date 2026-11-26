@@ -2016,6 +2016,7 @@ impl AppView {
         }
         use crate::downloads::{self, JobStatus};
         let p = pal(cx);
+        let radius = rems(0.375 * thumbnail_corner_scale());
         let mut jobs = cx.try_global::<downloads::Downloads>().map(|d| d.jobs.lock().clone()).unwrap_or_default();
         jobs.reverse();
         let small_btn = |id: SharedString, ic: &'static str, tip: &'static str| {
@@ -2082,10 +2083,10 @@ impl AppView {
                         .flex_none()
                         .w(px(72.))
                         .h(px(40.))
-                        .rounded_md()
+                        .rounded(radius)
                         .overflow_hidden()
                         .bg(p.chip)
-                        .child(img(j.video.thumbnail.clone()).size_full().rounded_md().object_fit(ObjectFit::Cover)),
+                        .child(img(j.video.thumbnail.clone()).size_full().rounded(radius).object_fit(ObjectFit::Cover)),
                 )
                 .child(
                     div()
@@ -3036,7 +3037,7 @@ impl AppView {
                 .right(px(right))
                 .bottom(px(bottom))
                 .w(px(w))
-                .rounded_xl()
+                .rounded(crate::player::view::mini_player_radius())
                 .overflow_hidden()
                 .bg(p.surface2)
                 .shadow_2xl()
@@ -4008,7 +4009,7 @@ pub fn refresh_all_pages(cx: &mut App) {
     let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) else { return };
     let ids: Vec<EntityId> = {
         let a = app.read(cx);
-        std::iter::once(a.page.entity_id())
+        [a.page.entity_id(), a.mini_view.entity_id()].into_iter()
             .chain(a.history.iter().map(|(_, v)| v.entity_id()))
             .chain(a.forward.iter().map(|(_, v)| v.entity_id()))
             .collect()

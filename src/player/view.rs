@@ -212,6 +212,10 @@ fn speed_label(s: f64) -> String {
     if (s - 1.0).abs() < 0.001 { translate("Normal").into() } else { format!("{s}") }
 }
 
+pub(crate) fn mini_player_radius() -> Rems {
+    rems(0.75 * crate::ui::thumbnail_corner_scale())
+}
+
 impl Render for PlayerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::add(&crate::perf::VIEW_RENDERS, 1);
@@ -242,7 +246,8 @@ impl Render for PlayerView {
         // own corners: all four on the watch page, the top two in the mini player (its
         // title sits below), none when it fills the window.
         let round_all = !mini && !self.pip && !ui.fullscreen && !ui.windowed && !store::settings_snapshot().theater_mode;
-        let radius = px(12.);
+        // The mini player's video sits inside the card's one-pixel border.
+        let radius = if mini { (mini_player_radius().to_pixels(window.rem_size()) - px(1.)).max(px(0.)) } else { px(12.) };
         let corners = if round_all {
             Corners::all(radius)
         } else if mini {
@@ -253,7 +258,7 @@ impl Render for PlayerView {
         let surface = div()
             .absolute()
             .inset_0()
-            .when(mini, |d| d.rounded_t_xl())
+            .when(mini, |d| d.rounded_t(radius))
             .when(round_all, |d| d.rounded_xl())
             .bg(black())
             .child(
@@ -333,7 +338,7 @@ impl Render for PlayerView {
             .relative()
             .size_full()
             .overflow_hidden()
-            .when(mini, |d| d.rounded_t_xl())
+            .when(mini, |d| d.rounded_t(radius))
             .when(round_all, |d| d.rounded_xl())
             .bg(black())
             .on_hover(cx.listener(|this, h: &bool, _, cx| {
@@ -539,6 +544,7 @@ impl Render for PlayerView {
                     .justify_center()
                     .gap_3()
                     .p_6()
+                    .when(mini, |d| d.rounded_t(radius))
                     .bg(hsla(0., 0., 0., 0.85))
                     .child(icon("circle-alert").size_10().text_color(white()))
                     .child(div().text_color(white()).text_center().max_w(px(560.)).text_sm().child(playback_error_message(&e)))
@@ -600,7 +606,7 @@ impl Render for PlayerView {
         }
 
         if mini {
-            return root.child(self.render_mini_controls(show, paused, time, duration, cx)).into_any_element();
+            return root.child(self.render_mini_controls(show, paused, time, duration, radius, cx)).into_any_element();
         }
 
         if let Some(video) = video.filter(|v| ui.shorts && !self.pip && v.is_short) {
@@ -999,7 +1005,7 @@ fn navigate_to_current(this: &mut PlayerView, window: &mut Window, cx: &mut Cont
 }
 
 impl PlayerView {
-    fn render_mini_controls(&self, show: bool, paused: bool, time: f64, duration: f64, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_mini_controls(&self, show: bool, paused: bool, time: f64, duration: f64, radius: Pixels, cx: &mut Context<Self>) -> impl IntoElement {
         let frac = if duration > 0.0 { (time / duration) as f32 } else { 0.0 };
         let pp = self.player.clone();
         let pp2 = self.player.clone();
@@ -1007,6 +1013,7 @@ impl PlayerView {
         div()
             .absolute()
             .inset_0()
+            .rounded_t(radius)
             .when(show, |d| {
                 d.bg(hsla(0., 0., 0., 0.4))
                     .child(

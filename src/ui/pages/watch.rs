@@ -895,6 +895,7 @@ impl WatchPage {
             .child(selectable_text(SharedString::from(format!("watch-meta-{}", w.id)), format!("{views}  {}", w.date_text)).text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text))
             .child(div().text_sm().text_color(p.text).child(rich_text_with_links("desc-text", desc, &w.description_links)))
             .when(expanded && !chapters.is_empty() && !s.hide_chapters, |d| {
+                let radius = rems(0.375 * thumbnail_corner_scale());
                 d.child(
                     div()
                         .flex()
@@ -940,7 +941,7 @@ impl WatchPage {
                                 .rounded_lg()
                                 .cursor_pointer()
                                 .hover(move |s| s.bg(p.hover))
-                                .when_some(c.thumbnail.clone(), |d, th| d.child(img(SharedString::from(th)).w(px(152.)).h(px(86.)).rounded_md()))
+                                .when_some(c.thumbnail.clone(), |d, th| d.child(img(SharedString::from(th)).w(px(152.)).h(px(86.)).rounded(radius)))
                                 .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text).line_clamp(2).child(c.title.clone()))
                                 .child(div().text_xs().text_color(p.link).child(crate::api::json::format_duration(t as u64)))
                                 .on_click(move |_, window, cx| {
@@ -1398,6 +1399,7 @@ impl WatchPage {
             }));
         }
         let p = pal(cx);
+        let radius = rems(0.375 * thumbnail_corner_scale());
         let mut list = div().id("chapters-list").flex().flex_col().max_h(px(480.)).overflow_y_scroll().py_1();
         for (i, c) in chapters.iter().enumerate() {
             let t = c.start;
@@ -1414,7 +1416,7 @@ impl WatchPage {
                     .when(active, |d| d.bg(p.hover))
                     .hover(move |s| s.bg(p.hover))
                     .child(match c.thumbnail.clone() {
-                        Some(th) => img(SharedString::from(th)).w(px(112.)).h(px(63.)).flex_none().rounded_md().into_any_element(),
+                        Some(th) => img(SharedString::from(th)).w(px(112.)).h(px(63.)).flex_none().rounded(radius).into_any_element(),
                         None => div()
                             .w(px(28.))
                             .flex_none()
