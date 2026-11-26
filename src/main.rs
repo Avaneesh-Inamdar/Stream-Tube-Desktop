@@ -128,7 +128,8 @@ fn main() {
                 ui::apply_theme(Some(window), cx);
                 #[cfg(windows)]
                 media_controls::init(window, cx);
-                cx.new(|cx| ui::app::AppView::new(window, cx))
+                let app = cx.new(|cx| ui::app::AppView::new(window, cx));
+                cx.new(|_| ui::app::Shell::new(app))
             })
             .expect("failed to open window");
             perf::mark("window open");

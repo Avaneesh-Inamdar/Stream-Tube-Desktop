@@ -5,7 +5,7 @@ use crate::player::view::PlayerView;
 use crate::ui::*;
 
 #[derive(Default)]
-struct PipWindow(Option<(AnyWindowHandle, Entity<Player>)>);
+pub struct PipWindow(Option<(AnyWindowHandle, Entity<Player>)>);
 impl Global for PipWindow {}
 
 pub struct PipView {
