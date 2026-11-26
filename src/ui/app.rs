@@ -309,6 +309,23 @@ pub fn play_next(window: &mut Window, cx: &mut App) {
     }
 }
 
+/// The previous queue item, else the video watched before this one, else the
+/// start of this one.
+pub fn play_previous(window: &mut Window, cx: &mut App) {
+    let p = player(cx);
+    if let Some(i) = p.read(cx).queue_pos.filter(|i| *i > 0) {
+        p.update(cx, |p, cx| p.play_queue_index(i - 1, cx));
+        return;
+    }
+    match p.update(cx, |p, _| p.take_played_before()) {
+        Some(v) => navigate(Route::Watch { id: v.id, playlist: None, start: None }, window, cx),
+        None => p.update(cx, |p, cx| {
+            p.seek_to(0.0);
+            cx.notify();
+        }),
+    }
+}
+
 // ───────────────────────── menus & dialogs ─────────────────────────
 
 #[derive(Clone)]
@@ -2461,12 +2478,6 @@ impl AppView {
                     pl.seek_interactive(dur * n / 10.0);
                     true
                 }
-                ("p", true) => {
-                    if let Some(i) = pl.queue_pos.filter(|i| *i > 0) {
-                        pl.play_queue_index(i - 1, cx);
-                    }
-                    true
-                }
                 ("a", false) => {
                     let a = !pl.audio_only;
                     pl.set_audio_only(a, cx);
@@ -2508,6 +2519,7 @@ impl AppView {
                 }
             }
             ("n", true) => play_next(window, cx),
+            ("p", true) => play_previous(window, cx),
             _ => {}
         }
     }
