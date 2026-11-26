@@ -95,10 +95,10 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 
 **Your data stays yours**
 - Subscriptions can live locally. The feed is built by fetching each channel directly, no account needed
-- Or sign in with your Google account to get your own Home feed, subscriptions, playlists, likes and subscribe button
-- Watch history and search history from your other devices sync in, with resume positions, and single entries can be removed
-- Connect your YouTube history (*Settings → General*) to sync playback with your phone or TV. Sign in in the temporary browser window (Chrome, Edge, Brave or Chromium), switch to the YouTube channel you want, then select *Use current YouTube channel* in Stream Tube. You can also import a `cookies.txt` file.
+- Sign in with your Google account to get your own Home feed, subscriptions, playlists, likes and subscribe button. Stream Tube imports your YouTube watch history and recent searches automatically after sign-in
 - Sign in to YouTube to open Watch later, Liked videos and any account Favorites playlist from the sidebar. The local playlists are available in Library.
+- To send videos and resume positions from Stream Tube back to YouTube, connect a browser session under *Settings → General → YouTube watch history*. That session supports watch history in both directions. Sign in with a fresh browser profile (Chrome, Edge, Brave or Chromium) that is deleted afterwards, or load a `cookies.txt` file
+- Your YouTube watch history refreshes in the background and when you return to Stream Tube
 - History, watch later, favourites and playlists are stored in a local SQLite database, and you can pause or clear history at any time
 - Import from YouTube Takeout, NewPipe, FreeTube or OPML. Export to NewPipe JSON, YouTube CSV, OPML or a full backup
 

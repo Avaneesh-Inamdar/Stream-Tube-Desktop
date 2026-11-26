@@ -350,28 +350,6 @@ pub enum Dialog {
     Update,
 }
 
-/// Pulls the account's watch history (videos watched on other devices, with resume
-/// positions) into the local history, then refreshes progress bars.
-pub fn sync_account_history(cx: &mut App) {
-    if !crate::api::auth::signed_in() || !store::settings_snapshot().history_enabled {
-        return;
-    }
-    cx.spawn(async move |cx| {
-        let res = blocking(|| {
-            let _ = crate::api::auth::sync_search_history();
-            crate::api::auth::sync_history(3)
-        })
-        .await;
-        if res.is_ok() {
-            let _ = cx.update(|cx| {
-                cx.set_global(crate::ui::cards::Watched(store::progress_map()));
-                cx.refresh_windows();
-            });
-        }
-    })
-    .detach();
-}
-
 /// State of the TV device-code sign-in shown in the sign-in dialog.
 #[derive(Default)]
 pub struct LoginFlow {
@@ -417,7 +395,10 @@ pub fn import_web_cookies(cx: &mut App) {
                 });
             }
             match res {
-                Ok(name) => toast(cx, tf!("Connected as {0}. What you watch now shows in your YouTube history.", name)),
+                Ok(name) => {
+                    toast(cx, tf!("Connected as {0}. What you watch now shows in your YouTube history.", name));
+                    super::history::refresh_current(cx, false);
+                }
                 Err(e) => toast(cx, crate::ui::friendly_error(&format!("{e:#}"))),
             }
             cx.refresh_windows();
@@ -428,6 +409,7 @@ pub fn import_web_cookies(cx: &mut App) {
 
 pub fn disconnect_web(cx: &mut App) {
     crate::api::web::disconnect();
+    super::history::refresh_current(cx, false);
     toast(cx, t("Browser sign-in disconnected"));
     cx.refresh_windows();
 }
@@ -440,6 +422,7 @@ pub fn open_sign_in(_window: &mut Window, cx: &mut App) {
 
 pub fn sign_out(cx: &mut App) {
     crate::api::auth::sign_out();
+    super::history::refresh_current(cx, false);
     toast(cx, t("Signed out"));
     if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
         app.update(cx, |a, cx| {
@@ -821,7 +804,9 @@ impl AppView {
         // "Background play" off: pause when the window is minimized, resume when restored
         // a hold-for-2x can't outlive the window losing focus (the key/button release goes elsewhere)
         subs.push(cx.observe_window_activation(window, |this: &mut Self, window, cx| {
-            if !window.is_window_active() {
+            if window.is_window_active() {
+                super::history::refresh_current(cx, false);
+            } else {
                 this.space_down = false;
                 player(cx).update(cx, |p, cx| {
                     p.end_boost();
@@ -889,6 +874,13 @@ impl AppView {
         });
         crate::perf::mark("app shell");
         let page = build_page(&start, window, cx);
+        super::history::refresh_current(cx, false);
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(super::history::REFRESH_INTERVAL).await;
+            if this.update(cx, |_, cx| super::history::refresh_current(cx, false)).is_err() {
+                break;
+            }
+        }).detach();
         crate::perf::mark("start page");
         crate::updater::check_on_startup(cx);
         if let Route::Search(q) = &start {
@@ -900,7 +892,9 @@ impl AppView {
         // keep the local subscription list (sidebar, local feed) in step with the
         // account: immediately when it's empty, otherwise once a day
         if crate::api::auth::signed_in() {
-            sync_account_history(cx);
+            cx.spawn(async move |_, _| {
+                let _ = blocking(crate::api::auth::sync_search_history).await;
+            }).detach();
             let last = store::kv_get("subs_synced_at").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
             if store::subscriptions().is_empty() || crate::api::json::now() - last > 24 * 3600 {
                 cx.spawn(async move |this, cx| {
@@ -1027,7 +1021,8 @@ impl AppView {
                             cx.notify();
                         });
                         // bring the account's history and subscriptions to this device
-                        let _ = cx.update(|cx| sync_account_history(cx));
+                        let _ = cx.update(|cx| super::history::refresh_current(cx, false));
+                        let _ = blocking(auth::sync_search_history).await;
                         let res = blocking(auth::sync_subscriptions).await;
                         let _ = this.update(cx, |t, cx| {
                             if let Ok(n) = res {
@@ -1109,6 +1104,7 @@ impl AppView {
                             t.dialog = None;
                         }
                         toast(cx, tf!("Connected as {0}. What you watch now shows in your YouTube history.", name));
+                        super::history::refresh_current(cx, false);
                         cx.refresh_windows();
                     }
                     Err(e) => {

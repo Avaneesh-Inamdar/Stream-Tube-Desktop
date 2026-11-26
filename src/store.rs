@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -358,6 +359,13 @@ pub fn settings_snapshot() -> Arc<Settings> {
     settings_lock().read().clone()
 }
 
+static HISTORY_RECORDING_REVISION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn history_recording_revision() -> Option<u64> {
+    let settings = settings_lock().read();
+    settings.history_enabled.then(|| HISTORY_RECORDING_REVISION.load(Ordering::Relaxed))
+}
+
 pub fn update_settings(f: impl FnOnce(&mut Settings)) {
     // one writer at a time, so two quick changes from different threads
     // can't both start from the same old copy and drop one of them
@@ -367,7 +375,11 @@ pub fn update_settings(f: impl FnOnce(&mut Settings)) {
     f(&mut s);
     let _ = write_settings_file(&s);
     let _ = save_setting_json("settings", &s);
-    *settings_lock().write() = Arc::new(s);
+    let mut current = settings_lock().write();
+    if current.history_enabled != s.history_enabled {
+        HISTORY_RECORDING_REVISION.fetch_add(1, Ordering::Relaxed);
+    }
+    *current = Arc::new(s);
 }
 
 /// Whether mpv can use this proxy itself (it only speaks HTTP proxies).
@@ -448,6 +460,7 @@ const TABLES: &str = "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value
      CREATE TABLE IF NOT EXISTS profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, color INTEGER NOT NULL);
      CREATE TABLE IF NOT EXISTS profile_channels (profile_id INTEGER NOT NULL, channel_id TEXT NOT NULL, PRIMARY KEY(profile_id, channel_id));
      CREATE TABLE IF NOT EXISTS history (video_id TEXT PRIMARY KEY, json TEXT NOT NULL, watched_at INTEGER NOT NULL, progress REAL NOT NULL DEFAULT 0, duration REAL NOT NULL DEFAULT 0);
+     CREATE TABLE IF NOT EXISTS history_sync (video_id TEXT PRIMARY KEY, account TEXT, remote_progress REAL, local_updated_at INTEGER NOT NULL DEFAULT 0, removed INTEGER NOT NULL DEFAULT 0);
      CREATE TABLE IF NOT EXISTS playlists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, created_at INTEGER NOT NULL, protected INTEGER NOT NULL DEFAULT 0, yt_id TEXT);
      CREATE TABLE IF NOT EXISTS playlist_items (playlist_id INTEGER NOT NULL, video_id TEXT NOT NULL, json TEXT NOT NULL, added_at INTEGER NOT NULL, position INTEGER NOT NULL, PRIMARY KEY(playlist_id, video_id));
      CREATE TABLE IF NOT EXISTS search_history (query TEXT PRIMARY KEY, at INTEGER NOT NULL);
@@ -734,23 +747,49 @@ pub fn history_add(v: &VideoItem) {
     if !settings_snapshot().history_enabled {
         return;
     }
-    if let Ok(j) = serde_json::to_string(v) {
-        let _ = db().lock().execute(
+    let result = (|| -> Result<()> {
+        let j = serde_json::to_string(v)?;
+        let mut conn = db().lock();
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO history(video_id, json, watched_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(video_id) DO UPDATE SET json=excluded.json, watched_at=excluded.watched_at",
             params![v.id, j, crate::api::json::now()],
-        );
+        )?;
+        tx.execute("UPDATE history_sync SET removed=0 WHERE video_id=?1 AND removed<>0", [&v.id])?;
+        tx.commit()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        eprintln!("streamtube: could not save watch history: {error}");
     }
 }
 
 pub fn history_progress(video_id: &str, progress: f64, duration: f64) {
-    if !settings_snapshot().history_enabled {
+    if !settings_snapshot().history_enabled || !progress.is_finite() || progress < 0.0 || !duration.is_finite() || duration < 0.0 {
         return;
     }
-    let _ = db().lock().execute(
-        "UPDATE history SET progress=?2, duration=?3 WHERE video_id=?1",
-        params![video_id, progress, duration],
-    );
+    let result = (|| -> Result<()> {
+        let mut conn = db().lock();
+        let tx = conn.transaction()?;
+        let updated = tx.execute(
+            "UPDATE history SET progress=?2, duration=?3
+             WHERE video_id=?1 AND (progress<>?2 OR duration<>?3)",
+            params![video_id, progress, duration],
+        )?;
+        if updated > 0 {
+            tx.execute(
+                "INSERT INTO history_sync(video_id, local_updated_at) VALUES (?1, ?2)
+                 ON CONFLICT(video_id) DO UPDATE SET local_updated_at=excluded.local_updated_at",
+                params![video_id, chrono::Utc::now().timestamp_millis()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        eprintln!("streamtube: could not save playback position: {error}");
+    }
 }
 
 /// Like `history_progress`, on a background thread: the player saves progress every
@@ -812,37 +851,213 @@ pub fn progress_map() -> HashMap<String, (f64, f64)> {
         .collect()
 }
 
-/// Merges an entry from the account's YouTube history: adds it when missing and keeps
-/// the furthest resume position. Local entries keep their own date and order.
-/// Returns true when the entry was new.
-pub fn history_merge_remote(v: &VideoItem, progress: f64, duration: f64, watched_at: i64) -> bool {
-    if !settings_snapshot().history_enabled {
-        return false;
+pub fn playback_position(video_id: &str) -> Option<(f64, f64)> {
+    db().lock().query_row(
+        "SELECT progress, duration FROM history WHERE video_id=?1",
+        [video_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).ok()
+}
+
+pub fn resume_position(video_id: &str) -> Option<f64> {
+    let (progress, duration) = playback_position(video_id)?;
+    (progress > 10.0 && (duration <= 0.0 || progress < duration - 15.0)).then_some(progress)
+}
+
+pub fn history_merge_remote(
+    account: u64,
+    entries: &[crate::api::history::Entry],
+    protected_video: Option<&str>,
+    requested_at: i64,
+    offset: usize,
+    recording_revision: u64,
+) -> Result<()> {
+    if history_recording_revision() != Some(recording_revision) {
+        return Ok(());
     }
-    let Ok(j) = serde_json::to_string(v) else { return false };
-    let conn = db().lock();
-    let existed = conn
-        .query_row("SELECT 1 FROM history WHERE video_id=?1", [&v.id], |_| Ok(()))
-        .optional()
-        .ok()
-        .flatten()
-        .is_some();
-    let _ = conn.execute(
-        "INSERT INTO history(video_id, json, watched_at, progress, duration) VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(video_id) DO UPDATE SET
-           progress = CASE WHEN excluded.progress > history.progress THEN excluded.progress ELSE history.progress END,
-           duration = CASE WHEN history.duration > 0 THEN history.duration ELSE excluded.duration END",
-        params![v.id, j, watched_at, progress, duration],
-    );
-    !existed
+    merge_remote_history(&mut db().lock(), &account.to_string(), entries, protected_video, requested_at, offset)
+}
+
+fn merge_remote_history(
+    conn: &mut Connection,
+    account: &str,
+    entries: &[crate::api::history::Entry],
+    protected_video: Option<&str>,
+    requested_at: i64,
+    offset: usize,
+) -> Result<()> {
+    const LOCAL_GRACE_MS: i64 = 30_000;
+    let tx = conn.transaction()?;
+    {
+        let mut local = tx.prepare("SELECT progress FROM history WHERE video_id=?1")?;
+        let mut state = tx.prepare(
+            "SELECT account, remote_progress, local_updated_at, removed FROM history_sync WHERE video_id=?1",
+        )?;
+        let mut observe = tx.prepare(
+            "INSERT INTO history_sync(video_id, account, remote_progress, removed) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(video_id) DO UPDATE SET account=excluded.account,
+                 remote_progress=excluded.remote_progress, removed=excluded.removed",
+        )?;
+        let mut save = tx.prepare(
+            "INSERT INTO history(video_id, json, watched_at, progress, duration) VALUES (?1, ?2, ?3, COALESCE(?4, 0), ?5)
+             ON CONFLICT(video_id) DO UPDATE SET progress=COALESCE(?4, history.progress),
+                 duration=CASE WHEN history.duration > 0 THEN history.duration ELSE excluded.duration END",
+        )?;
+        for (index, entry) in entries.iter().enumerate() {
+            let id = entry.video.id.as_str();
+            if Some(id) == protected_video {
+                continue;
+            }
+            let (observed_account, previous_remote, local_at, removed): (Option<String>, Option<f64>, i64, bool) =
+                state.query_row([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+                    .optional()?.unwrap_or_default();
+            if local_at > requested_at.saturating_sub(LOCAL_GRACE_MS) {
+                continue;
+            }
+            let local_progress: Option<f64> = local.query_row([id], |row| row.get(0)).optional()?;
+            let previous_remote = previous_remote.filter(|_| observed_account.as_deref() == Some(account));
+            let remote_changed = entry.progress.zip(previous_remote)
+                .is_some_and(|(remote, previous)| (remote.seconds - previous).abs() >= remote.precision);
+            let still_removed = removed && !remote_changed;
+            let observation = entry.progress.map(|p| p.seconds).or(previous_remote);
+            observe.execute(params![id, account, observation, still_removed])?;
+            if still_removed {
+                continue;
+            }
+            let accepted = entry.progress.filter(|remote| {
+                // Without a prior server observation, its age is unknown. Keep
+                // meaningful local progress until the server position changes.
+                local_progress.is_none_or(|position| (position == 0.0 && local_at == 0 && previous_remote.is_none()) ||
+                    (remote_changed && (remote.seconds - position).abs() >= remote.precision))
+            });
+            let json = serde_json::to_string(&entry.video)?;
+            let duration = entry.video.duration_secs.unwrap_or(0) as f64;
+            // History responses are ordered but don't give a per-video date.
+            let watched_at = requested_at / 1000 - (offset + index) as i64;
+            save.execute(params![id, json, watched_at, accepted.map(|p| p.seconds), duration])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 pub fn history_remove(video_id: &str) {
-    let _ = db().lock().execute("DELETE FROM history WHERE video_id=?1", [video_id]);
+    if let Err(error) = try_history_remove(video_id) {
+        eprintln!("streamtube: could not remove watch history: {error}");
+    }
+}
+
+pub(crate) fn try_history_remove(video_id: &str) -> Result<()> {
+    let mut conn = db().lock();
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO history_sync(video_id, local_updated_at, removed) VALUES (?1, ?2, 1)
+         ON CONFLICT(video_id) DO UPDATE SET removed=1, local_updated_at=excluded.local_updated_at",
+        params![video_id, chrono::Utc::now().timestamp_millis()],
+    )?;
+    tx.execute("DELETE FROM history WHERE video_id=?1", [video_id])?;
+    tx.commit()?;
+    Ok(())
 }
 
 pub fn history_clear() {
-    let _ = db().lock().execute("DELETE FROM history", []);
+    let result = (|| -> Result<()> {
+        let mut conn = db().lock();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO history_sync(video_id, local_updated_at, removed)
+             SELECT video_id, ?1, 1 FROM history WHERE true
+             ON CONFLICT(video_id) DO UPDATE SET removed=1, local_updated_at=excluded.local_updated_at",
+            [chrono::Utc::now().timestamp_millis()],
+        )?;
+        tx.execute("DELETE FROM history", [])?;
+        tx.commit()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        eprintln!("streamtube: could not clear watch history: {error}");
+    }
+}
+
+#[cfg(test)]
+mod history_merge_tests {
+    use super::*;
+    use crate::api::history::{Entry, Position};
+
+    const NOW: i64 = 1_700_000_000_000;
+    const VIDEO_ID: &str = "test-video";
+
+    fn entry(seconds: Option<f64>) -> Entry {
+        Entry {
+            video: VideoItem { id: VIDEO_ID.into(), duration_secs: Some(600), ..Default::default() },
+            progress: seconds.map(|seconds| Position { seconds, precision: 1.0 }),
+            removal_token: None,
+        }
+    }
+
+    fn progress(conn: &Connection) -> Option<f64> {
+        conn.query_row("SELECT progress FROM history WHERE video_id=?1", [VIDEO_ID], |row| row.get(0))
+            .optional().unwrap()
+    }
+
+    #[test]
+    fn uses_a_changed_remote_position_even_when_it_moves_backwards() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(TABLES).unwrap();
+        merge_remote_history(&mut conn, "web", &[entry(Some(300.0))], None, NOW, 0).unwrap();
+        assert_eq!(progress(&conn), Some(300.0));
+
+        merge_remote_history(&mut conn, "web", &[entry(None)], None, NOW + 60_000, 0).unwrap();
+        assert_eq!(progress(&conn), Some(300.0));
+
+        merge_remote_history(&mut conn, "web", &[entry(Some(80.0))], None, NOW + 120_000, 0).unwrap();
+        assert_eq!(progress(&conn), Some(80.0));
+    }
+
+    #[test]
+    fn first_observation_and_in_flight_refresh_keep_local_progress() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(TABLES).unwrap();
+        conn.execute("INSERT INTO history VALUES (?1, '{}', 123, 300, 600)", [VIDEO_ID]).unwrap();
+        merge_remote_history(&mut conn, "web", &[entry(Some(450.0))], None, NOW, 0).unwrap();
+        assert_eq!(progress(&conn), Some(300.0));
+
+        conn.execute("UPDATE history_sync SET local_updated_at=?1 WHERE video_id=?2", params![NOW + 61_000, VIDEO_ID]).unwrap();
+        merge_remote_history(&mut conn, "web", &[entry(Some(80.0))], None, NOW + 60_000, 0).unwrap();
+        assert_eq!(progress(&conn), Some(300.0));
+
+        merge_remote_history(&mut conn, "web", &[entry(Some(80.0))], Some(VIDEO_ID), NOW + 120_000, 0).unwrap();
+        assert_eq!(progress(&conn), Some(300.0));
+        merge_remote_history(&mut conn, "web", &[entry(Some(80.0))], None, NOW + 120_000, 0).unwrap();
+        assert_eq!(progress(&conn), Some(80.0));
+    }
+
+    #[test]
+    fn an_unchanged_remote_entry_does_not_reappear_after_local_removal() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(TABLES).unwrap();
+        merge_remote_history(&mut conn, "web", &[entry(Some(300.0))], None, NOW, 0).unwrap();
+        conn.execute("DELETE FROM history", []).unwrap();
+        conn.execute("UPDATE history_sync SET removed=1", []).unwrap();
+        merge_remote_history(&mut conn, "web", &[entry(Some(300.0))], None, NOW + 60_000, 0).unwrap();
+        assert_eq!(progress(&conn), None);
+
+        merge_remote_history(&mut conn, "web", &[entry(Some(80.0))], None, NOW + 120_000, 0).unwrap();
+        assert_eq!(progress(&conn), Some(80.0));
+    }
+
+    #[test]
+    fn does_not_treat_a_different_account_as_a_new_view_or_overwrite_a_local_replay() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(TABLES).unwrap();
+        merge_remote_history(&mut conn, "web", &[entry(Some(300.0))], None, NOW, 0).unwrap();
+        merge_remote_history(&mut conn, "another-account", &[entry(Some(450.0))], None, NOW + 60_000, 0).unwrap();
+        assert_eq!(progress(&conn), Some(300.0));
+        conn.execute("UPDATE history SET progress=0 WHERE video_id=?1", [VIDEO_ID]).unwrap();
+        conn.execute("UPDATE history_sync SET local_updated_at=?1 WHERE video_id=?2", params![NOW + 65_000, VIDEO_ID]).unwrap();
+        merge_remote_history(&mut conn, "another-account", &[entry(Some(450.0))], None, NOW + 120_000, 0).unwrap();
+        assert_eq!(progress(&conn), Some(0.0));
+    }
 }
 
 // ───────────────────────── search history ─────────────────────────

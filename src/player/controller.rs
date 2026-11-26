@@ -99,6 +99,7 @@ pub struct Player {
     pub loop_video: bool,
     load_serial: u64,
     last_progress_save: f64,
+    history_report: Option<crate::api::web::PlaybackReport>,
     pub storyboard: Option<Storyboard>,
     last_prop_notify: std::time::Instant,
     fallback_tried: bool,
@@ -235,6 +236,7 @@ impl Player {
             auto_crop: Default::default(),
             loop_video: s.loop_video,
             load_serial: 0,
+            history_report: None,
             last_progress_save: 0.0,
             storyboard: None,
             last_prop_notify: std::time::Instant::now(),
@@ -557,7 +559,7 @@ impl Player {
                     }
                     ("duration", PropValue::Double(d)) => self.duration = d,
                     ("pause", PropValue::Flag(b)) => {
-                        self.paused = b;
+                        self.update_paused(b);
                         self.frame_progress = None;
                     }
                     ("eof-reached", PropValue::Flag(b)) => {
@@ -625,13 +627,18 @@ impl Player {
             return;
         }
         self.eof = true;
-        self.save_progress(true);
+        self.time = position;
         if self.loop_video {
             self.eof = false;
+            self.save_progress(true);
+            if let Some(report) = &self.history_report {
+                report.progress(self.time, true, true);
+            }
             self.seek_to(0.0);
             self.set_paused(false, cx);
             return;
         }
+        self.finish_playback_history();
         if let Some(pos) = self.queue_pos {
             if pos + 1 < self.queue.len() {
                 self.play_queue_index(pos + 1, cx);
@@ -796,9 +803,17 @@ impl Player {
 
     fn on_time(&mut self, cx: &mut Context<Self>) {
         let t = self.time;
+        if !self.loading && !self.paused && !self.buffering && !self.eof {
+            if let Some(report) = &mut self.history_report {
+                report.start(t, self.duration);
+            }
+        }
         // progress save
-        if (t - self.last_progress_save).abs() >= 5.0 {
+        if !self.loading && !self.eof && (t - self.last_progress_save).abs() >= 5.0 {
             self.save_progress(false);
+            if let Some(report) = &self.history_report {
+                report.progress(t, !self.paused, false);
+            }
             let id = self.video.as_ref().map(|v| v.id.clone());
             if let Some(id) = id {
                 cx.default_global::<crate::ui::cards::Watched>().0.insert(id, (t, self.duration));
@@ -880,17 +895,31 @@ impl Player {
         self.sb_prompt = prompt;
     }
 
-    pub fn save_progress(&mut self, force: bool) {
+    fn save_progress(&mut self, force: bool) {
         if let Some(v) = &self.video {
-            if force || self.time > 0.0 {
+            if self.time > 0.0 || (force && (self.playback_ready || self.last_progress_save > 0.0 || self.eof)) {
                 // the periodic save goes to a background thread; a forced one (switching
                 // videos, the end, quitting) is written before going on
                 store::history_progress_queued(&v.id, self.time, self.duration, force);
                 self.last_progress_save = self.time;
-                if self.foreground {
-                    crate::api::web::report_progress(&v.id, self.time, !self.paused);
-                }
             }
+        }
+    }
+
+    pub fn finish_playback_history(&mut self) {
+        let report = self.history_report.take();
+        if self.updated_position_while_paused().is_some() {
+            // another device moved on while this one was paused: keep its position
+            if let Some(report) = report {
+                report.abandon();
+            }
+            return;
+        }
+        if !self.loading {
+            self.save_progress(true);
+        }
+        if let Some(report) = report {
+            report.finish(self.time);
         }
     }
 
@@ -912,11 +941,7 @@ impl Player {
         self.preloaded_until = 0.0;
         self.set_playback_ready(false, cx);
         self.save_progress(true);
-        if self.foreground {
-            if let Some(prev) = &self.video {
-                crate::api::web::report_stop(&prev.id, self.time);
-            }
-        }
+        self.finish_playback_history();
         let Some(mpv) = self.ensure_mpv(cx) else {
             self.video = Some(video);
             self.sync_idle(cx);
@@ -932,6 +957,7 @@ impl Player {
         self.loading = true;
         self.error = None;
         self.time = 0.0;
+        self.last_progress_save = 0.0;
         self.duration = video.duration_secs.unwrap_or(0) as f64;
         self.eof = false;
         self.segments.clear();
@@ -951,18 +977,12 @@ impl Player {
         }
         let _ = mpv.command(&["stop"]);
         store::history_add(&video);
-        // with the browser sign-in, the video goes into the account's YouTube history
-        // and the position reported as it plays is where other devices resume
-        if self.foreground { crate::api::web::report_start(&video.id, self.duration); }
+        self.history_report = crate::api::web::PlaybackReport::new(video.id.clone(), serial);
         self.sync_idle(cx);
         let s = store::settings_snapshot();
         let id = video.id.clone();
-        let resume = if start.is_some() {
-            start
-        } else if s.resume_playback {
-            store::progress_map().get(&id).and_then(|(p, d)| {
-                (*p > 10.0 && (*d <= 0.0 || *p < d - 15.0)).then_some(*p)
-            })
+        let refresh = if s.resume_playback && start.is_none() && !video.is_short {
+            crate::ui::history::refresh_for_playback(cx)
         } else {
             None
         };
@@ -994,7 +1014,16 @@ impl Player {
             .detach();
         }
         cx.spawn(async move |this, cx| {
-            let res = blocking(move || streams::get_streams(&id)).await;
+            let streams_id = id.clone();
+            let res = blocking(move || streams::get_streams(&streams_id)).await;
+            if res.is_ok() {
+                if let Some(refresh) = refresh {
+                    // Use fresher cross-device progress if it arrives shortly.
+                    // A slow history endpoint must not hold up playback.
+                    let limit = cx.background_executor().timer(std::time::Duration::from_millis(1200));
+                    let _ = futures::future::select(refresh, Box::pin(limit)).await;
+                }
+            }
             let _ = this.update(cx, |p, cx| {
                 if p.load_serial != serial {
                     return;
@@ -1023,6 +1052,7 @@ impl Player {
                         p.streams = Some(info);
                         // default caption
                         let s = store::settings_snapshot();
+                        let resume = start.or_else(|| s.resume_playback.then(|| store::resume_position(&id)).flatten());
                         p.caption = if s.captions_enabled {
                             p.streams.as_ref().and_then(|i| pick_caption(i, &s.captions_lang))
                         } else {
@@ -1470,6 +1500,9 @@ impl Player {
     pub fn toggle_pause(&mut self, cx: &mut App) {
         if self.eof {
             self.eof = false;
+            if let Some(video) = &self.video {
+                self.history_report = crate::api::web::PlaybackReport::new(video.id.clone(), self.load_serial);
+            }
             self.seek_to(0.0);
             self.set_paused(false, cx);
             return;
@@ -1479,14 +1512,41 @@ impl Player {
     }
 
     pub fn set_paused(&mut self, p: bool, cx: &mut App) {
-        self.paused = p;
+        if !p && store::settings_snapshot().resume_playback {
+            if let Some(position) = self.updated_position_while_paused() {
+                self.seek_to(position);
+            }
+        }
         if let Some(m) = &self.mpv {
             m.set_flag("pause", p);
         }
-        if p {
+        self.update_paused(p);
+        self.sync_idle(cx);
+    }
+
+    fn updated_position_while_paused(&self) -> Option<f64> {
+        if !self.paused || !self.playback_ready || self.loading || self.eof || self.seeking
+            || (self.time - self.last_progress_save).abs() >= 0.5
+        {
+            return None;
+        }
+        let (position, _) = store::playback_position(&self.video.as_ref()?.id)?;
+        (position.is_finite() && (position - self.last_progress_save).abs() >= 1.0).then_some(position)
+    }
+
+    fn update_paused(&mut self, paused: bool) {
+        if self.paused == paused {
+            return;
+        }
+        self.paused = paused;
+        if !self.loading {
+            if let Some(report) = &self.history_report {
+                report.progress(self.time, !paused, true);
+            }
+        }
+        if paused && !self.loading {
             self.save_progress(true);
         }
-        self.sync_idle(cx);
     }
 
     pub fn seek_to(&mut self, t: f64) {
@@ -1516,6 +1576,9 @@ impl Player {
             self.set_seek_cache_target((t < end).then_some((t, end)));
         }
         self.time = t;
+        if let Some(report) = &self.history_report {
+            report.seek(t);
+        }
         if let Some(m) = &self.mpv {
             self.hold_picture = Some(m.presented_frames());
             let _ = m.command(&["seek", &format!("{t}"), mode]);
@@ -1667,11 +1730,7 @@ impl Player {
         self.preloaded_until = 0.0;
         self.set_playback_ready(false, cx);
         self.save_progress(true);
-        if self.foreground {
-            if let Some(v) = &self.video {
-                crate::api::web::report_stop(&v.id, self.time);
-            }
-        }
+        self.finish_playback_history();
         self.load_serial += 1;
         if let Some(m) = &self.mpv {
             let _ = m.command(&["stop"]);

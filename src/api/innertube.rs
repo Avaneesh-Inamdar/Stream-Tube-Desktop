@@ -39,12 +39,16 @@ fn call_with_context(endpoint: &str, mut body: Value, context: Value) -> Result<
 
 /// Walks any Innertube response and collects every recognizable item plus the last continuation token.
 pub fn collect_items(v: &Value) -> Page {
+    collect_items_with_video_nodes(v, |_, _| {})
+}
+
+pub(super) fn collect_items_with_video_nodes(v: &Value, mut node: impl FnMut(&VideoItem, &Value)) -> Page {
     let mut page = Page::default();
-    walk_items(v, &mut page);
+    walk_items(v, &mut page, &mut node);
     page
 }
 
-fn walk_items(v: &Value, page: &mut Page) {
+fn walk_items(v: &Value, page: &mut Page, node: &mut impl FnMut(&VideoItem, &Value)) {
     match v {
         Value::Object(m) => {
             for (k, c) in m {
@@ -55,21 +59,25 @@ fn walk_items(v: &Value, page: &mut Page) {
                     "videoRenderer" | "compactVideoRenderer" | "gridVideoRenderer" | "playlistVideoRenderer"
                     | "playlistPanelVideoRenderer" | "videoWithContextRenderer" => {
                         if let Some(vi) = parse_video_renderer(c) {
+                            node(&vi, c);
                             page.items.push(Item::Video(vi));
                         }
                     }
                     "reelItemRenderer" => {
                         if let Some(vi) = parse_reel_item(c) {
+                            node(&vi, c);
                             page.items.push(Item::Video(vi));
                         }
                     }
                     "shortsLockupViewModel" => {
                         if let Some(vi) = parse_shorts_lockup(c) {
+                            node(&vi, c);
                             page.items.push(Item::Video(vi));
                         }
                     }
                     "tileRenderer" => {
                         if let Some(v) = parse_tile(c) {
+                            node(&v, c);
                             page.items.push(Item::Video(v));
                         }
                     }
@@ -80,6 +88,9 @@ fn walk_items(v: &Value, page: &mut Page) {
                     }
                     "lockupViewModel" => {
                         if let Some(it) = parse_lockup(c) {
+                            if let Item::Video(video) = &it {
+                                node(video, c);
+                            }
                             page.items.push(it);
                         }
                     }
@@ -112,11 +123,11 @@ fn walk_items(v: &Value, page: &mut Page) {
                     // Skip noisy sections that duplicate items or are UI chrome.
                     "frameworkUpdates" | "topbar" | "header" | "engagementPanels" | "playerOverlays" | "menu"
                     | "endScreen" | "onResponseReceivedCommands" => {}
-                    _ => walk_items(c, page),
+                    _ => walk_items(c, page, node),
                 }
             }
         }
-        Value::Array(a) => a.iter().for_each(|c| walk_items(c, page)),
+        Value::Array(a) => a.iter().for_each(|c| walk_items(c, page, node)),
         _ => {}
     }
 }
