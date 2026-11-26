@@ -1937,6 +1937,18 @@ impl AppView {
 
     // ───── keyboard ─────
 
+    fn capture_fullscreen_escape(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if ev.keystroke.key == "escape"
+            && cx.global::<UiState>().fullscreen
+            && !self.dl_panel
+            && self.dialog.is_none()
+            && cx.global::<OpenMenu>().0.is_none()
+        {
+            exit_fullscreen(window, cx);
+            cx.stop_propagation();
+        }
+    }
+
     fn on_key_up(&mut self, ev: &KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if ev.keystroke.key != "space" || !std::mem::take(&mut self.space_down) {
             return;
@@ -2011,8 +2023,9 @@ impl AppView {
                 cx.notify();
                 return;
             }
-            if cx.global::<UiState>().fullscreen {
-                exit_fullscreen(window, cx);
+            if !dialog_focused && !self.history.is_empty() {
+                self.back(window, cx);
+                cx.stop_propagation();
                 return;
             }
         }
@@ -3279,6 +3292,7 @@ impl Render for AppView {
             .bg(p.bg)
             .text_color(p.text)
             .font_family(".SystemUIFont")
+            .capture_key_down(cx.listener(Self::capture_fullscreen_escape))
             .on_key_down(cx.listener(Self::on_key))
             .on_key_up(cx.listener(Self::on_key_up))
             .on_mouse_down(
