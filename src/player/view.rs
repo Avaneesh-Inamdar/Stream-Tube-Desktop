@@ -920,6 +920,13 @@ fn context_items(player: &Entity<Player>, cx: &App) -> Vec<crate::ui::app::MenuI
     use crate::ui::app::MenuItem;
     let pl = player.read(cx);
     let id = pl.video.as_ref().map(|v| v.id.clone()).unwrap_or_default();
+    let title = pl.video.as_ref().map(|v| {
+        if store::settings_snapshot().dearrow_titles {
+            services::branding_cached(&v.id).flatten().and_then(|b| b.title).unwrap_or_else(|| v.title.clone())
+        } else {
+            v.title.clone()
+        }
+    }).unwrap_or_default();
     let t = pl.time.max(0.0) as u64;
     let looping = pl.loop_video;
     let stats = pl.show_stats;
@@ -933,6 +940,13 @@ fn context_items(player: &Entity<Player>, cx: &App) -> Vec<crate::ui::app::MenuI
                 cx.notify()
             })
         }),
+    ];
+    if !title.is_empty() {
+        items.push(MenuItem::new("copy", translate("Copy title"), move |_, cx| {
+            crate::ui::copy_text_to_clipboard(title.clone(), cx);
+        }));
+    }
+    items.extend([
         MenuItem::new("link", translate("Copy video URL"), move |_, cx| {
             crate::ui::copy_to_clipboard(format!("https://youtu.be/{id1}"), cx);
             crate::ui::toast(cx, translate("Link copied"));
@@ -952,7 +966,7 @@ fn context_items(player: &Entity<Player>, cx: &App) -> Vec<crate::ui::app::MenuI
             p.toggle_pause(cx);
             cx.notify()
         })),
-    ];
+    ]);
     if can_step {
         for (forward, icon, label, key) in [
             (false, "chevron-left", translate("Previous frame"), ','),
@@ -1610,7 +1624,7 @@ impl PlayerView {
             .bg(hsla(0., 0., 0., 0.72))
             .text_xs()
             .text_color(white())
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .occlude()
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(
                 div()
@@ -1634,12 +1648,12 @@ impl PlayerView {
                         })
                     }),
             )
-            .children(rows.into_iter().map(|(k, v)| {
+            .children(rows.into_iter().enumerate().map(|(i, (k, v))| {
                 div()
                     .flex()
                     .gap_3()
                     .child(div().w(px(130.)).flex_none().text_right().font_weight(FontWeight::SEMIBOLD).child(translate(k)))
-                    .child(div().flex_1().text_color(hsla(0., 0., 1., 0.85)).child(v))
+                    .child(crate::ui::widgets::selectable_text(SharedString::from(format!("stats-v-{i}")), v).flex_1().text_color(hsla(0., 0., 1., 0.85)))
             }))
             .with_animation("stats-in", Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()), |d, t| d.opacity(t))
     }

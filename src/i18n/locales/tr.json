@@ -872,5 +872,8 @@
   "{0} minute": "{0} dakika",
   "{0} minutes": "{0} dakika",
   "Imported {0} subscriptions, {1} history entries, {2} playlists ({3} videos)": "{0} abonelik, {1} geçmiş kaydı ve {2} oynatma listesi ({3} video) içe aktarıldı",
-  "Picture-in-picture above other apps": "Diğer uygulamaların üzerinde resim içinde resim"
+"Picture-in-picture above other apps": "Diğer uygulamaların üzerinde resim içinde resim",
+  "Copied to clipboard": "Panoya kopyalandı",
+  "Copy title": "Başlığı kopyala",
+  "Copy channel name": "Kanal adını kopyala"
 }

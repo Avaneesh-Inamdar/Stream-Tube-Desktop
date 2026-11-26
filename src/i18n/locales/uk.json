@@ -872,5 +872,8 @@
   "{0} minute": "{0} хв",
   "{0} minutes": "{0} хв",
   "Imported {0} subscriptions, {1} history entries, {2} playlists ({3} videos)": "Імпортовано {0} підписок, {1} записів історії, {2} списків відтворення ({3} відео)",
-  "Picture-in-picture above other apps": "Картинка в картинці поверх інших програм"
+"Picture-in-picture above other apps": "Картинка в картинці поверх інших програм",
+  "Copied to clipboard": "Скопійовано в буфер обміну",
+  "Copy title": "Скопіювати назву",
+  "Copy channel name": "Скопіювати назву каналу"
 }
