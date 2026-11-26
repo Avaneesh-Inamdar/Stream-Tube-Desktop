@@ -612,13 +612,12 @@ pub fn video_row(v: &VideoItem, thumb_w: Pixels, cx: &mut App) -> AnyElement {
         .into_any_element()
 }
 
-/// Compact row used for related videos / queues.
-pub fn compact_row(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn(&mut Window, &mut App)>>, cx: &mut App) -> AnyElement {
-    compact_row_with(v, active, on_click, Vec::new(), cx)
+/// Compact playlist or queue row with its own menu actions.
+pub fn compact_row_with(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn(&mut Window, &mut App)>>, extra: Vec<MenuItem>, cx: &mut App) -> AnyElement {
+    compact_row(v, size(px(168.), px(94.)), active, on_click, extra, cx)
 }
 
-/// `compact_row` with extra items in the video's menu.
-pub fn compact_row_with(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn(&mut Window, &mut App)>>, extra: Vec<MenuItem>, cx: &mut App) -> AnyElement {
+pub fn compact_row(v: &VideoItem, thumb_size: Size<Pixels>, active: bool, on_click: Option<Arc<dyn Fn(&mut Window, &mut App)>>, extra: Vec<MenuItem>, cx: &mut App) -> AnyElement {
     let p = pal(cx);
     let (title, thumb) = branded(v, cx);
     let thumb = if thumb == v.thumbnail {
@@ -650,7 +649,7 @@ pub fn compact_row_with(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn
                 None => navigate(route.clone(), window, cx),
             }
         })
-        .child(thumbnail(v, thumb, px(168.), px(94.), px(8.), cx))
+        .child(thumbnail(v, thumb, thumb_size.width, thumb_size.height, px(8.), cx))
         .child(
             div()
                 .flex()
