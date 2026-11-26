@@ -409,6 +409,11 @@ pub fn copy_to_clipboard(text: String, cx: &mut App) {
     toast(cx, crate::i18n::t("Link copied to clipboard"));
 }
 
+pub fn copy_text_to_clipboard(text: String, cx: &mut App) {
+    cx.write_to_clipboard(ClipboardItem::new_string(text));
+    toast(cx, crate::i18n::t("Copied to clipboard"));
+}
+
 /// Brand colors of the Stream Tube logo.
 pub const BRAND_PINK: u32 = 0xF0307E;
 pub const BRAND_VIOLET: u32 = 0x7A3CF5;

@@ -325,13 +325,14 @@ impl WatchPage {
             let status = chat.error.as_deref().unwrap_or("Loading chat…");
             list = list.child(div().py_6().flex().justify_center().text_sm().text_color(p.text2).child(translate(status).to_string()));
         }
-        for m in &chat.messages {
+        for (i, m) in chat.messages.iter().enumerate() {
             let name_color = match m.role {
                 ChatRole::Owner => rgb(0xffd600).into(),
                 ChatRole::Moderator => rgb(0x5e84f1).into(),
                 ChatRole::Member => rgb(0x2ba640).into(),
                 ChatRole::Viewer => p.text2,
             };
+            let msg_key = if m.id.is_empty() { i.to_string() } else { m.id.clone() };
             let mut row = div()
                 .flex()
                 .items_start()
@@ -349,12 +350,12 @@ impl WatchPage {
                                 .flex_wrap()
                                 .gap_1()
                                 .items_center()
-                                .child(div().text_color(name_color).font_weight(FontWeight::MEDIUM).child(m.author.clone()))
+                                .child(selectable_text(SharedString::from(format!("chat-a-{msg_key}")), m.author.clone()).text_color(name_color).font_weight(FontWeight::MEDIUM))
                                 .when(m.role == ChatRole::Moderator, |d| d.child(icon("wrench").size_3().text_color(name_color)))
                                 .when(m.verified, |d| d.child(icon("circle-check").size_3().text_color(p.text2)))
                                 .when_some(m.paid.clone(), |d, a| d.child(div().px_1p5().rounded_md().bg(rgb(0xe62117)).text_color(white()).text_xs().font_weight(FontWeight::BOLD).child(a))),
                         )
-                        .child(div().text_color(p.text).child(m.text.clone())),
+                        .child(selectable_text(SharedString::from(format!("chat-m-{msg_key}")), m.text.clone()).text_color(p.text)),
                 );
             if m.paid.is_some() {
                 row = row.px_2().rounded_lg().bg(p.hover);
@@ -668,12 +669,14 @@ impl WatchPage {
         let v_more = video_item.clone();
         let share_id = w.id.clone();
         let channel = w.channel.clone();
+        let ch_name_copy = w.channel.name.clone();
+        let ch_id_copy = w.channel.id.clone();
         div()
             .flex()
             .flex_col()
             .gap_3()
             .pt_3()
-            .child(div().text_xl().font_weight(FontWeight::BOLD).text_color(p.text).child(title))
+            .child(selectable_text(SharedString::from(format!("watch-title-{}", w.id)), title).text_xl().font_weight(FontWeight::BOLD).text_color(p.text))
             .child(
                 div()
                     .flex()
@@ -693,13 +696,38 @@ impl WatchPage {
                                     .items_center()
                                     .gap_3()
                                     .cursor_pointer()
-                                    .on_click(move |_, window, cx| navigate(Route::Channel(cid.clone()), window, cx))
+                                    .on_click(move |_, window, cx| {
+                                        if has_text_selection(window, cx) {
+                                            return;
+                                        }
+                                        navigate(Route::Channel(cid.clone()), window, cx)
+                                    })
+                                    .on_mouse_down(MouseButton::Right, move |ev: &MouseDownEvent, window, cx| {
+                                        cx.stop_propagation();
+                                        let name = ch_name_copy.clone();
+                                        let id = ch_id_copy.clone();
+                                        let items = vec![
+                                            crate::ui::app::MenuItem::new("copy", translate("Copy channel name"), move |_, cx| {
+                                                copy_text_to_clipboard(name.clone(), cx);
+                                            }),
+                                            crate::ui::app::MenuItem::new("link", translate("Copy channel link"), move |_, cx| {
+                                                copy_to_clipboard(format!("https://www.youtube.com/channel/{id}"), cx);
+                                            }),
+                                        ];
+                                        open_menu(ev.position, items, window, cx);
+                                    })
                                     .child(avatar(w.channel.avatar.as_deref(), px(40.), &w.channel.name, cx))
                                     .child(
                                         div()
                                             .flex()
                                             .flex_col()
-                                            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(w.channel.name.clone()))
+                                            .child(
+                                                div()
+                                                    .text_base()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(p.text)
+                                                    .child(gpui_kit::base::SelectableText::new(SharedString::from(format!("w-chan-name-{}", w.id)), w.channel.name.clone())),
+                                            )
                                             .when_some(w.channel.subscribers_text.clone().filter(|_| !store::settings_snapshot().hide_subscriber_counts), |d, t| d.child(div().text_xs().text_color(p.text2).child(t))),
                                     ),
                             )
@@ -811,13 +839,16 @@ impl WatchPage {
             .rounded_xl()
             .bg(p.chip)
             .when(!expanded, |d| d.cursor_pointer().hover(move |s| s.bg(p.hover)))
-            .on_click(cx.listener(|this, _, _, cx| {
+            .on_click(cx.listener(|this, _, window, cx| {
+                if has_text_selection(window, cx) {
+                    return;
+                }
                 if !this.desc_expanded {
                     this.desc_expanded = true;
                     cx.notify();
                 }
             }))
-            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(format!("{views}  {}", w.date_text)))
+            .child(selectable_text(SharedString::from(format!("watch-meta-{}", w.id)), format!("{views}  {}", w.date_text)).text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text))
             .child(div().text_sm().text_color(p.text).child(rich_text_with_links("desc-text", desc, &w.description_links)))
             .when(expanded && !chapters.is_empty() && !s.hide_chapters, |d| {
                 d.child(
@@ -951,8 +982,11 @@ impl WatchPage {
                                     .cursor_pointer()
                                     .when(c.is_creator, |d| d.px_2().rounded_full().bg(p.hover))
                                     .text_color(p.text)
-                                    .child(c.author.clone())
+                                    .child(gpui_kit::base::SelectableText::new(SharedString::from(format!("ca-txt-{}", c.id)), c.author.clone()))
                                     .on_click(move |_, window, cx| {
+                                        if has_text_selection(window, cx) {
+                                            return;
+                                        }
                                         if let Some(a) = author_id.clone() {
                                             navigate(Route::Channel(a), window, cx)
                                         }
@@ -1055,7 +1089,7 @@ impl WatchPage {
         };
         let data = match state {
             Load::Loading => return spinner(cx).into_any_element(),
-            Load::Error(e) => return div().py_4().text_sm().text_color(p.text2).child(tf!("Could not load comments: {0}", e)).into_any_element(),
+            Load::Error(e) => return selectable_text("watch-comments-err", tf!("Could not load comments: {0}", e)).py_4().text_sm().text_color(p.text2).into_any_element(),
             Load::Ready(c) => c.clone(),
         };
         let sort_new = self.comment_sort_new;
@@ -1353,7 +1387,7 @@ impl WatchPage {
                             div()
                                 .flex()
                                 .flex_col()
-                                .child(div().text_base().font_weight(FontWeight::BOLD).text_color(p.text).child(title))
+                                .child(selectable_text("queue-title", title).text_base().font_weight(FontWeight::BOLD).text_color(p.text))
                                 .child(div().text_xs().text_color(p.text2).child(format!("{} / {}", pos.map(|p| p + 1).unwrap_or(0), queue.len()))),
                         )
                         .child(
@@ -1516,7 +1550,7 @@ impl Render for WatchPage {
                 let c = self.render_comments(w, cx);
                 div().flex().flex_col().child(i).child(c).into_any_element()
             }
-            (Load::Error(e), _) => div().py_4().text_color(p.text2).child(tf!("Could not load video details: {0}", e)).into_any_element(),
+            (Load::Error(e), _) => selectable_text("watch-err", tf!("Could not load video details: {0}", e)).py_4().text_color(p.text2).into_any_element(),
             _ => spinner(cx).into_any_element(),
         };
         let chapters_panel = self.render_chapters_panel(cx);

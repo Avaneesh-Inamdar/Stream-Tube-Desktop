@@ -838,5 +838,8 @@
   "{0} hours": "{0} 小时",
   "{0} minute": "{0} 分钟",
   "{0} minutes": "{0} 分钟",
-  "Imported {0} subscriptions, {1} history entries, {2} playlists ({3} videos)": "导入的 {0}订阅, {1}历史条目, {2}播放列表 ({3}视频)"
+  "Imported {0} subscriptions, {1} history entries, {2} playlists ({3} videos)": "导入的 {0}订阅, {1}历史条目, {2}播放列表 ({3}视频)",
+  "Copied to clipboard": "已复制到剪贴板",
+  "Copy title": "复制标题",
+  "Copy channel name": "复制频道名称"
 }

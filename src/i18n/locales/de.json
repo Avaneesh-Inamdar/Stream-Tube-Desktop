@@ -838,5 +838,8 @@
   "{0} hours": "{0} Std.",
   "{0} minute": "{0} Min.",
   "{0} minutes": "{0} Min.",
-  "Imported {0} subscriptions, {1} history entries, {2} playlists ({3} videos)": "Importierte {0} Abonnements, {1} Historieeinträge, {2} Wiedergabelisten ({3} Videos)"
+  "Imported {0} subscriptions, {1} history entries, {2} playlists ({3} videos)": "Importierte {0} Abonnements, {1} Historieeinträge, {2} Wiedergabelisten ({3} Videos)",
+  "Copied to clipboard": "In die Zwischenablage kopiert",
+  "Copy title": "Titel kopieren",
+  "Copy channel name": "Kanalnamen kopieren"
 }

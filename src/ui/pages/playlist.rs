@@ -356,13 +356,19 @@ impl Render for PlaylistPage {
                     .bg(p.surface)
                     .when_some(thumb, |d, t| d.child(img(SharedString::from(t)).size_full().rounded_xl().object_fit(ObjectFit::Cover))),
             )
-            .child(div().text_2xl().font_weight(FontWeight::BOLD).text_color(p.text).child(
-                if self.protected || (local_id.is_none() && self.info.is_none()) {
-                    t(&self.title).to_string()
-                } else {
-                    self.title.clone()
-                }
-            ))
+            .child(
+                selectable_text(
+                    "pl-title",
+                    if self.protected || (local_id.is_none() && self.info.is_none()) {
+                        t(&self.title).to_string()
+                    } else {
+                        self.title.clone()
+                    },
+                )
+                .text_2xl()
+                .font_weight(FontWeight::BOLD)
+                .text_color(p.text),
+            )
             .when_some(owner, |d, (name, cid)| {
                 d.child(
                     div()
@@ -371,8 +377,11 @@ impl Render for PlaylistPage {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(p.text)
                         .cursor_pointer()
-                        .child(if local_id.is_some() { t("You").to_string() } else { name })
+                        .child(gpui_kit::base::SelectableText::new("pl-owner-name", if local_id.is_some() { t("You").to_string() } else { name }))
                         .on_click(move |_, window, cx| {
+                            if has_text_selection(window, cx) {
+                                return;
+                            }
                             if let Some(c) = cid.clone() {
                                 navigate(Route::Channel(c), window, cx)
                             }
@@ -383,7 +392,7 @@ impl Render for PlaylistPage {
                 let total: u64 = videos.iter().filter_map(|v| v.duration_secs).sum();
                 let count = self.count_text.clone().unwrap_or_else(|| tf!("{0} videos", videos.len()));
                 let dur = if total >= 3600 { tf!("{0} h {1} min", total / 3600, (total % 3600) / 60) } else if total > 0 { tf!("{0} min", total / 60) } else { String::new() };
-                div().text_xs().text_color(p.text2).child(if dur.is_empty() { count } else { format!("{count}, {dur}") })
+                selectable_text("pl-meta", if dur.is_empty() { count } else { format!("{count}, {dur}") }).text_xs().text_color(p.text2)
             })
             .child(
                 div()

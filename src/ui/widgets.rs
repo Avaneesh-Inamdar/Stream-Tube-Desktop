@@ -420,8 +420,40 @@ fn open_link(url: &str, window: &mut Window, cx: &mut App) {
     }
 }
 
+/// True when the window currently has a non-empty text selection.
+/// Clickable parents use this so finishing a drag-selection doesn't also navigate.
+pub fn has_text_selection(window: &mut Window, cx: &mut App) -> bool {
+    !gpui_kit::base::TextSelection::selected_text(window, cx).is_empty()
+}
+
+/// Plain text that can be dragged to select and copied with Ctrl+C.
+/// Right-click opens a menu to copy the selection or the full text.
+pub fn selectable_text(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Div {
+    let text: SharedString = text.into();
+    let copy_all = text.clone();
+    div()
+        .cursor_text()
+        .child(gpui_kit::base::SelectableText::new(id, text))
+        .on_mouse_down(MouseButton::Right, move |ev: &MouseDownEvent, window, cx| {
+            cx.stop_propagation();
+            let selected = gpui_kit::base::TextSelection::selected_text(window, cx).trim().to_string();
+            let all = copy_all.to_string();
+            let mut items = Vec::new();
+            if !selected.is_empty() && selected != all {
+                items.push(crate::ui::app::MenuItem::new("copy", t("Copy"), move |_, cx| {
+                    crate::ui::copy_text_to_clipboard(selected.clone(), cx);
+                }));
+            }
+            let label = if items.is_empty() { t("Copy") } else { t("Copy all text") };
+            items.push(crate::ui::app::MenuItem::new("copy", label, move |_, cx| {
+                crate::ui::copy_text_to_clipboard(all.clone(), cx);
+            }));
+            crate::ui::app::open_menu(ev.position, items, window, cx);
+        })
+}
+
 /// Selectable text (drag to select, Ctrl+C) with clickable links, timestamps,
-/// hashtags and handles. Right-click copies the whole text.
+/// hashtags and handles. Right-click copies the selection or the whole text.
 pub fn rich_text(id: impl Into<ElementId>, text: String, cx: &App) -> AnyElement {
     rich_text_with(id, text, &[], cx)
 }
@@ -469,8 +501,17 @@ fn render_rich_text(
         .child(view)
         .on_mouse_down(MouseButton::Right, move |ev: &MouseDownEvent, window, cx| {
             cx.stop_propagation();
+            let selected = gpui_kit::base::TextSelection::selected_text(window, cx).trim().to_string();
             let text = copy_text.clone();
-            let mut items = vec![crate::ui::app::MenuItem::new("copy", t("Copy all text"), move |_, cx| crate::ui::copy_to_clipboard(text.clone(), cx))];
+            let mut items = Vec::new();
+            if !selected.is_empty() && selected != text {
+                items.push(crate::ui::app::MenuItem::new("copy", t("Copy"), move |_, cx| {
+                    crate::ui::copy_text_to_clipboard(selected.clone(), cx);
+                }));
+            }
+            items.push(crate::ui::app::MenuItem::new("copy", t("Copy all text"), move |_, cx| {
+                crate::ui::copy_text_to_clipboard(text.clone(), cx);
+            }));
             for u in urls.iter().take(3) {
                 let u2 = u.clone();
                 let label = if u.chars().count() > 40 { tf!("Copy link {0}…", u.chars().take(40).collect::<String>()) } else { tf!("Copy link {0}", u) };

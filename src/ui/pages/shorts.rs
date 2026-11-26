@@ -8,7 +8,7 @@ use crate::store;
 use crate::ui::app::{Route, UiState, navigate};
 use crate::ui::*;
 use crate::ui::pages::watch::{reply_count_label, reply_parents, thread_branch};
-use crate::ui::widgets::{Load, comment_body};
+use crate::ui::widgets::{Load, comment_body, has_text_selection, selectable_text};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -718,7 +718,12 @@ impl Render for ShortsPage {
         let h = if below { available_h - caption_h } else { available_h };
         let w = (h * (9. / 16.)).min(ui.viewport.width);
         let title = |color: Hsla| {
-            div().min_w_0().text_base().font_weight(FontWeight::SEMIBOLD).text_color(color).line_clamp(if below { 2 } else { 4 }).child(v.title.clone())
+            selectable_text(SharedString::from(format!("shorts-title-{}", v.id)), v.title.clone())
+                .min_w_0()
+                .text_base()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(color)
+                .line_clamp(if below { 2 } else { 4 })
         };
         let video_column = |video: Div| {
             div().w(w).min_w_0().flex().flex_col().child(video).when(below, |d| {
@@ -727,8 +732,14 @@ impl Render for ShortsPage {
                         .child(title(if ui.fullscreen { white() } else { p.text }))
                         .when(compact_channel, |d| {
                             let channel = v.channel_id.clone();
-                            d.child(div().id("shorts-caption-channel").text_xs().text_color(p.text2).truncate().child(v.channel_name.clone())
-                                .when_some(channel, |d, id| d.cursor_pointer().on_click(move |_, window, cx| navigate(Route::Channel(id.clone()), window, cx))))
+                            d.child(div().id("shorts-caption-channel").text_xs().text_color(p.text2).truncate()
+                                .child(gpui_kit::base::SelectableText::new(SharedString::from(format!("sh-ch-cap-{}", v.id)), v.channel_name.clone()))
+                                .when_some(channel, |d, id| d.cursor_pointer().on_click(move |_, window, cx| {
+                                    if has_text_selection(window, cx) {
+                                        return;
+                                    }
+                                    navigate(Route::Channel(id.clone()), window, cx)
+                                })))
                         }),
                 )
             })
@@ -862,6 +873,9 @@ impl Render for ShortsPage {
                         .gap_2()
                         .cursor_pointer()
                         .on_click(move |_, window, cx| {
+                            if has_text_selection(window, cx) {
+                                return;
+                            }
                             if let Some(c) = cid_yt.clone() {
                                 navigate(Route::Channel(c), window, cx);
                             }
@@ -872,13 +886,20 @@ impl Render for ShortsPage {
                                 .flex()
                                 .flex_col()
                                 .min_w_0()
-                                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).truncate().child(v.channel_name.clone()))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(p.text)
+                                        .truncate()
+                                        .child(gpui_kit::base::SelectableText::new(SharedString::from(format!("sh-ch-name-{}", v.id)), v.channel_name.clone())),
+                                )
                                 .when_some(subs_text, |d, t| d.child(div().text_xs().text_color(p.text2).truncate().child(t))),
                         ),
                 )
                 .when_some(sub_btn, |d, btn| d.child(div().flex().items_center().child(btn)))
                 .child(title(p.text))
-                .when_some(meta_line, |d, t| d.child(div().text_xs().text_color(p.text2).child(t)))
+                .when_some(meta_line, |d, t| d.child(selectable_text(SharedString::from(format!("sh-meta-{}", v.id)), t).text_xs().text_color(p.text2)))
         });
         div()
             .id("shorts")

@@ -838,5 +838,8 @@
   "{0} hours": "{0} год",
   "{0} minute": "{0} хв",
   "{0} minutes": "{0} хв",
-  "Imported {0} subscriptions, {1} history entries, {2} playlists ({3} videos)": "Імпортовано {0} підписок, {1} записів історії, {2} списків відтворення ({3} відео)"
+  "Imported {0} subscriptions, {1} history entries, {2} playlists ({3} videos)": "Імпортовано {0} підписок, {1} записів історії, {2} списків відтворення ({3} відео)",
+  "Copied to clipboard": "Скопійовано в буфер обміну",
+  "Copy title": "Скопіювати назву",
+  "Copy channel name": "Скопіювати назву каналу"
 }
