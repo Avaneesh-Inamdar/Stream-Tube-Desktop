@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow};
 use libloading::Library;
 use parking_lot::{Condvar, Mutex};
 use std::error::Error;
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_ulong, c_void};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -155,6 +155,7 @@ struct Fns {
     rc_get_info: unsafe extern "C" fn(*mut mpv_render_context, mpv_render_param) -> c_int,
     rc_render: unsafe extern "C" fn(*mut mpv_render_context, *mut mpv_render_param) -> c_int,
     rc_free: unsafe extern "C" fn(*mut mpv_render_context),
+    client_api_version: unsafe extern "C" fn() -> c_ulong,
 }
 
 #[cfg(windows)]
@@ -168,6 +169,41 @@ const LIBRARY_NAMES: &[&str] = &["libmpv.so.2", "libmpv.so.1", "libmpv.so"];
 pub(super) const MISSING_WINDOWS_MPV: &str =
     "libmpv-2.dll is missing. Extract the entire Windows ZIP before opening streamtube.exe, or use the Windows installer.";
 
+/// Linux lookup order for libmpv.
+///
+/// A distro's own `libmpv.so.2` (mpv ≥ 0.35) is tried before a bundled
+/// `libmpv.so.1` (mpv 0.34, FFmpeg 4.4): seeking past the demuxer cache of
+/// an HLS fMP4 stream corrupts VP9 packets there and playback freezes
+/// forever (issue #178). No system libmpv.so.2 is worse than that, and
+/// current distro builds (FFmpeg 9-era) seek these streams correctly — as
+/// does the stack the Linux workflow now bundles. A bundled `libmpv.so.2`
+/// still comes first, though: it ships with this build and is the one it
+/// was tested against. The bundled `.so.1` is only a fallback, for systems
+/// where no libmpv is installed at all.
+#[cfg(target_os = "linux")]
+fn linux_candidates(exe_dir: Option<&std::path::Path>) -> Vec<PathBuf> {
+    // the AppImage carries its own libmpv in usr/lib, next to usr/bin
+    let bundled = |name: &str| {
+        exe_dir
+            .map(|d| d.join("../lib").join(name))
+            .filter(|p| p.is_file())
+    };
+    let [so2, so1, bare] = LIBRARY_NAMES else {
+        unreachable!()
+    };
+    let mut c = Vec::new();
+    if let Some(p) = bundled(so2) {
+        c.push(p);
+    }
+    c.push(PathBuf::from(so2));
+    if let Some(p) = bundled(so1) {
+        c.push(p);
+    }
+    c.push(PathBuf::from(so1));
+    c.push(PathBuf::from(bare));
+    c
+}
+
 fn lib() -> Result<&'static (Library, Fns)> {
     static LIB: std::sync::OnceLock<Result<(Library, Fns), String>> = std::sync::OnceLock::new();
     LIB.get_or_init(|| {
@@ -175,29 +211,23 @@ fn lib() -> Result<&'static (Library, Fns)> {
         unsafe {
             preload_vulkan_loader();
         }
-        let mut candidates = Vec::new();
-        // Prefer the current ABI on the host before the AppImage's legacy ABI.
-        #[cfg(target_os = "linux")]
-        candidates.push(PathBuf::from(LIBRARY_NAMES[0]));
         #[cfg(any(windows, target_os = "linux"))]
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(d) = exe.parent() {
-                #[cfg(windows)]
-                candidates.extend(LIBRARY_NAMES.iter().map(|name| d.join(name)));
-                // the AppImage carries its own libmpv in usr/lib, next to usr/bin
-                #[cfg(target_os = "linux")]
-                for &name in &LIBRARY_NAMES[..2] {
-                    let p = d.join("../lib").join(name);
-                    if p.is_file() {
-                        candidates.push(p);
-                    }
-                }
-            }
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|d| d.to_path_buf()));
+        // Linux fixes the whole order up front, plain names included.
+        #[cfg(target_os = "linux")]
+        let candidates = linux_candidates(exe_dir.as_deref());
+        #[cfg(not(target_os = "linux"))]
+        let mut candidates = Vec::new();
+        #[cfg(windows)]
+        if let Some(d) = &exe_dir {
+            candidates.extend(LIBRARY_NAMES.iter().map(|name| d.join(name)));
         }
         #[cfg(windows)]
         candidates.push(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/third_party/mpv/libmpv-2.dll")));
-        let next_name = usize::from(cfg!(target_os = "linux"));
-        candidates.extend(LIBRARY_NAMES[next_name..].iter().map(PathBuf::from));
+        #[cfg(not(target_os = "linux"))]
+        candidates.extend(LIBRARY_NAMES.iter().map(PathBuf::from));
         open_library(candidates)
     })
     .as_ref()
@@ -239,7 +269,12 @@ fn open_library(candidates: impl IntoIterator<Item = PathBuf>) -> Result<(Librar
                         rc_get_info: sym!("mpv_render_context_get_info"),
                         rc_render: sym!("mpv_render_context_render"),
                         rc_free: sym!("mpv_render_context_free"),
+                        client_api_version: sym!("mpv_client_api_version"),
                     };
+                    if crate::perf::on() {
+                        let v = (fns.client_api_version)();
+                        eprintln!("[mpv] loaded {} (client API {}.{})", c.display(), v >> 16, v & 0xffff);
+                    }
                     return Ok((l, fns));
                 }
                 Err(e) => {
@@ -279,6 +314,63 @@ mod windows_loader_tests {
         let error = open_library([path.clone()]).err().expect("invalid playback library");
         assert!(error.contains(&*path.to_string_lossy()));
         assert!(error.contains("193"), "{error}");
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_loader_tests {
+    use super::linux_candidates;
+    use std::path::{Path, PathBuf};
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("streamtube-mpv-{name}"));
+        let _ = std::fs::remove_dir_all(&d);
+        // "bin" must exist: is_file() follows bin/../lib, and .. needs the real parent
+        std::fs::create_dir_all(d.join("bin")).unwrap();
+        std::fs::create_dir_all(d.join("lib")).unwrap();
+        d
+    }
+
+    fn bundled(dir: &Path, name: &str) {
+        std::fs::write(dir.join("lib").join(name), b"").unwrap();
+    }
+
+    fn pos(candidates: &[PathBuf], name: &str) -> usize {
+        candidates.iter().position(|p| p.file_name().is_some_and(|n| n.to_str() == Some(name)))
+            .unwrap_or_else(|| panic!("{name} missing: {candidates:?}"))
+    }
+
+    /// The 0.7.x AppImage bundles mpv 0.34 / FFmpeg 4.4, whose HLS demuxer
+    /// freezes playback on fMP4 seeks (#178): the system's libmpv.so.2 must
+    /// be tried before that bundled .so.1.
+    #[test]
+    fn system_libmpv2_beats_a_bundled_libmpv1() {
+        let d = scratch("bundled1");
+        bundled(&d, "libmpv.so.1");
+        let c = linux_candidates(Some(&d.join("bin")));
+        assert!(pos(&c, "libmpv.so.2") < pos(&c, "libmpv.so.1"), "{c:?}");
+        // the .so.1 left in the list is the bundled copy, not the system's
+        assert!(c.iter().any(|p| p.ends_with("lib/libmpv.so.1")), "{c:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_bundled_libmpv2_still_wins_over_the_system_one() {
+        let d = scratch("bundled2");
+        bundled(&d, "libmpv.so.2");
+        bundled(&d, "libmpv.so.1");
+        let c = linux_candidates(Some(&d.join("bin")));
+        assert!(c[0].ends_with("lib/libmpv.so.2"), "{c:?}");
+        assert!(pos(&c, "libmpv.so.2") < pos(&c, "libmpv.so.1"), "{c:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn without_a_bundled_library_the_plain_names_keep_their_order() {
+        assert_eq!(
+            linux_candidates(None),
+            ["libmpv.so.2", "libmpv.so.1", "libmpv.so"].iter().map(PathBuf::from).collect::<Vec<_>>()
+        );
     }
 }
 
