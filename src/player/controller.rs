@@ -45,6 +45,9 @@ pub struct Player {
     /// speed to go back to while a press-and-hold plays at 2x
     pub boost: Option<f64>,
     mpv: Option<Arc<Mpv>>,
+    engine_generation: u64,
+    foreground: bool,
+    in_pip: bool,
     pub init_error: Option<String>,
     pub video: Option<VideoItem>,
     pub streams: Option<Arc<StreamInfo>>,
@@ -79,6 +82,7 @@ pub struct Player {
     pub caption: Option<usize>,
     pub queue: Vec<VideoItem>,
     pub queue_pos: Option<usize>,
+    pub(crate) autoplay_next: Option<VideoItem>,
     pub chapters: Vec<Chapter>,
     pub heatmap: Vec<(f64, f64, f32)>,
     /// archived annotations of the current video
@@ -107,16 +111,35 @@ pub struct Player {
 
 impl EventEmitter<PlayerEvent> for Player {}
 
-pub struct PlayerHandle(pub Entity<Player>);
+pub struct PlayerHandle {
+    active: Entity<Player>,
+    tabs: Vec<WeakEntity<Player>>,
+}
 impl Global for PlayerHandle {}
 
 pub fn player(cx: &App) -> Entity<Player> {
-    cx.global::<PlayerHandle>().0.clone()
+    cx.global::<PlayerHandle>().active.clone()
 }
 
 pub fn init(cx: &mut App) {
-    let p = cx.new(Player::new);
-    cx.set_global(PlayerHandle(p));
+    let active = cx.new(Player::new);
+    cx.set_global(PlayerHandle { tabs: vec![active.downgrade()], active });
+}
+
+pub(crate) fn new_tab_player(cx: &mut App) -> Entity<Player> {
+    let player = cx.new(Player::new);
+    let registry = cx.global_mut::<PlayerHandle>();
+    registry.tabs.retain(|tab| tab.upgrade().is_some());
+    registry.tabs.push(player.downgrade());
+    player
+}
+
+pub(crate) fn set_active_player(player: Entity<Player>, cx: &mut App) {
+    cx.global_mut::<PlayerHandle>().active = player;
+}
+
+pub(crate) fn tab_players(cx: &App) -> Vec<Entity<Player>> {
+    cx.global::<PlayerHandle>().tabs.iter().filter_map(WeakEntity::upgrade).collect()
 }
 
 pub fn enqueue(v: VideoItem, cx: &mut App) {
@@ -159,6 +182,9 @@ impl Player {
         let s = store::settings_snapshot();
         Self {
             mpv: None,
+            engine_generation: 0,
+            foreground: true,
+            in_pip: false,
             init_error: None,
             video: None,
             streams: None,
@@ -193,6 +219,7 @@ impl Player {
             caption: None,
             queue: Vec::new(),
             queue_pos: None,
+            autoplay_next: None,
             chapters: Vec::new(),
             heatmap: Vec::new(),
             annotations: Arc::new(Vec::new()),
@@ -232,7 +259,61 @@ impl Player {
     }
 
     fn sync_idle(&self, cx: &mut App) {
-        crate::idle_inhibit::set_playing(cx, self.should_inhibit_idle());
+        if self.in_pip || self.foreground && crate::ui::pip::handle(cx).is_none() {
+            crate::idle_inhibit::set_playing(cx, self.should_inhibit_idle());
+        }
+    }
+
+    pub(crate) fn set_foreground(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.foreground != active {
+            if let Some(video) = &self.video {
+                if active {
+                    crate::api::web::report_start(&video.id, self.duration);
+                    crate::api::web::report_progress(&video.id, self.time, !self.paused);
+                } else {
+                    crate::api::web::report_stop(&video.id, self.time);
+                }
+            }
+            self.foreground = active;
+        }
+        self.update_video_output(cx);
+    }
+
+    pub(crate) fn set_in_pip(&mut self, in_pip: bool, cx: &mut Context<Self>) {
+        self.in_pip = in_pip;
+        self.update_video_output(cx);
+    }
+
+    pub(crate) fn refresh_idle_guard(&self, cx: &mut App) {
+        self.sync_idle(cx);
+    }
+
+    pub(crate) fn has_engine(&self) -> bool {
+        self.mpv.is_some()
+    }
+
+    fn update_video_output(&mut self, cx: &mut Context<Self>) {
+        let visible = self.foreground || self.in_pip;
+        if let Some(mpv) = &self.mpv {
+            mpv.set("vid", if visible { "auto" } else { "no" });
+        }
+        if !visible {
+            if let Some(frame) = self.frame.take() {
+                cx.drop_image(frame, None);
+            }
+            for frame in self.old_frames.drain(..) {
+                cx.drop_image(frame, None);
+            }
+            self.frame_progress = None;
+        }
+        self.sync_idle(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn release_tab_engine(&mut self, cx: &mut Context<Self>) {
+        self.stop(cx);
+        self.engine_generation += 1;
+        self.mpv = None;
     }
 
     fn ensure_mpv(&mut self, cx: &mut Context<Self>) -> Option<Arc<Mpv>> {
@@ -246,6 +327,7 @@ impl Player {
         let hw = if s.hwdec { "auto-copy" } else { "no" };
         let opts: Vec<(&str, &str)> = vec![
             ("vo", "libmpv"),
+            ("vid", if self.foreground || self.in_pip { "auto" } else { "no" }),
             ("hwdec", hw),
             ("keep-open", "yes"),
             ("idle", "yes"),
@@ -312,6 +394,8 @@ impl Player {
         }) {
             Ok(m) => {
                 self.mpv = Some(m.clone());
+                self.engine_generation += 1;
+                let generation = self.engine_generation;
                 cx.spawn(async move |this, cx| {
                     use futures::StreamExt;
                     let mut rx = rx;
@@ -323,11 +407,13 @@ impl Player {
                         }
                         let ok = this
                             .update(cx, |p, cx| {
+                                if p.engine_generation != generation { return false; }
                                 for e in batch {
                                     p.handle_event(e, cx);
                                 }
+                                true
                             })
-                            .is_ok();
+                            .unwrap_or(false);
                         if !ok {
                             break;
                         }
@@ -363,6 +449,10 @@ impl Player {
         );
         match ev {
             MpvEvent::Frame => {
+                if !self.foreground && !self.in_pip {
+                    if let Some(mpv) = &self.mpv { let _ = mpv.take_frame(); }
+                    return;
+                }
                 let t0 = std::time::Instant::now();
                 crate::perf::add(&crate::perf::UI_FRAMES, 1);
                 let _g = scopeguard(move || crate::perf::add(&crate::perf::UI_HANDLE_US, t0.elapsed().as_micros() as u64));
@@ -550,7 +640,14 @@ impl Player {
             self.queue_pos = Some(idx);
             let id = v.id.clone();
             self.play(v, None, cx);
-            crate::ui::app::sync_watch_route(id, cx);
+            if self.foreground {
+                let source = cx.entity_id();
+                cx.defer(move |cx| {
+                    if player(cx).entity_id() == source {
+                        crate::ui::app::sync_watch_route(id, cx);
+                    }
+                });
+            }
         }
     }
 
@@ -558,7 +655,7 @@ impl Player {
     /// without an EndFile event. Compare rendered pictures with the media clock.
     fn recover_stalled_picture(&mut self, cx: &mut Context<Self>) -> bool {
         let (Some(mpv), Some(info)) = (&self.mpv, &self.streams) else { return false };
-        if self.audio_only || self.loading || self.paused || self.buffering || self.seeking || self.eof || self.error.is_some()
+        if !(self.foreground || self.in_pip) || self.audio_only || self.loading || self.paused || self.buffering || self.seeking || self.eof || self.error.is_some()
             || info.is_live || (!info.hls_only && info.video.is_empty() && info.muxed.is_empty())
             || (self.duration > 0.0 && self.duration - self.time < 2.0)
         {
@@ -692,7 +789,9 @@ impl Player {
                 // videos, the end, quitting) is written before going on
                 store::history_progress_queued(&v.id, self.time, self.duration, force);
                 self.last_progress_save = self.time;
-                crate::api::web::report_progress(&v.id, self.time, !self.paused);
+                if self.foreground {
+                    crate::api::web::report_progress(&v.id, self.time, !self.paused);
+                }
             }
         }
     }
@@ -701,7 +800,7 @@ impl Player {
     fn set_playback_ready(&mut self, ready: bool, cx: &mut Context<Self>) {
         if self.playback_ready != ready {
             self.playback_ready = ready;
-            if !ready {
+            if !ready && self.foreground {
                 super::shorts_preload::suspend();
             }
             cx.emit(PlayerEvent::PlaybackReadyChanged);
@@ -709,13 +808,16 @@ impl Player {
     }
 
     pub fn play(&mut self, video: VideoItem, start: Option<f64>, cx: &mut Context<Self>) {
+        self.autoplay_next = None;
         self.playback_timing = std::env::var_os("STREAMTUBE_PLAYBACK_TIMING").map(|_| ("open", Instant::now()));
         self.keyboard_feedback = None;
         self.preloaded_until = 0.0;
         self.set_playback_ready(false, cx);
         self.save_progress(true);
-        if let Some(prev) = &self.video {
-            crate::api::web::report_stop(&prev.id, self.time);
+        if self.foreground {
+            if let Some(prev) = &self.video {
+                crate::api::web::report_stop(&prev.id, self.time);
+            }
         }
         let Some(mpv) = self.ensure_mpv(cx) else {
             self.video = Some(video);
@@ -753,7 +855,7 @@ impl Player {
         store::history_add(&video);
         // with the browser sign-in, the video goes into the account's YouTube history
         // and the position reported as it plays is where other devices resume
-        crate::api::web::report_start(&video.id, self.duration);
+        if self.foreground { crate::api::web::report_start(&video.id, self.duration); }
         self.sync_idle(cx);
         let s = store::settings_snapshot();
         let id = video.id.clone();
@@ -1467,8 +1569,10 @@ impl Player {
         self.preloaded_until = 0.0;
         self.set_playback_ready(false, cx);
         self.save_progress(true);
-        if let Some(v) = &self.video {
-            crate::api::web::report_stop(&v.id, self.time);
+        if self.foreground {
+            if let Some(v) = &self.video {
+                crate::api::web::report_stop(&v.id, self.time);
+            }
         }
         self.load_serial += 1;
         if let Some(m) = &self.mpv {
@@ -1478,6 +1582,7 @@ impl Player {
         self.streams = None;
         self.loading = false;
         self.queue.clear();
+        self.autoplay_next = None;
         self.queue_pos = None;
         if let Some(old) = self.frame.take() {
             cx.drop_image(old, None);
@@ -1510,7 +1615,9 @@ impl Player {
 
 /// Applies changed settings to the running player.
 pub fn apply_settings(cx: &mut App) {
-    player(cx).update(cx, |p, cx| p.apply_settings(cx));
+    for player in tab_players(cx) {
+        player.update(cx, |p, cx| p.apply_settings(cx));
+    }
 }
 
 struct Guard<F: FnMut()>(F);

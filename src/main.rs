@@ -163,7 +163,9 @@ fn main() {
                 // the picture-in-picture window alone doesn't keep the app running
                 let pip = ui::pip::handle(cx);
                 if cx.windows().iter().all(|w| Some(*w) == pip) {
-                    player::controller::player(cx).update(cx, |p, _| p.save_progress(true));
+                    for player in player::controller::tab_players(cx) {
+                        player.update(cx, |p, _| p.save_progress(true));
+                    }
                     idle_inhibit::release(cx);
                     cx.quit();
                 }

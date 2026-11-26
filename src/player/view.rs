@@ -1035,7 +1035,8 @@ impl PlayerView {
         let st = store::settings_snapshot();
         let heatmap = if st.show_heatmap { pl.heatmap.clone() } else { Vec::new() };
         let jump_to = if st.jump_ahead && !self.mini { pl.jump_ahead_target() } else { None };
-        let has_next = pl.queue_pos.map(|i| i + 1 < pl.queue.len()).unwrap_or(false) || crate::ui::app::has_autoplay_next(cx);
+        let has_next = pl.queue_pos.map(|i| i + 1 < pl.queue.len()).unwrap_or(false)
+            || crate::player::controller::player(cx) == self.player && crate::ui::app::has_autoplay_next(cx);
         let chapter_title = pl.current_chapter().map(|c| c.title.clone());
         let is_live = pl.streams.as_ref().map(|s| s.is_live).unwrap_or(false);
         let sb_show = store::settings_snapshot().sponsorblock;
@@ -1248,7 +1249,18 @@ impl PlayerView {
                 move |_, _, cx| pp.update(cx, |p, cx| { p.toggle_pause(cx); cx.notify() })
             }))
             .when(has_next, |d| {
-                d.child(ctl_btn("c-next", "skip-forward").on_click(|_, window, cx| crate::ui::app::play_next(window, cx)))
+                let playback = self.player.clone();
+                d.child(ctl_btn("c-next", "skip-forward").on_click(move |_, window, cx| {
+                    if crate::player::controller::player(cx) == playback {
+                        crate::ui::app::play_next(window, cx);
+                    } else {
+                        playback.update(cx, |p, cx| {
+                            if let Some(index) = p.queue_pos.filter(|i| i + 1 < p.queue.len()) {
+                                p.play_queue_index(index + 1, cx);
+                            }
+                        });
+                    }
+                }))
             })
             .child(
                 div()

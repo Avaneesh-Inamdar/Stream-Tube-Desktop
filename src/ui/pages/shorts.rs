@@ -3,7 +3,7 @@ use crate::i18n::t;
 use crate::api::json::compact_number;
 use crate::api::services;
 use crate::api::types::*;
-use crate::player::controller::{PlayerEvent, player};
+use crate::player::controller::{Player, PlayerEvent, player};
 use crate::store;
 use crate::ui::app::{Route, UiState, navigate};
 use crate::ui::*;
@@ -21,6 +21,7 @@ struct ShortSlide {
 }
 
 pub struct ShortsPage {
+    player: Entity<Player>,
     list: Vec<VideoItem>,
     idx: usize,
     loading: bool,
@@ -50,7 +51,8 @@ pub struct ShortsPage {
 
 impl ShortsPage {
     pub fn new(start: Option<String>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let sub = cx.subscribe(&player(cx), |this: &mut Self, pl, ev: &PlayerEvent, cx| {
+        let playback = player(cx);
+        let sub = cx.subscribe(&playback, |this: &mut Self, pl, ev: &PlayerEvent, cx| {
             if matches!(ev, PlayerEvent::Loaded) {
                 if let Some(short) = this.list.get_mut(this.idx).filter(|v| v.title.trim().is_empty()) {
                     if let Some(video) = pl.read(cx).video.as_ref().filter(|v| v.id == short.id && !v.title.trim().is_empty()) {
@@ -71,10 +73,11 @@ impl ShortsPage {
         cx.on_release(|this, cx| {
             this.clear_slide(None, cx);
             let l = store::settings_snapshot().loop_video;
-            player(cx).update(cx, |p, _| p.set_loop(l));
+            this.player.update(cx, |p, _| p.set_loop(l));
         })
         .detach();
         let mut s = Self {
+            player: playback,
             list: Vec::new(),
             idx: 0,
             loading: true,
@@ -168,7 +171,7 @@ impl ShortsPage {
         self.initial_play = false;
         let Some(mut v) = self.list.get(self.idx).cloned() else { return };
         v.is_short = true;
-        let pl = player(cx);
+        let pl = self.player.clone();
         pl.update(cx, |p, cx| {
             p.queue.clear();
             p.queue_pos = None;

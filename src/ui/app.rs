@@ -4,7 +4,7 @@ use crate::i18n::{t, tf};
 use super::*;
 use crate::api::innertube;
 use crate::api::{auth, types::{PlaylistItem, VideoItem}};
-use crate::player::controller::{KeyboardFeedback, Player, player};
+use crate::player::controller::{KeyboardFeedback, Player, new_tab_player, player, set_active_player, tab_players};
 use crate::player::view::PlayerView;
 use crate::store;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -291,13 +291,8 @@ pub fn is_current_page(page: EntityId, cx: &App) -> bool {
 }
 
 pub fn has_autoplay_next(cx: &App) -> bool {
-    cx.try_global::<AutoplayNext>().map(|a| a.0.is_some()).unwrap_or(false)
+    player(cx).read(cx).autoplay_next.is_some()
 }
-
-/// The video the watch page proposes to autoplay next (first related).
-#[derive(Default)]
-pub struct AutoplayNext(pub Option<VideoItem>);
-impl Global for AutoplayNext {}
 
 pub fn play_next(window: &mut Window, cx: &mut App) {
     let p = player(cx);
@@ -309,7 +304,7 @@ pub fn play_next(window: &mut Window, cx: &mut App) {
         p.update(cx, |p, cx| p.play_queue_index(i + 1, cx));
         return;
     }
-    if let Some(v) = cx.default_global::<AutoplayNext>().0.clone() {
+    if let Some(v) = p.read(cx).autoplay_next.clone() {
         navigate(Route::Watch { id: v.id, playlist: None, start: None }, window, cx);
     }
 }
@@ -534,10 +529,104 @@ struct Tab {
     /// left, so coming back resumes it with its queue (one player is shared)
     playback: Option<(String, Vec<crate::api::types::VideoItem>, Option<usize>, f64)>,
     pinned: bool,
+    player: Option<Entity<Player>>,
+    last_active: std::time::Instant,
+}
+
+impl Tab {
+    fn new(id: u64, route: Route, pinned: bool) -> Self {
+        Self {
+            id, route, pinned,
+            page: None,
+            history: Vec::new(),
+            forward: Vec::new(),
+            playback: None,
+            player: None,
+            last_active: std::time::Instant::now(),
+        }
+    }
 }
 
 /// At most this many tabs; more would only hold pages nobody looks at.
 const MAX_TABS: usize = 12;
+const MAX_BACKGROUND_PLAYERS: usize = 2;
+
+#[cfg(all(test, windows))]
+mod tab_playback_smoke {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    async fn wait_for_playback(playback: &Entity<Player>, at: f64, cx: &mut AsyncApp) -> anyhow::Result<()> {
+        for _ in 0..100 {
+            let position = cx.update(|cx| playback.read(cx).time);
+            if position > at { return Ok(()); }
+            cx.background_executor().timer(Duration::from_millis(150)).await;
+        }
+        anyhow::bail!("The test video did not reach {at}s");
+    }
+
+    #[::core::prelude::v1::test]
+    #[ignore = "starts native windows and plays public YouTube videos"]
+    fn tabs_keep_playing_and_pip_stays_with_its_tab() {
+        assert!(std::env::var_os("STREAMTUBE_DATA_DIR").is_some(), "use a dedicated test profile");
+        crate::store::init();
+        crate::store::update_settings(|s| {
+            s.independent_tab_playback = true;
+            s.start_page = "history".into();
+            s.volume = 0.;
+            s.sponsorblock = false;
+            s.check_updates = false;
+            s.default_quality = 360;
+        });
+        let result = Rc::new(RefCell::new(Err(anyhow::anyhow!("test did not finish"))));
+        let finished = result.clone();
+        gpui_kit::application().with_assets(crate::assets::Assets).run(move |cx| {
+            gpui_kit::init(cx);
+            crate::ui::apply_theme(None, cx);
+            crate::player::preview::init(cx);
+            crate::player::controller::init(cx);
+            let (window, app) = gpui_kit::open_window(WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(-10000.), px(-10000.)), size(px(720.), px(480.))))),
+                show: true, focus: false, ..Default::default()
+            }, cx, |window, cx| cx.new(|cx| AppView::new(window, cx))).unwrap();
+            let watch = |id: &str| Route::Watch { id: id.to_owned(), playlist: None, start: Some(0.) };
+            window.update(cx, |_, w, cx| app.update(cx, |app, cx| app.go(watch("dQw4w9WgXcQ"), w, cx))).unwrap();
+            let first = player(cx);
+            cx.spawn(async move |cx| {
+                let result = async {
+                    wait_for_playback(&first, 0.5, cx).await?;
+                    let (first_time, second) = cx.update(|cx| {
+                        let first_time = first.read(cx).time;
+                        window.update(cx, |_, w, cx| app.update(cx, |app, cx| app.new_tab(watch("9bZkp7q19f0"), true, w, cx))).unwrap();
+                        (first_time, player(cx))
+                    });
+                    wait_for_playback(&second, 0.5, cx).await?;
+                    wait_for_playback(&first, first_time + 0.5, cx).await?;
+                    cx.update(|cx| anyhow::Result::<()>::Ok({
+                        anyhow::ensure!(first != second, "tabs reused one player");
+                        anyhow::ensure!(first.read(cx).mpv().and_then(|p| p.get_string("vid")).as_deref() == Some("no"), "background player still decodes video");
+                        window.update(cx, |_, w, cx| app.update(cx, |app, cx| app.switch_tab(0, w, cx)))?;
+                        crate::ui::pip::open(cx);
+                        window.update(cx, |_, w, cx| app.update(cx, |app, cx| app.switch_tab(1, w, cx)))?;
+                        anyhow::ensure!(crate::ui::pip::owner(cx).as_ref() == Some(&first), "PiP switched to the active tab");
+                        window.update(cx, |_, w, cx| app.update(cx, |app, cx| {
+                            app.new_tab(watch("dQw4w9WgXcQ"), true, w, cx);
+                            app.new_tab(watch("9bZkp7q19f0"), true, w, cx);
+                        }))?;
+                        let engines = tab_players(cx).iter().filter(|p| p.read(cx).has_engine()).count();
+                        anyhow::ensure!(engines == 3, "expected three live players, got {engines}");
+                        anyhow::ensure!(!second.read(cx).has_engine(), "old background player was not released");
+                    }))?;
+                    Ok(())
+                }.await;
+                let _ = cx.update(|cx| { *finished.borrow_mut() = result; cx.quit(); });
+            }).detach();
+        });
+        result.borrow_mut().as_mut().unwrap();
+    }
+}
 
 pub struct AppView {
     /// every tab in order; the entry at `active_tab` is a placeholder for the
@@ -545,6 +634,7 @@ pub struct AppView {
     tabs: Vec<Tab>,
     active_tab: usize,
     next_tab_id: u64,
+    independent_tab_playback: bool,
     pub route: Route,
     /// space is down: released quickly it toggles pause, held it plays at 2x
     space_down: bool,
@@ -564,6 +654,7 @@ pub struct AppView {
     /// the last press on the mini player's title moved it (so its click doesn't open the video)
     mini_dragged: bool,
     main_view: Entity<PlayerView>,
+    player_observer: Subscription,
     preview_view: Entity<crate::player::preview::PreviewView>,
     /// bounded cache for every thumbnail and avatar in this window
     images: Entity<crate::ui::image_cache::LruImageCache>,
@@ -590,13 +681,22 @@ pub struct AppView {
 }
 
 impl AppView {
+    fn observe_current_player(player: &Entity<Player>, cx: &mut Context<Self>) -> Subscription {
+        cx.observe(player, |this: &mut Self, player, cx| {
+            let has_video = player.read(cx).video.is_some();
+            if has_video != this.had_video {
+                this.had_video = has_video;
+                cx.notify();
+            }
+        })
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         crate::idle_inhibit::set_main_window(cx, window);
         cx.set_global(AppHandle(cx.entity().downgrade()));
         cx.set_global(UiState { sidebar_open: true, ..Default::default() });
         cx.set_global(OpenMenu::default());
         crate::downloads::load_history(cx);
-        cx.set_global(AutoplayNext::default());
         cx.set_global(crate::ui::cards::Watched(store::progress_map()));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(t("Search or paste a YouTube link")));
         let dialog_input = cx.new(|cx| InputState::new(window, cx));
@@ -646,13 +746,7 @@ impl AppView {
         let p = player(cx);
         // Only re-render the shell when the mini player appears/disappears; the
         // player views re-render themselves for every frame.
-        subs.push(cx.observe(&p, |this: &mut Self, p, cx| {
-            let has = p.read(cx).video.is_some();
-            if has != this.had_video {
-                this.had_video = has;
-                cx.notify();
-            }
-        }));
+        let player_observer = Self::observe_current_player(&p, cx);
         subs.push(cx.observe_window_bounds(window, |this: &mut Self, window, _| {
             // persist placement at most twice a second while the user drags/resizes
             if this.last_bounds_save.elapsed() > std::time::Duration::from_millis(500) {
@@ -672,25 +766,26 @@ impl AppView {
             }
         }));
         subs.push(window.observe_window_visibility({
-            let paused_by_us = std::rc::Rc::new(std::cell::Cell::new(false));
+            let paused_by_us = std::rc::Rc::new(std::cell::RefCell::new(Vec::<WeakEntity<Player>>::new()));
             move |vis, window, cx| {
-                let pl = player(cx);
                 if !vis.is_visible() {
-                    if store::settings_snapshot().background_play || crate::ui::pip::handle(cx).is_some() || !window_minimized(window) {
+                    if store::settings_snapshot().background_play || !window_minimized(window) {
                         return;
                     }
-                    if !pl.read(cx).paused && pl.read(cx).video.is_some() {
-                        pl.update(cx, |p, cx| {
-                            p.set_paused(true, cx);
-                            cx.notify();
-                        });
-                        paused_by_us.set(true);
+                    let pip = crate::ui::pip::owner(cx);
+                    for player in tab_players(cx) {
+                        let playback = player.read(cx);
+                        if pip.as_ref() == Some(&player) || playback.paused || playback.video.is_none() { continue; }
+                        player.update(cx, |p, cx| p.set_paused(true, cx));
+                        paused_by_us.borrow_mut().push(player.downgrade());
                     }
-                } else if paused_by_us.replace(false) {
-                    pl.update(cx, |p, cx| {
-                        p.set_paused(false, cx);
-                        cx.notify();
-                    });
+                } else {
+                    let paused = std::mem::take(&mut *paused_by_us.borrow_mut());
+                    for player in paused.into_iter().filter_map(|player| player.upgrade()) {
+                        player.update(cx, |p, cx| {
+                            if p.video.is_some() { p.set_paused(false, cx); }
+                        });
+                    }
                 }
             }
         }));
@@ -756,18 +851,22 @@ impl AppView {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
         let mut tabs: Vec<Tab> = Vec::new();
+        let independent_tab_playback = store::settings_snapshot().independent_tab_playback;
         let mut next_tab_id = 1u64;
         for r in pinned_routes.into_iter().take(MAX_TABS.saturating_sub(1)) {
-            tabs.push(Tab { id: next_tab_id, route: r, page: None, history: Vec::new(), forward: Vec::new(), playback: None, pinned: true });
+            tabs.push(Tab::new(next_tab_id, r, true));
             next_tab_id += 1;
         }
         let active_tab = tabs.len();
-        tabs.push(Tab { id: next_tab_id, route: start.clone(), page: None, history: Vec::new(), forward: Vec::new(), playback: None, pinned: false });
+        let mut first = Tab::new(next_tab_id, start.clone(), false);
+        if independent_tab_playback { first.player = Some(p.clone()); }
+        tabs.push(first);
         next_tab_id += 1;
         Self {
             tabs,
             active_tab,
             next_tab_id,
+            independent_tab_playback,
             route: start,
             page,
             history: Vec::new(),
@@ -783,6 +882,7 @@ impl AppView {
             mini_drag: None,
             mini_dragged: false,
             main_view,
+            player_observer,
             preview_view,
             images,
             had_video: false,
@@ -1293,7 +1393,7 @@ impl AppView {
         self.next_tab_id += 1;
         // right after the current tab, like a browser
         let at = self.active_tab + 1;
-        self.tabs.insert(at, Tab { id, route, page: None, history: Vec::new(), forward: Vec::new(), playback: None, pinned: false });
+        self.tabs.insert(at, Tab::new(id, route, false));
         if switch {
             self.switch_tab(at, window, cx);
         } else {
@@ -1316,6 +1416,14 @@ impl AppView {
         cur.page = Some(self.page.clone());
         cur.history = std::mem::take(&mut self.history);
         cur.forward = std::mem::take(&mut self.forward);
+        if self.independent_tab_playback {
+            player(cx).update(cx, |p, cx| {
+                p.end_boost();
+                p.set_foreground(false, cx);
+            });
+            self.space_down = false;
+            self.pending_watch_sync = None;
+        }
         cur.playback = match &cur.route {
             Route::Watch { id, .. } => {
                 let pl = player(cx).read(cx);
@@ -1325,6 +1433,9 @@ impl AppView {
         };
         // and show the other one
         self.active_tab = index;
+        if self.independent_tab_playback {
+            self.activate_tab_player(index, cx);
+        }
         let next = self.tabs[index].clone();
         self.route = next.route;
         self.history = next.history;
@@ -1332,7 +1443,15 @@ impl AppView {
         // a watch page for another video than the one playing is built again,
         // which starts its video (the same as going back to it)
         let playing = player(cx).read(cx).video.as_ref().map(|v| v.id.clone());
-        let stale = matches!(&self.route, Route::Watch { id, .. } if playing.as_deref() != Some(id.as_str()));
+        let mut stale = matches!(&self.route, Route::Watch { id, .. } if playing.as_deref() != Some(id.as_str()));
+        if self.independent_tab_playback {
+            if stale {
+                if let Some(id) = playing.as_ref() {
+                    self.route = Route::Watch { id: id.clone(), playlist: None, start: None };
+                }
+            }
+            stale |= matches!(&self.route, Route::Shorts(_)) && playing.is_none();
+        }
         if stale {
             // put back this tab's queue (the watch page keeps a queue its video is in)
             // and carry on where it left off
@@ -1363,6 +1482,36 @@ impl AppView {
         cx.notify();
     }
 
+    fn activate_tab_player(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.tabs[index].last_active = std::time::Instant::now();
+        let selected = self.tabs[index].player.get_or_insert_with(|| new_tab_player(cx)).clone();
+        set_active_player(selected.clone(), cx);
+        selected.update(cx, |p, cx| p.set_foreground(true, cx));
+        self.had_video = selected.read(cx).video.is_some();
+        self.player_observer = Self::observe_current_player(&selected, cx);
+        self.main_view = cx.new(|cx| PlayerView::new(selected.clone(), false, cx));
+        self.mini_view = cx.new(|cx| PlayerView::new(selected.clone(), true, cx));
+
+        let pip = crate::ui::pip::owner(cx);
+        let mut running: Vec<_> = self.tabs.iter().enumerate().filter_map(|(i, tab)| {
+            let player = tab.player.as_ref()?;
+            (i != index && player.read(cx).has_engine()).then(|| (tab.last_active, i, player.clone()))
+        }).collect();
+        running.sort_by_key(|(last_active, _, player)| (pip.as_ref() == Some(player), *last_active));
+        let excess = running.len().saturating_sub(MAX_BACKGROUND_PLAYERS);
+        for (_, i, player) in running.into_iter().take(excess) {
+            let playback = player.read(cx);
+            if let Some(video) = &playback.video {
+                let tab = &mut self.tabs[i];
+                if matches!(&tab.route, Route::Watch { id, .. } if id != &video.id) {
+                    tab.route = Route::Watch { id: video.id.clone(), playlist: None, start: None };
+                }
+                tab.playback = Some((video.id.clone(), playback.queue.clone(), playback.queue_pos, playback.time));
+            }
+            player.update(cx, |p, cx| p.release_tab_engine(cx));
+        }
+    }
+
     pub fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.len() < 2 || index >= self.tabs.len() || self.tabs[index].pinned {
             return;
@@ -1372,7 +1521,15 @@ impl AppView {
             let to = if index + 1 < self.tabs.len() { index + 1 } else { index - 1 };
             self.switch_tab(to, window, cx);
         }
-        self.tabs.remove(index);
+        let tab = self.tabs.remove(index);
+        if let Some(player) = tab.player {
+            if crate::ui::pip::owner(cx).as_ref() == Some(&player) {
+                if let Some(pip) = crate::ui::pip::handle(cx) {
+                    let _ = pip.update(cx, |_, window, cx| crate::ui::pip::close(window, cx));
+                }
+            }
+            player.update(cx, |p, cx| p.release_tab_engine(cx));
+        }
         if index < self.active_tab {
             self.active_tab -= 1;
         }
@@ -2756,7 +2913,7 @@ impl AppView {
     }
 
     fn render_mini_player(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if crate::ui::pip::handle(cx).is_some() {
+        if crate::ui::pip::owner(cx).as_ref() == Some(&player(cx)) {
             return None;
         }
         let p = pal(cx);

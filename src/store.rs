@@ -117,6 +117,7 @@ pub struct Settings {
     /// "confirm you're not a bot" wall while IPv4 from the same line doesn't.
     pub ipv4_only: bool,
     pub background_play: bool,
+    pub independent_tab_playback: bool,
     // Tweaks (from YouTube patch sets like Morphe/ReVanced)
     pub ambient_mode: bool,
     pub shorts_in_player: bool,
@@ -251,6 +252,7 @@ impl Default for Settings {
             enhanced_bitrate: false,
             ipv4_only: true,
             background_play: true,
+            independent_tab_playback: false,
             ambient_mode: true,
             shorts_in_player: false,
             shorts_autoadvance: false,

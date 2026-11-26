@@ -326,6 +326,8 @@
   "Open in new tab": "新しいタブで開く",
   "New tab": "新しいタブ",
   "Close tab": "タブを閉じる",
+  "Independent tab playback": "タブごとに独立して再生",
+  "Play up to three tabs at once. Restart Stream Tube to apply.": "最大3つのタブで同時に再生します。適用するには Stream Tube を再起動してください。",
   "No downloads yet": "ダウンロードはまだありません",
   "Waiting…": "待機中…",
   "File missing": "ファイルが欠けています",

@@ -326,6 +326,8 @@
   "Open in new tab": "In neuem Tab öffnen",
   "New tab": "Neuer Tab",
   "Close tab": "Tab schließen",
+  "Independent tab playback": "Unabhängige Wiedergabe in Tabs",
+  "Play up to three tabs at once. Restart Stream Tube to apply.": "Bis zu drei Tabs gleichzeitig abspielen. Starte Stream Tube neu, um die Änderung zu übernehmen.",
   "No downloads yet": "Noch keine Downloads",
   "Waiting…": "Wird gewartet…",
   "File missing": "Datei fehlt",
