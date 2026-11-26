@@ -1355,6 +1355,11 @@ impl Player {
     }
 
     pub fn set_volume(&mut self, v: f64) {
+        self.set_volume_live(v);
+        self.save_volume();
+    }
+
+    pub(super) fn set_volume_live(&mut self, v: f64) {
         let v = v.clamp(0.0, 150.0);
         self.volume = v;
         if let Some(m) = &self.mpv {
@@ -1363,7 +1368,13 @@ impl Player {
                 m.set_flag("mute", false);
             }
         }
-        store::update_settings(|s| s.volume = v.min(100.0));
+    }
+
+    pub(super) fn save_volume(&self) {
+        let value = self.volume.min(100.0);
+        if store::settings_snapshot().volume != value {
+            store::update_settings(|s| s.volume = value);
+        }
     }
 
     pub fn set_eq_preset(&mut self, preset: &str) {

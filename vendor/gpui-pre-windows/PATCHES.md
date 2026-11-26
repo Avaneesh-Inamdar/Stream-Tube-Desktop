@@ -15,5 +15,7 @@ right-to-left text (Arabic, Hebrew, ...) was drawn mirrored.
   `tabs_preserve_native_advances_and_cursor` skip right-to-left strings, since they
   assumed the old left-to-right layout.
 
+The Windows event handler also translates native touchscreen pans into pixel scroll events. It keeps the pan attached to the control where the gesture started.
+
 Every change is marked with "Stream Tube patch". Drop this folder and the
-`[patch.crates-io]` entry in `Cargo.toml` once upstream handles bidi text.
+`[patch.crates-io]` entry in `Cargo.toml` once upstream handles bidi text and touchscreen scrolling.

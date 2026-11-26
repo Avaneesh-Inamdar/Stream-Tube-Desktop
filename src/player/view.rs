@@ -371,7 +371,7 @@ impl Render for PlayerView {
                     this.hover_frac = Some(f);
                 } else if this.drag_vol {
                     let f = Self::frac_in(this.vol_bounds.get(), ev.position.x);
-                    this.player.update(cx, |p, _| p.set_volume(f as f64 * 100.0));
+                    this.player.update(cx, |p, _| p.set_volume_live(f as f64 * 100.0));
                 } else {
                     let sb = this.seek_bounds.get();
                     let near = ev.position.y >= sb.origin.y - px(12.) && ev.position.y <= sb.origin.y + sb.size.height + px(8.);
@@ -1292,7 +1292,7 @@ impl PlayerView {
                                     cx.stop_propagation();
                                     this.drag_vol = true;
                                     let f = Self::frac_in(this.vol_bounds.get(), ev.position.x);
-                                    this.player.update(cx, |p, _| p.set_volume(f as f64 * 100.0));
+                                    this.player.update(cx, |p, _| p.set_volume_live(f as f64 * 100.0));
                                     cx.notify();
                                 }),
                             ),
@@ -1485,7 +1485,9 @@ impl PlayerView {
                 p.seek_interactive(f as f64 * d)
             });
         }
-        self.drag_vol = false;
+        if std::mem::take(&mut self.drag_vol) {
+            self.player.read(cx).save_volume();
+        }
         cx.notify();
     }
 
