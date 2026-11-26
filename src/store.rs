@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const DEFAULT_UP_NEXT_THUMBNAIL_WIDTH: u32 = 168;
-pub const UP_NEXT_THUMBNAIL_SIZES: &[(u32, &str)] = &[(128, "128 × 72"), (DEFAULT_UP_NEXT_THUMBNAIL_WIDTH, "168 × 94"), (208, "208 × 117")];
+pub const UP_NEXT_THUMBNAIL_SIZES: &[(u32, &str)] = &[(128, "Small"), (DEFAULT_UP_NEXT_THUMBNAIL_WIDTH, "Medium"), (208, "Large")];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
