@@ -189,8 +189,22 @@ pub fn video_menu_items(v: &VideoItem) -> Vec<MenuItem> {
     }));
     let v2 = v.clone();
     items.push(MenuItem::new("clock", t("Save to Watch later"), move |_, cx| {
-        if let Some(wl) = store::playlists().into_iter().find(|p| p.protected && p.name == "Watch later") {
+        let local = store::playlists().into_iter().find(|p| p.protected && p.name == "Watch later");
+        if let Some(wl) = &local {
             store::playlist_add(wl.id, &v2);
+        }
+        if let Some(session) = crate::api::auth::session_identity() {
+            let id = v2.id.clone();
+            let saved_locally = local.is_some();
+            cx.spawn(async move |cx| {
+                let result = blocking(move || crate::api::auth::set_account_playlist_saved(&session, "WL", &id, true)).await;
+                let _ = cx.update(|cx| match result {
+                    Ok(()) => toast(cx, t("Saved to Watch later")),
+                    Err(_) if saved_locally => toast(cx, t("Saved locally. Couldn't save to YouTube Watch later")),
+                    Err(_) => toast(cx, t("Couldn't save to that YouTube playlist")),
+                });
+            }).detach();
+        } else if local.is_some() {
             toast(cx, t("Saved to Watch later"));
         }
     }));

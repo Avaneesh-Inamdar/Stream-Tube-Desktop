@@ -68,6 +68,10 @@ pub(crate) fn session_identity() -> Option<Arc<()>> {
         .map(|s| s.session.clone())
 }
 
+pub(crate) fn is_current_session(session: &Arc<()>) -> bool {
+    session_identity().is_some_and(|current| Arc::ptr_eq(&current, session))
+}
+
 pub fn account() -> Option<Account> {
     state().lock().as_ref().and_then(|s| s.account.clone())
 }
@@ -169,16 +173,21 @@ pub fn access_token() -> Option<String> {
     if let Some(tok) = v.get("access_token").and_then(Value::as_str) {
         let exp = v.get("expires_in").and_then(Value::as_i64).unwrap_or(3600);
         let mut s = state().lock();
-        if let Some(st) = s.as_mut() {
+        if let Some(st) = s.as_mut().filter(|st| Arc::ptr_eq(&st.session, &cur.session)) {
             st.access_token = tok.to_string();
             st.expires_at = crate::api::json::now() + exp - 60;
+            persist(&s);
+            return Some(tok.to_string());
         }
-        persist(&s);
-        return Some(tok.to_string());
+        return None;
     }
     // the grant was revoked from the Google account page
     if status == 400 || status == 401 {
-        sign_out();
+        let mut s = state().lock();
+        if s.as_ref().is_some_and(|st| Arc::ptr_eq(&st.session, &cur.session)) {
+            *s = None;
+            persist(&s);
+        }
     }
     None
 }
@@ -189,8 +198,14 @@ fn tv_context() -> Value {
 }
 
 /// Authorized call to the TV Innertube client.
-pub fn tv_call(endpoint: &str, mut body: Value) -> Result<Value> {
+pub fn tv_call(endpoint: &str, body: Value) -> Result<Value> {
+    tv_call_for_session(endpoint, body, None)
+}
+
+fn tv_call_for_session(endpoint: &str, mut body: Value, session: Option<&Arc<()>>) -> Result<Value> {
+    anyhow::ensure!(session.is_none_or(is_current_session), "YouTube account changed");
     let token = access_token().ok_or_else(|| anyhow!("not signed in"))?;
+    anyhow::ensure!(session.is_none_or(is_current_session), "YouTube account changed");
     body["context"] = tv_context();
     let auth = format!("Bearer {token}");
     http::post_json(
@@ -606,9 +621,23 @@ pub fn playlist(playlist_id: &str) -> Result<PlaylistPage> {
 
 /// Adds a video to one of the signed-in account's playlists.
 pub fn add_to_playlist(playlist_id: &str, video_id: &str) -> Result<()> {
-    let r = tv_call(
+    edit_playlist(playlist_id, json!([{ "action": "ACTION_ADD_VIDEO", "addedVideoId": video_id }]), None)
+}
+
+pub(crate) fn set_account_playlist_saved(session: &Arc<()>, playlist_id: &str, video_id: &str, saved: bool) -> Result<()> {
+    let action = if saved {
+        json!({ "action": "ACTION_ADD_VIDEO", "addedVideoId": video_id })
+    } else {
+        json!({ "action": "ACTION_REMOVE_VIDEO_BY_VIDEO_ID", "removedVideoId": video_id })
+    };
+    edit_playlist(playlist_id, json!([action]), Some(session))
+}
+
+fn edit_playlist(playlist_id: &str, actions: Value, session: Option<&Arc<()>>) -> Result<()> {
+    let r = tv_call_for_session(
         "browse/edit_playlist",
-        json!({ "playlistId": playlist_id, "actions": [{ "action": "ACTION_ADD_VIDEO", "addedVideoId": video_id }] }),
+        json!({ "playlistId": playlist_id, "actions": actions }),
+        session,
     )?;
     if let Some(s) = r.get("status").and_then(Value::as_str).filter(|s| *s != "STATUS_SUCCEEDED") {
         return Err(anyhow!("edit_playlist: {s}"));
@@ -620,12 +649,24 @@ pub fn add_to_playlist(playlist_id: &str, video_id: &str) -> Result<()> {
 pub fn remove_many_from_playlist(playlist_id: &str, video_ids: &[String]) -> Result<()> {
     for chunk in video_ids.chunks(50) {
         let actions: Vec<Value> = chunk.iter().map(|id| json!({ "action": "ACTION_REMOVE_VIDEO_BY_VIDEO_ID", "removedVideoId": id })).collect();
-        let r = tv_call("browse/edit_playlist", json!({ "playlistId": playlist_id, "actions": actions }))?;
-        if let Some(s) = r.get("status").and_then(Value::as_str).filter(|s| *s != "STATUS_SUCCEEDED") {
-            return Err(anyhow!("edit_playlist: {s}"));
-        }
+        edit_playlist(playlist_id, json!(actions), None)?;
     }
     Ok(())
+}
+
+pub(crate) fn account_playlist_contains(session: &Arc<()>, playlist_id: &str, video_id: &str) -> Result<bool> {
+    let mut query = json!({ "browseId": format!("VL{playlist_id}") });
+    let mut cursors = std::collections::HashSet::new();
+    loop {
+        let response = tv_call_for_session("browse", query, Some(session))?;
+        let page = collect_items(&response);
+        if page.items.iter().any(|item| matches!(item, Item::Video(video) if video.id == video_id)) {
+            return Ok(true);
+        }
+        let Some(token) = page.continuation else { return Ok(false) };
+        anyhow::ensure!(cursors.insert(token.clone()), "YouTube repeated the playlist continuation");
+        query = json!({ "continuation": token });
+    }
 }
 
 /// Posts a message to a live stream's chat as the signed-in account.

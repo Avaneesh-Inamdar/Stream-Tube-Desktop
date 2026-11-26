@@ -3,7 +3,7 @@ use super::pages::*;
 use crate::i18n::{t, tf};
 use super::*;
 use crate::api::innertube;
-use crate::api::types::VideoItem;
+use crate::api::{auth, types::{PlaylistItem, VideoItem}};
 use crate::player::controller::{KeyboardFeedback, Player, player};
 use crate::player::view::PlayerView;
 use crate::store;
@@ -456,24 +456,33 @@ pub fn sign_out(cx: &mut App) {
 
 pub fn open_save_dialog(v: VideoItem, window: &mut Window, cx: &mut App) {
     open_dialog(Dialog::SaveToPlaylist(v), window, cx);
-    // signed in: the account's own YouTube playlists are offered too
-    if !crate::api::auth::signed_in() {
-        return;
-    }
-    if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
-        app.update(cx, |a, cx| {
-            a.yt_playlists = None;
-            cx.spawn(async move |this, cx| {
-                let list = blocking(crate::api::auth::my_playlists).await.unwrap_or_default();
-                // Liked videos can't take additions
-                let list: Vec<crate::api::types::PlaylistItem> = list.into_iter().filter(|p| p.id != "LL").collect();
-                let _ = this.update(cx, |a, cx| {
-                    a.yt_playlists = Some(list);
-                    cx.notify();
-                });
-            })
-            .detach();
-        });
+}
+
+fn account_favorites(playlists: &[PlaylistItem]) -> Option<&PlaylistItem> {
+    playlists.iter().find(|p| p.id.starts_with("FL")).or_else(|| {
+        playlists.iter().find(|p| !p.id.is_empty() && !matches!(p.id.as_str(), "LL" | "WL") && p.title.trim().eq_ignore_ascii_case("Favorites"))
+    })
+}
+
+struct FavoriteMembership {
+    playlist: String,
+    video: String,
+    contains: Option<bool>,
+    pending: bool,
+    request: std::sync::Arc<()>,
+}
+
+#[cfg(test)]
+mod favorite_playlist_tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn account_favorites_prefers_legacy_ids_and_excludes_built_in_lists() {
+        let playlist = |id: &str, title: &str| PlaylistItem { id: id.into(), title: title.into(), ..Default::default() };
+        let candidates = [playlist("LL", "Favorites"), playlist("PLcustom", "Favorites"), playlist("FLlegacy", "Избранное")];
+        assert_eq!(account_favorites(&candidates).unwrap().id, "FLlegacy");
+        assert_eq!(account_favorites(&candidates[..2]).unwrap().id, "PLcustom");
+        assert!(account_favorites(&candidates[..1]).is_none());
     }
 }
 
@@ -562,7 +571,9 @@ pub struct AppView {
     last_bounds_save: std::time::Instant,
     dialog: Option<Dialog>,
     /// the signed-in account's playlists for the Save dialog (None while loading)
-    yt_playlists: Option<Vec<crate::api::types::PlaylistItem>>,
+    yt_playlists: Option<Vec<PlaylistItem>>,
+    yt_playlist_session: Option<std::sync::Arc<()>>,
+    favorite_membership: Option<FavoriteMembership>,
     dialog_input: Entity<InputState>,
     focus: FocusHandle,
     pending_watch_sync: Option<String>,
@@ -778,6 +789,8 @@ impl AppView {
             last_bounds_save: std::time::Instant::now(),
             dialog: None,
             yt_playlists: None,
+            yt_playlist_session: None,
+            favorite_membership: None,
             dialog_input,
             focus,
             pending_watch_sync: None,
@@ -2432,6 +2445,81 @@ impl AppView {
         bar
     }
 
+    fn sync_account_playlists(&mut self, cx: &mut Context<Self>) {
+        let session = auth::session_identity();
+        let unchanged = match (&self.yt_playlist_session, &session) {
+            (Some(old), Some(new)) => std::sync::Arc::ptr_eq(old, new),
+            (None, None) => true,
+            _ => false,
+        };
+        if unchanged {
+            return;
+        }
+        self.yt_playlists = None;
+        self.favorite_membership = None;
+        self.yt_playlist_session = session.clone();
+        let Some(session) = session else { return };
+        cx.spawn(async move |this, cx| {
+            let list = blocking(auth::my_playlists).await.unwrap_or_default();
+            let _ = this.update(cx, |a, cx| {
+                if auth::is_current_session(&session) {
+                    a.yt_playlists = Some(list);
+                    cx.notify();
+                }
+            });
+        }).detach();
+    }
+
+    fn sync_favorite_membership(&mut self, cx: &mut Context<Self>) {
+        let Some(Dialog::SaveToPlaylist(video)) = &self.dialog else {
+            self.favorite_membership = None;
+            return;
+        };
+        let Some(playlist) = self.yt_playlists.as_deref().and_then(account_favorites) else { return };
+        if self.favorite_membership.as_ref().is_none_or(|favorite| favorite.video != video.id || favorite.playlist != playlist.id) {
+            self.update_favorite_membership(None, cx);
+        }
+    }
+
+    fn update_favorite_membership(&mut self, save: Option<bool>, cx: &mut Context<Self>) {
+        let Some(Dialog::SaveToPlaylist(video)) = &self.dialog else { return };
+        let Some(playlist) = self.yt_playlists.as_deref().and_then(account_favorites) else { return };
+        let Some(session) = self.yt_playlist_session.clone() else { return };
+        let (playlist, video) = (playlist.id.clone(), video.id.clone());
+        let request = std::sync::Arc::new(());
+        self.favorite_membership = Some(FavoriteMembership {
+            playlist: playlist.clone(),
+            video: video.clone(),
+            contains: save.map(|value| !value),
+            pending: true,
+            request: request.clone(),
+        });
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (pid, vid, account) = (playlist.clone(), video.clone(), session.clone());
+            let result = blocking(move || match save {
+                Some(saved) => auth::set_account_playlist_saved(&account, &pid, &vid, saved).map(|()| saved),
+                None => auth::account_playlist_contains(&account, &pid, &vid),
+            }).await;
+            let _ = this.update(cx, |a, cx| {
+                if !auth::is_current_session(&session) { return; }
+                let Some(favorite) = a.favorite_membership.as_mut().filter(|f| std::sync::Arc::ptr_eq(&f.request, &request)) else { return; };
+                favorite.pending = false;
+                match result {
+                    Ok(saved) => {
+                        favorite.contains = Some(saved);
+                        if save.is_some() {
+                            toast(cx, t(if saved { "Added to YouTube Favorites" } else { "Removed from YouTube Favorites" }));
+                        }
+                    }
+                    Err(_) if save.is_some() => toast(cx, t("Couldn't update YouTube Favorites")),
+                    Err(_) => {}
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let p = pal(cx);
         let ui = *cx.global::<UiState>();
@@ -2536,14 +2624,26 @@ impl AppView {
             )
             .child(entry("s-hist", "history", "History", Route::History, route == Route::History, cx))
             .child(entry("s-pl", "list-video", "Playlists", Route::Library, route == Route::Library, cx));
+        let account = self.yt_playlist_session.is_some();
+        let favorites = self.yt_playlists.as_deref().and_then(account_favorites);
         for pl in store::playlists().into_iter().filter(|p| p.protected) {
-            let name = if pl.name == "Watch later" { "clock" } else { "thumbs-up" };
-            let active = route == Route::LocalPlaylist(pl.id);
-            let id = pl.id;
+            let watch_later = pl.name == "Watch later";
+            let name = if watch_later { "clock" } else { "bookmark" };
+            let target = match (watch_later, account, favorites) {
+                (true, true, _) => Route::Playlist("WL".into()),
+                (false, true, Some(playlist)) if pl.name == "Favorites" => Route::Playlist(playlist.id.clone()),
+                _ => Route::LocalPlaylist(pl.id),
+            };
+            let active = route == target;
             col = col.child(
-                row(SharedString::from(format!("s-lp-{id}")), ic(name, active), t(&pl.name).to_string(), active)
-                    .on_click(cx.listener(move |this, _, window, cx| this.go(Route::LocalPlaylist(id), window, cx))),
+                row(SharedString::from(format!("s-lp-{}", pl.id)), ic(name, active), t(&pl.name).to_string(), active)
+                    .on_click(cx.listener(move |this, _, window, cx| this.go(target.clone(), window, cx))),
             );
+        }
+        if account {
+            let liked = Route::Playlist("LL".into());
+            let active = route == liked;
+            col = col.child(entry("s-account-liked", "thumbs-up", "Liked videos", liked, active, cx));
         }
         col = col.child(entry("s-dl", "download", "Downloads", Route::Downloads, route == Route::Downloads, cx));
 
@@ -3062,10 +3162,12 @@ impl AppView {
                             }))
                     }))
                     .when(crate::api::auth::signed_in(), |d| {
+                        let favorite = self.yt_playlists.as_deref().and_then(account_favorites);
                         let rows: Vec<AnyElement> = match &self.yt_playlists {
                             None => vec![div().py_2().px_2().text_sm().text_color(p.text2).child(t("Loading your YouTube playlists…")).into_any_element()],
                             Some(list) => list
                                 .iter()
+                                .filter(|pl| pl.id != "LL" && favorite.is_none_or(|favorite| pl.id != favorite.id))
                                 .map(|pl| {
                                     let (pid, name, vid) = (pl.id.clone(), pl.title.clone(), v.id.clone());
                                     div()
@@ -3097,6 +3199,23 @@ impl AppView {
                                 .collect(),
                         };
                         d.child(div().pt_3().pb_1().px_2().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text2).child(t("Your YouTube playlists")))
+                            .when_some(self.favorite_membership.as_ref().filter(|f| f.video == v.id), |d, favorite| {
+                                let pending = favorite.pending;
+                                let contains = favorite.contains;
+                                d.child(div()
+                                    .id("dlg-account-favorites")
+                                    .flex().items_center().gap_3().py_2().px_2().rounded_md()
+                                    .child(icon(match (pending, contains) {
+                                        (true, _) => "loader",
+                                        (false, Some(true)) => "square-check",
+                                        (false, Some(false)) => "square",
+                                        (false, None) => "refresh-cw",
+                                    }).text_color(p.text))
+                                    .child(div().flex_1().text_sm().text_color(p.text).child(t("Favorites")))
+                                    .when(!pending, |row| row.cursor_pointer().hover(move |s| s.bg(p.hover)).on_click(
+                                        cx.listener(move |a, _, _, cx| a.update_favorite_membership(contains.map(|saved| !saved), cx)),
+                                    )))
+                            })
                             .children(rows)
                     })
                     .child(
@@ -3292,6 +3411,8 @@ impl Render for AppView {
                 self.page = build_page(&self.route, window, cx);
             }
         }
+        self.sync_account_playlists(cx);
+        self.sync_favorite_membership(cx);
         if let Some(id) = self.pending_watch_sync.take() {
             if let Route::Watch { id: cur, .. } = &self.route {
                 if *cur != id {
