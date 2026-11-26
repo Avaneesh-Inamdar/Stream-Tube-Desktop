@@ -9,6 +9,8 @@ mod idle_inhibit;
 mod import;
 mod links;
 mod locale;
+#[cfg(windows)]
+mod media_controls;
 mod perf;
 mod player;
 mod recommend;
@@ -117,6 +119,8 @@ fn main() {
             };
             gpui_kit::open_window(opts, cx, |window, cx| {
                 ui::apply_theme(Some(window), cx);
+                #[cfg(windows)]
+                media_controls::init(window, cx);
                 cx.new(|cx| ui::app::AppView::new(window, cx))
             })
             .expect("failed to open window");
