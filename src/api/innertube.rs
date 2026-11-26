@@ -965,6 +965,81 @@ pub fn playlist(playlist_id: &str) -> Result<PlaylistPage> {
     Ok(PlaylistPage { info, description, videos, continuation: page.continuation })
 }
 
+/// Upper bound on continuation requests for one playlist (~10,000 videos).
+pub const MAX_PLAYLIST_PAGES: usize = 100;
+
+/// Fetches one continuation page of a playlist and extracts its videos.
+pub fn playlist_continue(token: &str, authed: bool) -> Result<(Vec<VideoItem>, Option<String>)> {
+    let fetch = || if authed { super::auth::browse_continue(token) } else { browse_continue(token) };
+    let page = fetch().or_else(|_| fetch())?;
+    let videos = page
+        .items
+        .into_iter()
+        .filter_map(|i| match i {
+            Item::Video(v) => Some(v),
+            _ => None,
+        })
+        .collect();
+    Ok((videos, page.continuation))
+}
+
+/// Appends videos whose id is not already present in `target`, returning how many were added.
+pub fn append_unique_videos(target: &mut Vec<VideoItem>, incoming: Vec<VideoItem>) -> usize {
+    let mut seen: std::collections::HashSet<String> = target.iter().map(|v| v.id.clone()).collect();
+    let before = target.len();
+    for v in incoming {
+        if seen.insert(v.id.clone()) {
+            target.push(v);
+        }
+    }
+    target.len() - before
+}
+
+/// Tracks playlist continuation tokens while guarding against empty, repeated,
+/// or cyclic tokens and capping the total number of pages fetched.
+pub struct PlaylistPager {
+    next: Option<String>,
+    seen_tokens: std::collections::HashSet<String>,
+    pages_loaded: usize,
+    max_pages: usize,
+}
+
+impl PlaylistPager {
+    pub fn new(first: Option<String>, max_pages: usize) -> Self {
+        Self {
+            next: first.filter(|t| !t.is_empty()),
+            seen_tokens: std::collections::HashSet::new(),
+            pages_loaded: 0,
+            max_pages,
+        }
+    }
+
+    pub fn take_next(&mut self) -> Option<String> {
+        if self.pages_loaded >= self.max_pages {
+            self.next = None;
+            return None;
+        }
+        let tok = self.next.take().filter(|t| !t.is_empty())?;
+        if !self.seen_tokens.insert(tok.clone()) {
+            return None;
+        }
+        self.pages_loaded += 1;
+        Some(tok)
+    }
+
+    pub fn advance(&mut self, next: Option<String>) {
+        if self.pages_loaded >= self.max_pages {
+            self.next = None;
+            return;
+        }
+        self.next = next.filter(|t| !t.is_empty() && !self.seen_tokens.contains(t));
+    }
+
+    pub fn next_token(&self) -> Option<&str> {
+        (self.pages_loaded < self.max_pages).then_some(self.next.as_deref()).flatten()
+    }
+}
+
 // ───────────────────────── watch / next ─────────────────────────
 
 fn description_link_url(command: &Value) -> Option<String> {
@@ -1728,6 +1803,58 @@ mod tile_tests {
 
 #[cfg(test)]
 mod long_playlist_tests {
+    use super::*;
+
+    fn video(id: &str) -> VideoItem {
+        VideoItem { id: id.to_string(), ..Default::default() }
+    }
+
+    #[test]
+    fn pager_drains_pages_and_deduplicates_videos() {
+        let mut pager = PlaylistPager::new(Some("p2".into()), 10);
+        let mut vids = vec![video("v1"), video("v2")];
+        let pages: std::collections::HashMap<&str, (Vec<VideoItem>, Option<&str>)> = [
+            ("p2", (vec![video("v2"), video("v3")], Some("p3"))),
+            ("p3", (vec![video("v4")], None)),
+        ]
+        .into_iter()
+        .collect();
+        while let Some(tok) = pager.take_next() {
+            let (batch, next) = pages.get(tok.as_str()).cloned().unwrap();
+            append_unique_videos(&mut vids, batch);
+            pager.advance(next.map(str::to_string));
+        }
+        let ids: Vec<&str> = vids.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, vec!["v1", "v2", "v3", "v4"]);
+        assert_eq!(pager.next_token(), None);
+    }
+
+    #[test]
+    fn pager_stops_on_duplicate_or_cyclic_tokens_and_empty_tokens() {
+        let mut pager = PlaylistPager::new(Some("t1".into()), 10);
+        assert_eq!(pager.take_next().as_deref(), Some("t1"));
+        pager.advance(Some("t2".into()));
+        assert_eq!(pager.take_next().as_deref(), Some("t2"));
+        // cycle back to t1 must terminate immediately
+        pager.advance(Some("t1".into()));
+        assert_eq!(pager.next_token(), None);
+        assert_eq!(pager.take_next(), None);
+
+        let mut empty = PlaylistPager::new(Some(String::new()), 10);
+        assert_eq!(empty.take_next(), None);
+    }
+
+    #[test]
+    fn pager_respects_max_pages_cap() {
+        let mut pager = PlaylistPager::new(Some("p1".into()), 2);
+        assert_eq!(pager.take_next().as_deref(), Some("p1"));
+        pager.advance(Some("p2".into()));
+        assert_eq!(pager.take_next().as_deref(), Some("p2"));
+        pager.advance(Some("p3".into()));
+        assert_eq!(pager.next_token(), None);
+        assert_eq!(pager.take_next(), None);
+    }
+
     #[test]
     #[ignore = "network"]
     fn long_playlists_load_and_watch_next_sends_a_window() {

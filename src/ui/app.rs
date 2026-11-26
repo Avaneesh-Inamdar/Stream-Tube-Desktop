@@ -1295,10 +1295,7 @@ impl AppView {
             if let (Route::Watch { id, start, .. }, Some((vid, queue, pos, time))) = (&mut self.route, next.playback) {
                 if *id == vid {
                     if queue.iter().any(|v| v.id == vid) {
-                        player(cx).update(cx, |p, _| {
-                            p.queue = queue;
-                            p.queue_pos = pos;
-                        });
+                        player(cx).update(cx, |p, _| p.replace_queue(queue, pos));
                     }
                     if time > 1.0 {
                         *start = Some(time);
@@ -3246,9 +3243,9 @@ impl Render for AppView {
             }
         }
         if let Some(id) = self.pending_watch_sync.take() {
-            if let Route::Watch { id: cur, .. } = &self.route {
+            if let Route::Watch { id: cur, playlist, .. } = &self.route {
                 if *cur != id {
-                    let r = Route::Watch { id, playlist: None, start: None };
+                    let r = Route::Watch { id, playlist: playlist.clone(), start: None };
                     let page = build_page(&r, window, cx);
                     let old = std::mem::replace(&mut self.route, r);
                     let old_page = std::mem::replace(&mut self.page, page);

@@ -55,6 +55,7 @@ pub struct WatchPage {
     /// new page, so its scroll position isn't kept)
     queue_scroll: ScrollHandle,
     queue_scrolled_to: Option<usize>,
+    queue_scroll_pending: bool,
     chat: Option<LiveChat>,
     /// repaints the chapters panel when playback moves into another chapter
     chapters_ticker: Option<Task<()>>,
@@ -91,7 +92,7 @@ impl WatchPage {
         let sub = cx.subscribe(&pl, |this: &mut Self, _, ev: &PlayerEvent, cx| {
             match ev {
                 PlayerEvent::Ended => this.on_ended(cx),
-                PlayerEvent::Ambient => cx.notify(),
+                PlayerEvent::Ambient | PlayerEvent::QueueChanged => cx.notify(),
                 _ => {}
             }
         });
@@ -106,20 +107,30 @@ impl WatchPage {
             let stub = VideoItem { id: id.clone(), thumbnail: innertube::default_thumb(&id), ..Default::default() };
             pl.update(cx, |p, cx| {
                 // keep queue if this video is in it
-                if let Some(pos) = p.queue.iter().position(|v| v.id == id) {
+                if p.queue_pos.and_then(|pos| p.queue.get(pos)).is_some_and(|v| v.id == id) {
+                    // keep current queue position
+                } else if let Some(pos) = p.queue.iter().position(|v| v.id == id) {
                     p.queue_pos = Some(pos);
                 } else if let Some((_, _, items)) = &local_playlist {
-                    p.queue = items.clone();
-                    p.queue_pos = items.iter().position(|v| v.id == id);
+                    p.replace_queue(items.clone(), items.iter().position(|v| v.id == id));
                 } else {
-                    p.queue.clear();
-                    p.queue_pos = None;
+                    p.reset_queue();
                 }
                 p.play(stub, start, cx);
             });
         } else if let Some(t) = start {
             pl.update(cx, |p, _| p.seek_to(t));
         }
+        let (queue_scroll, queue_scrolled_to) = {
+            let scroll = ScrollHandle::new();
+            let restored = pl.update(cx, |p, _| p.take_queue_scroll().map(|y| (y, p.queue_pos)));
+            if let Some((y, pos)) = restored {
+                scroll.set_offset(point(px(0.), y));
+                (scroll, pos)
+            } else {
+                (scroll, None)
+            }
+        };
         cx.set_global(AutoplayNext(None));
         let mut s = Self {
             id,
@@ -138,8 +149,9 @@ impl WatchPage {
             related_more_loading: false,
             scroll: ScrollHandle::new(),
             local_playlist,
-            queue_scroll: ScrollHandle::new(),
-            queue_scrolled_to: None,
+            queue_scroll,
+            queue_scrolled_to,
+            queue_scroll_pending: false,
             chat: None,
             chapters_ticker: None,
             chapters_shown: None,
@@ -438,10 +450,11 @@ impl WatchPage {
                                 p.video = Some(v.clone());
                                 store::history_add(&v);
                                 // playlist queue
-                                if let Some(wp) = &w.playlist {
-                                    if !wp.items.is_empty() {
-                                        merge_playlist_window(&mut p.queue, &mut p.queue_pos, &wp.items, &full.id);
-                                    }
+                                if let Some(wp) = &w.playlist
+                                    && !wp.items.is_empty()
+                                    && merge_playlist_window(&mut p.queue, &mut p.queue_pos, &wp.items, &full.id)
+                                {
+                                    p.on_queue_replaced();
                                 }
                                 cx.notify();
                             }
@@ -1272,7 +1285,7 @@ impl WatchPage {
         )
     }
 
-    fn render_queue_panel(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_queue_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = pal(cx);
         let pl = player(cx);
         let (queue, pos) = {
@@ -1289,13 +1302,28 @@ impl WatchPage {
             .or(self.local_playlist.as_ref().map(|l| l.1.clone()))
             .unwrap_or_else(|| translate("Queue").into());
         let mut list = div().id("queue-list").flex().flex_col().max_h(px(400.)).overflow_y_scroll().track_scroll(&self.queue_scroll);
-        if let Some(i) = pos.filter(|i| self.queue_scrolled_to != Some(*i)) {
-            self.queue_scrolled_to = Some(i);
-            // a row above the current one stays visible
-            self.queue_scroll.scroll_to_item(i.saturating_sub(1));
+        // Wait for the first layout pass before calling scroll_to_top_of_item;
+        // GPUI only records overflow and bounds during prepaint, so an earlier
+        // call is consumed without scrolling.
+        let laid_out = self.queue_scroll.bounds().size.height > px(0.);
+        match queue_scroll_action(pos, self.queue_scrolled_to, laid_out, self.queue_scroll_pending) {
+            QueueScrollAction::ScrollTo(target) => {
+                self.queue_scrolled_to = pos;
+                // a row above the current one stays visible
+                self.queue_scroll.scroll_to_top_of_item(target);
+            }
+            QueueScrollAction::DeferUntilLaidOut => {
+                self.queue_scroll_pending = true;
+                cx.on_next_frame(window, |this, _, cx| {
+                    this.queue_scroll_pending = false;
+                    cx.notify();
+                });
+            }
+            QueueScrollAction::None => {}
         }
         for (i, v) in queue.iter().enumerate() {
             let plc = pl.clone();
+            let page = cx.entity().downgrade();
             // the playing video stays: removing it would leave the queue without a position
             let extra = if pos == Some(i) {
                 Vec::new()
@@ -1323,7 +1351,15 @@ impl WatchPage {
                     .child(compact_row_with(
                         v,
                         pos == Some(i),
-                        Some(Arc::new(move |_, cx: &mut App| plc.update(cx, |p, cx| p.play_queue_index(i, cx)))),
+                        Some(Arc::new(move |_, cx: &mut App| {
+                            let y = page.upgrade().map(|e| e.read(cx).queue_scroll.offset().y);
+                            plc.update(cx, |p, cx| {
+                                if let Some(y) = y {
+                                    p.save_queue_scroll(y);
+                                }
+                                p.play_queue_index(i, cx);
+                            });
+                        })),
                         extra,
                         cx,
                     )),
@@ -1360,22 +1396,10 @@ impl WatchPage {
                             div()
                                 .flex()
                                 .child(icon_button("q-shuffle", "shuffle", cx).on_click(move |_, _, cx| {
-                                    plc2.update(cx, |p, cx| {
-                                        use rand::seq::SliceRandom;
-                                        let cur = p.queue_pos.and_then(|i| p.queue.get(i).cloned());
-                                        p.queue.shuffle(&mut rand::rng());
-                                        if let Some(c) = cur {
-                                            p.queue_pos = p.queue.iter().position(|v| v.id == c.id);
-                                        }
-                                        cx.notify();
-                                    })
+                                    plc2.update(cx, |p, cx| p.shuffle_queue(cx));
                                 }))
                                 .child(icon_button("q-clear", "x", cx).on_click(move |_, _, cx| {
-                                    plc3.update(cx, |p, cx| {
-                                        p.queue.clear();
-                                        p.queue_pos = None;
-                                        cx.notify();
-                                    })
+                                    plc3.update(cx, |p, cx| p.clear_queue(cx));
                                 })),
                         ),
                 )
@@ -1520,7 +1544,7 @@ impl Render for WatchPage {
             _ => spinner(cx).into_any_element(),
         };
         let chapters_panel = self.render_chapters_panel(cx);
-        let queue_panel = self.render_queue_panel(cx);
+        let queue_panel = self.render_queue_panel(window, cx);
         let chat_panel = self.render_chat(window, cx);
         let related = info.as_ref().map(|w| self.render_related(w, cx));
         let secondary = div()
@@ -1706,21 +1730,43 @@ mod tests {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum QueueScrollAction {
+    None,
+    DeferUntilLaidOut,
+    ScrollTo(usize),
+}
+
+fn queue_scroll_action(pos: Option<usize>, scrolled_to: Option<usize>, laid_out: bool, pending: bool) -> QueueScrollAction {
+    let Some(i) = pos.filter(|i| scrolled_to != Some(*i)) else {
+        return QueueScrollAction::None;
+    };
+    if laid_out {
+        QueueScrollAction::ScrollTo(i.saturating_sub(1))
+    } else if pending {
+        QueueScrollAction::None
+    } else {
+        QueueScrollAction::DeferUntilLaidOut
+    }
+}
+
 /// YouTube sends only a window of a playlist with each video (about 20 before it
 /// and 80 after). Replacing the queue with that window cut long playlists short
 /// and dropped the rest of a queue, so the window is merged in instead: a queue
 /// that already has this video keeps its order and gains the window's later
 /// videos it lacks, at its end; otherwise the window becomes the queue.
-fn merge_playlist_window(queue: &mut Vec<VideoItem>, pos: &mut Option<usize>, window: &[VideoItem], current: &str) {
+/// Returns `true` when the window replaced the queue.
+fn merge_playlist_window(queue: &mut Vec<VideoItem>, pos: &mut Option<usize>, window: &[VideoItem], current: &str) -> bool {
     let Some(at) = queue.iter().position(|v| v.id == current) else {
         *queue = window.to_vec();
         *pos = queue.iter().position(|v| v.id == current);
-        return;
+        return true;
     };
     *pos = Some(at);
     let known: std::collections::HashSet<String> = queue.iter().map(|v| v.id.clone()).collect();
     let later = window.iter().skip_while(|v| v.id != current).skip(1).filter(|v| !known.contains(&v.id)).cloned();
     queue.extend(later.collect::<Vec<_>>());
+    false
 }
 
 #[cfg(test)]
@@ -1735,7 +1781,7 @@ mod queue_merge_tests {
     fn a_window_extends_a_long_queue() {
         let mut q = vids(0..300);
         let mut pos = None;
-        merge_playlist_window(&mut q, &mut pos, &vids(279..378), "299");
+        assert!(!merge_playlist_window(&mut q, &mut pos, &vids(279..378), "299"));
         assert_eq!(pos, Some(299));
         assert_eq!(q.len(), 378);
         assert_eq!(q[300].id, "300");
@@ -1745,7 +1791,7 @@ mod queue_merge_tests {
     fn a_window_never_shrinks_the_queue() {
         let mut q = vids(0..10);
         let mut pos = None;
-        merge_playlist_window(&mut q, &mut pos, &vids(3..5), "4");
+        assert!(!merge_playlist_window(&mut q, &mut pos, &vids(3..5), "4"));
         assert_eq!((q.len(), pos), (10, Some(4)));
     }
 
@@ -1753,8 +1799,23 @@ mod queue_merge_tests {
     fn a_new_playlist_replaces_the_queue() {
         let mut q = vids(0..10);
         let mut pos = None;
-        merge_playlist_window(&mut q, &mut pos, &vids(50..60), "55");
+        assert!(merge_playlist_window(&mut q, &mut pos, &vids(50..60), "55"));
         assert_eq!((q.len(), pos), (10, Some(5)));
         assert_eq!(q[0].id, "50");
+    }
+
+    #[::core::prelude::v1::test]
+    fn queue_scroll_waits_for_first_layout_and_preserves_restored_position() {
+        // Fresh page before layout defers once instead of firing a no-op scroll.
+        assert_eq!(queue_scroll_action(Some(50), None, false, false), QueueScrollAction::DeferUntilLaidOut);
+        assert_eq!(queue_scroll_action(Some(50), None, false, true), QueueScrollAction::None);
+        // Once laid out, scrolls to one row above the active track.
+        assert_eq!(queue_scroll_action(Some(50), None, true, false), QueueScrollAction::ScrollTo(49));
+        assert_eq!(queue_scroll_action(Some(0), None, true, false), QueueScrollAction::ScrollTo(0));
+        // Clicking an item with restored scroll or appending items keeps scroll steady.
+        assert_eq!(queue_scroll_action(Some(50), Some(50), false, false), QueueScrollAction::None);
+        assert_eq!(queue_scroll_action(Some(50), Some(50), true, false), QueueScrollAction::None);
+        // Changing position (e.g. shuffle) scrolls to the new position.
+        assert_eq!(queue_scroll_action(Some(12), Some(50), true, false), QueueScrollAction::ScrollTo(11));
     }
 }
