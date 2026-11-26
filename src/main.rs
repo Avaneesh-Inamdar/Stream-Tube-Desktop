@@ -117,7 +117,8 @@ fn main() {
             };
             gpui_kit::open_window(opts, cx, |window, cx| {
                 ui::apply_theme(Some(window), cx);
-                cx.new(|cx| ui::app::AppView::new(window, cx))
+                let app = cx.new(|cx| ui::app::AppView::new(window, cx));
+                cx.new(|_| ui::app::Shell::new(app))
             })
             .expect("failed to open window");
             perf::mark("window open");

@@ -528,6 +528,57 @@ struct Tab {
 /// At most this many tabs; more would only hold pages nobody looks at.
 const MAX_TABS: usize = 12;
 
+#[derive(Clone)]
+struct SidebarData {
+    key: u64,
+    /// the protected lists only (Watch later, Favorites)
+    playlists: Vec<store::LocalPlaylist>,
+    subs: Vec<store::Subscription>,
+}
+
+/// The window's root. GPUI renders the root view on every frame it draws, and a
+/// view that notifies dirties all views above it, so the players live here, beside
+/// the (cached) `AppView` instead of inside it: a video frame re-renders this thin
+/// view and the player, while the page, sidebar and top bar are reused as drawn.
+pub struct Shell {
+    app: Entity<AppView>,
+}
+
+impl Shell {
+    pub fn new(app: Entity<AppView>) -> Self {
+        Self { app }
+    }
+}
+
+impl Render for Shell {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::display::mark_drawn();
+        let a = self.app.read(cx);
+        let has_slot = matches!(a.route, Route::Watch { .. } | Route::Shorts(_));
+        let clip = cx.global::<crate::ui::slot::PageClip>().0.clone();
+        let main = has_slot.then(|| crate::ui::pip::main_surface(&a.main_view, cx).clip(clip.clone()));
+        // only over a thumbnail drawn on this page (the slot is cleared when a
+        // preview stops or moves to another video)
+        let preview = (crate::player::preview::showing(cx).is_some() && cx.global::<crate::player::preview::PreviewSlot>().0.get().is_some()).then(|| {
+            let slot = cx.global::<crate::player::preview::PreviewSlot>().0.clone();
+            crate::ui::slot::SlotFollower::with_slot(slot, AnyView::from(a.preview_view.clone())).clip(clip.clone())
+        });
+        // the same conditions as `AppView::render_mini_player` (fullscreen is a watch page)
+        let mini = (!has_slot && player(cx).read(cx).video.is_some()).then(|| {
+            let slot = cx.global::<crate::ui::slot::MiniSlot>().0.clone();
+            crate::ui::slot::SlotFollower::with_slot(slot, a.mini_view.clone())
+        });
+        div()
+            .image_cache(a.images.clone())
+            .size_full()
+            .relative()
+            .child(AnyView::from(self.app.clone()).cached(StyleRefinement::default().size_full()))
+            .children(main)
+            .children(preview)
+            .children(mini)
+    }
+}
+
 pub struct AppView {
     /// every tab in order; the entry at `active_tab` is a placeholder for the
     /// tab shown through the fields below
@@ -556,7 +607,11 @@ pub struct AppView {
     preview_view: Entity<crate::player::preview::PreviewView>,
     /// bounded cache for every thumbnail and avatar in this window
     images: Entity<crate::ui::image_cache::LruImageCache>,
-    had_video: bool,
+    /// the playing video as the shell shows it (mini player title), so the shell
+    /// re-renders only when that changes, never for a video frame
+    shown_video: Option<(String, String, String)>,
+    /// sidebar lists read from the database, refreshed when `store::generation` moves
+    sidebar_cache: Option<SidebarData>,
     last_bounds_save: std::time::Instant,
     dialog: Option<Dialog>,
     /// the signed-in account's playlists for the Save dialog (None while loading)
@@ -631,15 +686,24 @@ impl AppView {
             }
         }));
         let p = player(cx);
-        // Only re-render the shell when the mini player appears/disappears; the
-        // player views re-render themselves for every frame.
+        // Only re-render the shell when the mini player's video changes; the player
+        // views are drawn outside it (see `Shell`) and re-render themselves per frame.
         subs.push(cx.observe(&p, |this: &mut Self, p, cx| {
-            let has = p.read(cx).video.is_some();
-            if has != this.had_video {
-                this.had_video = has;
+            let shown = p.read(cx).video.as_ref().map(|v| (v.id.clone(), v.title.to_string(), v.channel_name.to_string()));
+            if shown != this.shown_video {
+                this.shown_video = shown;
                 cx.notify();
             }
         }));
+        // The shell is a cached view: it re-renders when it or a view inside it notifies,
+        // and when one of the globals it draws from changes.
+        subs.push(cx.observe_global::<Pal>(|_, cx| cx.notify()));
+        subs.push(cx.observe_global::<UiState>(|_, cx| cx.notify()));
+        subs.push(cx.observe_global::<OpenMenu>(|_, cx| cx.notify()));
+        subs.push(cx.observe_global::<Toasts>(|_, cx| cx.notify()));
+        subs.push(cx.observe_global::<crate::downloads::Downloads>(|_, cx| cx.notify()));
+        subs.push(cx.observe_global::<crate::updater::Updates>(|_, cx| cx.notify()));
+        subs.push(cx.observe_global::<crate::ui::pip::PipWindow>(|_, cx| cx.notify()));
         subs.push(cx.observe_window_bounds(window, |this: &mut Self, window, _| {
             // persist placement at most twice a second while the user drags/resizes
             if this.last_bounds_save.elapsed() > std::time::Duration::from_millis(500) {
@@ -703,6 +767,8 @@ impl AppView {
             cx.notify();
         }));
         cx.set_global(crate::ui::slot::PlayerSlot::default());
+        cx.set_global(crate::ui::slot::MiniSlot::default());
+        cx.set_global(crate::ui::slot::PageClip::default());
         // a YouTube link passed on the command line opens directly
         let arg_route = route_from_link(&std::env::args().nth(1).unwrap_or_default());
         let start = arg_route.unwrap_or_else(|| match store::settings_snapshot().start_page.as_str() {
@@ -769,7 +835,8 @@ impl AppView {
             main_view,
             preview_view,
             images,
-            had_video: false,
+            shown_video: None,
+            sidebar_cache: None,
             last_bounds_save: std::time::Instant::now(),
             dialog: None,
             yt_playlists: None,
@@ -1737,7 +1804,7 @@ impl AppView {
         }
         use crate::downloads::{self, JobStatus};
         let p = pal(cx);
-        let mut jobs = cx.default_global::<downloads::Downloads>().jobs.lock().clone();
+        let mut jobs = cx.try_global::<downloads::Downloads>().map(|d| d.jobs.lock().clone()).unwrap_or_default();
         jobs.reverse();
         let small_btn = |id: SharedString, ic: &'static str, tip: &'static str| {
             let _ = tip;
@@ -2388,6 +2455,24 @@ impl AppView {
         bar
     }
 
+    /// The sidebar's lists, read from the database only after something was written
+    /// (the sidebar is drawn on every shell render).
+    fn sidebar_data(&mut self) -> SidebarData {
+        let key = store::generation();
+        match &self.sidebar_cache {
+            Some(c) if c.key == key => c.clone(),
+            _ => {
+                let d = SidebarData {
+                    key,
+                    playlists: store::playlists().into_iter().filter(|p| p.protected).collect(),
+                    subs: store::subscriptions(),
+                };
+                self.sidebar_cache = Some(d.clone());
+                d
+            }
+        }
+    }
+
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let p = pal(cx);
         let ui = *cx.global::<UiState>();
@@ -2492,7 +2577,8 @@ impl AppView {
             )
             .child(entry("s-hist", "history", "History", Route::History, route == Route::History, cx))
             .child(entry("s-pl", "list-video", "Playlists", Route::Library, route == Route::Library, cx));
-        for pl in store::playlists().into_iter().filter(|p| p.protected) {
+        let SidebarData { playlists, subs, .. } = self.sidebar_data();
+        for pl in playlists {
             let name = if pl.name == "Watch later" { "clock" } else { "thumbs-up" };
             let active = route == Route::LocalPlaylist(pl.id);
             let id = pl.id;
@@ -2503,7 +2589,6 @@ impl AppView {
         }
         col = col.child(entry("s-dl", "download", "Downloads", Route::Downloads, route == Route::Downloads, cx));
 
-        let subs = store::subscriptions();
         if !subs.is_empty() {
             const SHOWN: usize = 7;
             col = col.child(sep()).child(
@@ -2642,7 +2727,8 @@ impl AppView {
                 .shadow_2xl()
                 .border_1()
                 .border_color(p.border)
-                .child(div().w_full().h(px(h)).child(self.mini_view.clone()))
+                // the video itself is drawn over this slot by `Shell`
+                .child(div().w_full().h(px(h)).child(crate::ui::slot::slot_canvas(cx.global::<crate::ui::slot::MiniSlot>().0.clone())))
                 .child(
                     div()
                         .id("mini-info")
@@ -2669,9 +2755,9 @@ impl AppView {
                 )
                 // resize from the top and left edges (the player is anchored bottom-right);
                 // thin strips, so the player's own buttons stay clickable
-                .child(div().id("mini-resize-top").absolute().top_0().left_0().right_0().h(px(6.)).cursor(CursorStyle::ResizeUpDown).on_mouse_down(MouseButton::Left, start(true)))
-                .child(div().id("mini-resize-left").absolute().top_0().left_0().bottom_0().w(px(6.)).cursor(CursorStyle::ResizeLeftRight).on_mouse_down(MouseButton::Left, start(true)))
-                .child(div().id("mini-resize-corner").absolute().top_0().left_0().size(px(12.)).cursor(CursorStyle::ResizeUpLeftDownRight).on_mouse_down(MouseButton::Left, start(true)))
+                .child(deferred(div().id("mini-resize-top").absolute().top_0().left_0().right_0().h(px(6.)).cursor(CursorStyle::ResizeUpDown).on_mouse_down(MouseButton::Left, start(true))))
+                .child(deferred(div().id("mini-resize-left").absolute().top_0().left_0().bottom_0().w(px(6.)).cursor(CursorStyle::ResizeLeftRight).on_mouse_down(MouseButton::Left, start(true))))
+                .child(deferred(div().id("mini-resize-corner").absolute().top_0().left_0().size(px(12.)).cursor(CursorStyle::ResizeUpLeftDownRight).on_mouse_down(MouseButton::Left, start(true))))
                 .into_any_element(),
         )
     }
@@ -2681,7 +2767,8 @@ impl AppView {
     fn render_mini_drag(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         self.mini_drag.as_ref()?;
         Some(
-            div()
+            // deferred: above the mini player's video, which `Shell` draws over this view
+            deferred(div()
                 .id("mini-drag")
                 .absolute()
                 .inset_0()
@@ -2713,6 +2800,7 @@ impl AppView {
                 }))
                 .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_mini_drag(cx)))
                 .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_mini_drag(cx)))
+                )
                 .into_any_element(),
         )
     }
@@ -2783,7 +2871,9 @@ impl AppView {
     fn render_update(&mut self, cx: &mut Context<Self>) -> AnyElement {
         use crate::updater::Status;
         let p = pal(cx);
-        let status = cx.default_global::<crate::updater::Updates>().status.clone();
+        let Some(status) = cx.try_global::<crate::updater::Updates>().map(|u| u.status.clone()) else {
+            return div().into_any_element();
+        };
         let (rel, progress) = match status {
             Status::Available(r) => (r, None),
             Status::Downloading(r, f) => (r, Some(f)),
@@ -3170,7 +3260,7 @@ impl AppView {
     }
 
     fn render_toasts(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let toasts = cx.default_global::<Toasts>().items.clone();
+        let toasts = cx.try_global::<Toasts>().map(|t| t.items.clone()).unwrap_or_default();
         div()
             .absolute()
             .left_4()
@@ -3234,7 +3324,6 @@ impl AppView {
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::add(&crate::perf::APP_RENDERS, 1);
-        crate::display::mark_drawn();
         {
             static FIRST: std::sync::Once = std::sync::Once::new();
             FIRST.call_once(|| crate::perf::mark("first frame"));
@@ -3263,9 +3352,14 @@ impl Render for AppView {
         }
         let is_watch = matches!(self.route, Route::Watch { .. });
         let is_shorts = matches!(self.route, Route::Shorts(_));
-        let ui = cx.global_mut::<UiState>();
-        ui.viewport = window.viewport_size();
-        ui.shorts = is_shorts;
+        // only on a change: writing a global notifies its observers, this view among them
+        let vp = window.viewport_size();
+        let ui = *cx.global::<UiState>();
+        if ui.viewport != vp || ui.shorts != is_shorts {
+            let ui = cx.global_mut::<UiState>();
+            ui.viewport = vp;
+            ui.shorts = is_shorts;
+        }
         let fullscreen = ui.fullscreen && (is_watch || is_shorts);
         let mut root = div()
             .image_cache(self.images.clone())
@@ -3292,11 +3386,13 @@ impl Render for AppView {
         if !is_shorts {
             crate::player::shorts_preload::clear();
         }
-        let has_slot = matches!(self.route, Route::Watch { .. } | Route::Shorts(_));
         let page_id = self.page.entity_id();
+        let clip = cx.global::<crate::ui::slot::PageClip>().0.clone();
         let page_area = div()
             .relative()
             .overflow_hidden()
+            // the players drawn over this area (by `Shell`) are clipped to it
+            .child(canvas(move |b, _, _| clip.set(Some(b)), |_, _, _, _| {}).absolute().size_full())
             // Measure inside the page's px_6 gutters before the cached page lays out its cards.
             .child(
                 canvas(
@@ -3325,16 +3421,6 @@ impl Render for AppView {
                         Animation::new(std::time::Duration::from_millis(160)).with_easing(ease_out_quint()),
                         |d, t| d.opacity(0.35 + 0.65 * t),
                     ),
-            )
-            .when(has_slot, |d| d.child(crate::ui::pip::main_surface(&self.main_view, cx)))
-            // only over a thumbnail drawn on this page (the slot is cleared when a
-            // preview stops or moves to another video)
-            .when(
-                crate::player::preview::showing(cx).is_some() && cx.global::<crate::player::preview::PreviewSlot>().0.get().is_some(),
-                |d| {
-                    let slot = cx.global::<crate::player::preview::PreviewSlot>().0.clone();
-                    d.child(crate::ui::slot::SlotFollower::with_slot(slot, AnyView::from(self.preview_view.clone())))
-                },
             );
         if fullscreen {
             root = root.child(page_area.size_full());
@@ -3359,10 +3445,11 @@ impl Render for AppView {
                 self.mini_geom = clamp_mini(self.mini_geom, vp.width.into(), vp.height.into());
             }
             root = root.children(self.render_mini_player(cx)).children(self.render_mini_drag(cx));
-            root = root.children(self.render_drawer(cx));
+            // deferred: drawn above the player, which `Shell` draws over this view
+            root = root.children(self.render_drawer(cx).map(deferred));
         }
         root = root.children(self.render_dl_panel(cx));
-        root = root.children(self.render_menu(cx)).children(self.render_dialog(cx)).child(self.render_toasts(cx));
+        root = root.children(self.render_menu(cx)).children(self.render_dialog(cx)).child(deferred(self.render_toasts(cx)));
         root
     }
 }

@@ -578,6 +578,18 @@ fn save_setting_json<T: Serialize>(key: &str, v: &T) -> Result<()> {
     Ok(())
 }
 
+/// Moves on every write that can change what the sidebar lists (subscriptions,
+/// playlists), so readers can cache those queries.
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn generation() -> u64 {
+    GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn bump_generation() {
+    GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub fn kv_get(key: &str) -> Option<String> {
     load_setting_json(key)
 }
@@ -621,6 +633,7 @@ pub fn subscribe(channel_id: &str, name: &str, avatar: Option<&str>) {
          ON CONFLICT(channel_id) DO UPDATE SET name=excluded.name, avatar=COALESCE(excluded.avatar, avatar)",
         params![channel_id, name, avatar, crate::api::json::now()],
     );
+    bump_generation();
 }
 
 pub fn unsubscribe(channel_id: &str) {
@@ -628,6 +641,7 @@ pub fn unsubscribe(channel_id: &str) {
     let _ = conn.execute("DELETE FROM subscriptions WHERE channel_id=?1", [channel_id]);
     let _ = conn.execute("DELETE FROM profile_channels WHERE channel_id=?1", [channel_id]);
     let _ = conn.execute("DELETE FROM feed_cache WHERE channel_id=?1", [channel_id]);
+    bump_generation();
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -904,17 +918,21 @@ pub fn playlist_create(name: &str) -> i64 {
         "INSERT INTO playlists(name, created_at) VALUES (?1, ?2)",
         params![name, crate::api::json::now()],
     );
-    conn.last_insert_rowid()
+    let id = conn.last_insert_rowid();
+    bump_generation();
+    id
 }
 
 pub fn playlist_rename(id: i64, name: &str) {
     let _ = db().lock().execute("UPDATE playlists SET name=?2 WHERE id=?1", params![id, name]);
+    bump_generation();
 }
 
 pub fn playlist_delete(id: i64) {
     let conn = db().lock();
     let _ = conn.execute("DELETE FROM playlists WHERE id=?1 AND protected=0", [id]);
     let _ = conn.execute("DELETE FROM playlist_items WHERE playlist_id=?1", [id]);
+    bump_generation();
 }
 
 pub fn playlist_items(id: i64) -> Vec<VideoItem> {

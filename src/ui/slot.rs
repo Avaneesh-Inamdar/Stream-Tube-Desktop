@@ -1,7 +1,8 @@
-//! The main video player lives outside the page tree so that video frames only
-//! re-render the player itself, never the (cached) page around it. Pages place a
-//! `player_slot()` where the video should appear; `SlotFollower` draws the player
-//! over that slot in the same frame (it reads the slot bounds during prepaint).
+//! The video players live outside the page and app trees (in `app::Shell`) so that
+//! video frames only re-render the player itself, never the (cached) views around
+//! it. Pages place a `player_slot()` where the video should appear; `SlotFollower`
+//! draws the player over that slot in the same frame (it reads the slot bounds
+//! during prepaint, after the views that record them).
 use gpui_kit::*;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -10,6 +11,19 @@ use std::rc::Rc;
 pub struct PlayerSlot(pub Rc<Cell<Option<Bounds<Pixels>>>>);
 
 impl Global for PlayerSlot {}
+
+/// Where the mini player's video goes (inside the mini player's frame).
+#[derive(Clone, Default)]
+pub struct MiniSlot(pub Rc<Cell<Option<Bounds<Pixels>>>>);
+
+impl Global for MiniSlot {}
+
+/// The page area: the main player and previews are clipped to it, as they were
+/// when they were drawn inside it.
+#[derive(Clone, Default)]
+pub struct PageClip(pub Rc<Cell<Option<Bounds<Pixels>>>>);
+
+impl Global for PageClip {}
 
 /// Clears the recorded player slot bounds (call on navigation so the old page's
 /// slot size is never briefly drawn on the new page).
@@ -21,7 +35,11 @@ pub fn clear_slot(cx: &App) {
 
 /// Placeholder element that records where the player should be drawn.
 pub fn player_slot(cx: &App) -> impl IntoElement {
-    let slot = cx.global::<PlayerSlot>().0.clone();
+    slot_canvas(cx.global::<PlayerSlot>().0.clone())
+}
+
+/// Fills its parent and records its bounds in `slot` while it is drawn.
+pub fn slot_canvas(slot: Rc<Cell<Option<Bounds<Pixels>>>>) -> impl IntoElement {
     canvas(move |b, _, _| slot.set(Some(b)), |_, _, _, _| {}).size_full()
 }
 
@@ -30,6 +48,7 @@ pub struct SlotFollower {
     child: Option<AnyElement>,
     laid_size: Option<Size<Pixels>>,
     can_paint: bool,
+    clip: Option<Rc<Cell<Option<Bounds<Pixels>>>>>,
 }
 
 impl SlotFollower {
@@ -41,7 +60,17 @@ impl SlotFollower {
     pub fn with_slot(slot: Rc<Cell<Option<Bounds<Pixels>>>>, content: impl IntoElement) -> Self {
         let laid_size = slot.get().map(|b| b.size);
         let child = laid_size.map(|s| div().w(s.width).h(s.height).child(content).into_any_element());
-        Self { slot, child, laid_size, can_paint: false }
+        Self { slot, child, laid_size, can_paint: false, clip: None }
+    }
+
+    /// Draws only inside the bounds `clip` holds (when it holds any).
+    pub fn clip(mut self, clip: Rc<Cell<Option<Bounds<Pixels>>>>) -> Self {
+        self.clip = Some(clip);
+        self
+    }
+
+    fn mask(&self) -> Option<ContentMask<Pixels>> {
+        self.clip.as_ref().and_then(|c| c.get()).map(|bounds| ContentMask { bounds })
     }
 }
 
@@ -107,9 +136,10 @@ impl Element for SlotFollower {
                 return;
             }
         }
+        let mask = self.mask();
         if let Some(child) = self.child.as_mut() {
             let offset = slot.origin - bounds.origin;
-            window.with_element_offset(offset, |window| child.prepaint(window, cx));
+            window.with_content_mask(mask, |window| window.with_element_offset(offset, |window| child.prepaint(window, cx)));
             self.can_paint = true;
         }
     }
@@ -124,9 +154,10 @@ impl Element for SlotFollower {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let mask = self.mask();
         if self.can_paint {
             if let Some(child) = self.child.as_mut() {
-                child.paint(window, cx);
+                window.with_content_mask(mask, |window| child.paint(window, cx));
             }
         }
     }
