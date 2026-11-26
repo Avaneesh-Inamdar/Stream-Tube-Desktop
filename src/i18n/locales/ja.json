@@ -96,6 +96,8 @@
   "Start page": "起動時のページ",
   "Interface size": "インターフェースの拡大率",
   "Always show scrollbars": "スクロールバーを常に表示",
+  "Minimize to tray": "通知領域に最小化",
+  "Keep Stream Tube open in the Windows notification area when you minimize or close it": "ウィンドウを最小化または閉じたときに Stream Tube を Windows の通知領域に残す",
   "Otherwise they appear when the pointer is over a page. Drag one, or click its track, to scroll": "それ以外の場合、ポインタがページ上にあるときに表示されます。スクロールするには、ドラッグまたはクリックしてください。",
   "Density": "表示密度",
   "Compact": "コンパクト",

@@ -17,6 +17,7 @@ pub struct Settings {
     pub app_language: AppLanguage,
     pub accent: u32,
     pub start_page: String,
+    pub minimize_to_tray: bool,
     pub grid_columns: u32,
     // Region
     pub region: String,
@@ -164,6 +165,7 @@ impl Default for Settings {
             app_language: AppLanguage::default(),
             accent: 0xff0033,
             start_page: "home".into(),
+            minimize_to_tray: false,
             grid_columns: 0,
             region: "US".into(),
             language: "en".into(),

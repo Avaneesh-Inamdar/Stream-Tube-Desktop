@@ -666,6 +666,12 @@ impl SettingsPage {
                 switch("tbar", s.always_show_tab_bar, |s, v| s.always_show_tab_bar = v, cx),
                 cx,
             ))
+            .when(cfg!(windows), |card| card.child(row(
+                "Minimize to tray",
+                "Keep Stream Tube open in the Windows notification area when you minimize or close it",
+                switch("minimize-to-tray", s.minimize_to_tray, |s, v| s.minimize_to_tray = v, cx),
+                cx,
+            )))
             .child(row("Density", "", self.choice("density", &[("compact".to_string(), "Compact"), ("default".to_string(), "Default"), ("comfortable".to_string(), "Comfortable")], s.density.clone(), |s, v| s.density = v, cx), cx))
             .child(row("Thumbnail corners", "", self.choice("radius", &[(0.0f32, "Square"), (6.0, "Small"), (12.0, "Rounded"), (18.0, "Large")], s.thumb_radius, |s, v| s.thumb_radius = v, cx), cx))
             .child(row("Grid columns", "", self.choice("cols", &[(0u32, "Auto"), (3, "3"), (4, "4"), (5, "5"), (6, "6")], s.grid_columns, |s, v| s.grid_columns = v, cx), cx))

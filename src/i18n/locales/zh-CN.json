@@ -96,6 +96,8 @@
   "Start page": "启动页面",
   "Interface size": "界面缩放",
   "Always show scrollbars": "始终显示滚动条",
+  "Minimize to tray": "最小化到通知区域",
+  "Keep Stream Tube open in the Windows notification area when you minimize or close it": "最小化或关闭窗口时，让 Stream Tube 在 Windows 通知区域保持运行",
   "Otherwise they appear when the pointer is over a page. Drag one, or click its track, to scroll": "否则,当指针位于页面上方时,它们会出现。 拖移一个或点按其轨迹以滚动",
   "Density": "显示密度",
   "Compact": "紧凑",

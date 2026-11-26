@@ -96,6 +96,8 @@
   "Start page": "Başlangıç sayfası",
   "Interface size": "Arayüz ölçeği",
   "Always show scrollbars": "Kaydırma çubuklarını her zaman göster",
+  "Minimize to tray": "Bildirim alanına küçült",
+  "Keep Stream Tube open in the Windows notification area when you minimize or close it": "Pencere küçültüldüğünde veya kapatıldığında Stream Tube'u Windows bildirim alanında açık tut",
   "Otherwise they appear when the pointer is over a page. Drag one, or click its track, to scroll": "Kapalıyken yalnızca fare sayfanın üzerindeyken görünür",
   "Density": "Görünüm yoğunluğu",
   "Compact": "Sıkışık",

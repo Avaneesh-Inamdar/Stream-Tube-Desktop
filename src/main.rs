@@ -15,6 +15,8 @@ mod perf;
 mod player;
 mod recommend;
 mod store;
+#[cfg(windows)]
+mod tray;
 mod ui;
 mod updater;
 
