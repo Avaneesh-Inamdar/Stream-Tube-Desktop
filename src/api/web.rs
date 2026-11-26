@@ -133,6 +133,19 @@ fn sapisid_auth(session: &Session) -> Option<String> {
 }
 
 /// A call to the YouTube website's API as the signed-in user.
+pub(crate) fn session_identity() -> Option<Arc<()>> {
+    session().lock().as_ref().map(|connected| connected.identity.clone())
+}
+
+pub(crate) fn is_current_session(identity: &Arc<()>) -> bool {
+    session_identity().is_some_and(|current| Arc::ptr_eq(&current, identity))
+}
+
+pub(crate) fn web_call_for_session(identity: &Arc<()>, endpoint: &str, body: Value) -> Result<Value> {
+    let connected = session().lock().clone().filter(|connected| Arc::ptr_eq(&connected.identity, identity))
+        .ok_or_else(|| anyhow!("browser session changed"))?;
+    web_call_with_session(&connected, endpoint, body)
+}
 pub fn web_call(endpoint: &str, body: Value) -> Result<Value> {
     let connected = session().lock().clone().ok_or_else(|| anyhow!("browser sign-in not connected"))?;
     web_call_with_session(&connected, endpoint, body)
