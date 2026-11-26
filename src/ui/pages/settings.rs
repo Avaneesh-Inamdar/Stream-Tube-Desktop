@@ -653,6 +653,35 @@ impl SettingsPage {
             .child(row("Theme", "", self.choice("theme", &[("dark".to_string(), "Dark"), ("light".to_string(), "Light"), ("system".to_string(), "System")], s.theme.clone(), |s, v| s.theme = v, cx), cx))
             .child(row("Accent color", "Switches, highlights, progress and the seek bar", accent_swatches(s.accent, cx), cx))
             .child(row("Start page", "", self.choice("start", &[("home".to_string(), "Home"), ("subscriptions".to_string(), "Subscriptions"), ("history".to_string(), "History")], s.start_page.clone(), |s, v| s.start_page = v, cx), cx))
+            .child(row(
+                "Cast over LAN",
+                crate::lan_cast::url(cx).unwrap_or("Send a YouTube link from your phone"),
+                if let Some(url) = crate::lan_cast::url(cx).map(str::to_owned) {
+                    div().flex().gap_2()
+                        .child(pill("cast-copy", Some("copy"), "Copy link", cx).on_click(move |_, _, cx| copy_to_clipboard(url.clone(), cx)))
+                        .child(pill("cast-stop", None, "Stop", cx).on_click(|_, _, cx| crate::lan_cast::stop(cx)))
+                } else {
+                    div().child(pill("cast-start", Some("play"), "Start", cx).on_click(|event, window, cx| {
+                        let launch = |address, window: &mut Window, cx: &mut App| {
+                            if crate::lan_cast::start(address, window.window_handle(), cx).is_err() {
+                                toast(cx, t("Couldn't connect to the local network"));
+                            }
+                        };
+                        let addresses = crate::lan_cast::addresses().unwrap_or_default();
+                        match addresses.as_slice() {
+                            [] => toast(cx, t("Couldn't connect to the local network")),
+                            [address] => launch(*address, window, cx),
+                            _ => {
+                                let choices = addresses.into_iter().map(|address| {
+                                    crate::ui::app::MenuItem::new("network", address.to_string(), move |window, cx| launch(address, window, cx))
+                                }).collect();
+                                crate::ui::app::open_menu(event.position(), choices, window, cx);
+                            }
+                        }
+                    }))
+                },
+                cx,
+            ))
             .child(row("Interface size", "", self.choice("scale", &[(0.9f32, "90%"), (1.0, "100%"), (1.1, "110%"), (1.25, "125%")], s.ui_scale, |s, v| s.ui_scale = v, cx), cx))
             .child(row(
                 "Always show scrollbars",

@@ -7,6 +7,7 @@ mod feed;
 mod i18n;
 mod idle_inhibit;
 mod import;
+mod lan_cast;
 mod links;
 mod locale;
 #[cfg(windows)]

@@ -58,6 +58,7 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 - Keeps playing when minimized, or pauses and resumes when you come back. On Windows, active video playback keeps the display awake.
 - Windows media controls can pause playback, resume it and move through the video queue.
 - On Windows, *Settings → General → Minimize to tray* keeps Stream Tube in the notification area when you minimize or close the window. Use the tray icon to reopen or quit the app.
+- Start *Cast over LAN* in Settings and open the temporary link on a phone on the same trusted network. If the desktop has more than one local address, choose the one on your phone's network. Paste a YouTube video link to play it on the desktop.
 - Live streams with live chat (Top chat or every message), and chatting when signed in
 - Shorts in a vertical player that moves to the next one by itself, or open them in the regular player. Shorts comments open their replies as threads too
 - Hold Space or press and hold the main video to play at 2x
