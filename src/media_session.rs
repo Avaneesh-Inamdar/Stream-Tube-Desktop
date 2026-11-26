@@ -1,6 +1,6 @@
-//! What the system media controls show and send, for Linux MPRIS (`mpris`):
-//! a snapshot of the active player, the commands sent back, and following the
-//! active player tab.
+//! What the system media controls show and send, shared by macOS Now Playing
+//! (`now_playing`) and Linux MPRIS (`mpris`): a snapshot of the active player,
+//! the commands they send back, and following the active player tab.
 use crate::player::controller::{Player, PlayerHandle, player};
 use gpui_kit::{App, Entity, Subscription};
 use std::cell::RefCell;

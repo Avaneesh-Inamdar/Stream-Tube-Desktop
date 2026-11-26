@@ -2,7 +2,7 @@
 //! and `playerctl`, with its thumbnail, position and play / pause / next /
 //! previous / seek, and the keyboard's media keys (the desktop routes those to
 //! MPRIS players). Specification: specifications.freedesktop.org/mpris-spec.
-//! The Windows counterpart is `media_controls`.
+//! The macOS counterpart is `now_playing`, the Windows one `media_controls`.
 use crate::media_session::{self, Clock, Command, Snapshot, State};
 use futures::{StreamExt, channel::mpsc};
 use gpui_kit::App;
