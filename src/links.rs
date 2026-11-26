@@ -40,6 +40,8 @@ pub fn forward_to_running(arg: &str) -> bool {
     let (Some(port), pid) = (parts.next().and_then(|p| p.parse::<u16>().ok()), parts.next().and_then(|p| p.parse::<u32>().ok())) else {
         return false;
     };
+    // the running instance only takes links that carry the secret from this file
+    let token = parts.next().unwrap_or_default();
     // Left over from an instance that has exited: connecting to its closed port
     // only fails after the timeout on Windows, which delayed every launch.
     if pid.is_some_and(|p| !process_alive(p)) {
@@ -57,7 +59,9 @@ pub fn forward_to_running(arg: &str) -> bool {
         }
         unsafe { AllowSetForegroundWindow(pid) };
     }
-    if stream.write_all(format!("STREAMTUBE {}\n", arg.replace('\n', " ")).as_bytes()).is_err() {
+    #[cfg(not(windows))]
+    let _ = pid;
+    if stream.write_all(format!("STREAMTUBE {token} {}\n", arg.replace('\n', " ")).as_bytes()).is_err() {
         return false;
     }
     let mut reply = String::new();
@@ -131,17 +135,21 @@ fn process_alive(pid: u32) -> bool {
 pub fn listen(tx: futures::channel::mpsc::UnboundedSender<String>) -> std::io::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
-    std::fs::write(port_file(), format!("{port} {}", std::process::id()))?;
+    // Any local process can reach a loopback port, so a link is only taken with this
+    // secret. It lives in the profile folder, which only this user can read.
+    let token = new_token();
+    std::fs::write(port_file(), format!("{port} {} {token}", std::process::id()))?;
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
             let mut line = String::new();
-            let mut reader = BufReader::new(&stream);
+            // a link is short; don't let another local process feed us endless bytes
+            let mut reader = BufReader::new(std::io::Read::take(&stream, 16 * 1024));
             if reader.read_line(&mut line).is_err() {
                 continue;
             }
-            // only our own launches speak this
-            let Some(arg) = line.trim_end_matches(['\r', '\n']).strip_prefix("STREAMTUBE ") else { continue };
+            // only our own launches speak this, and know the secret
+            let Some(arg) = line.trim_end_matches(['\r', '\n']).strip_prefix("STREAMTUBE ").and_then(|rest| check_token(rest, &token)) else { continue };
             let _ = (&stream).write_all(b"ok\n");
             if tx.unbounded_send(arg.to_string()).is_err() {
                 break;
@@ -151,9 +159,33 @@ pub fn listen(tx: futures::channel::mpsc::UnboundedSender<String>) -> std::io::R
     Ok(())
 }
 
+/// A random secret for the loopback link port.
+fn new_token() -> String {
+    use rand::Rng;
+    let mut rng = rand::rng();
+    (0..32).map(|_| format!("{:02x}", rng.random::<u8>())).collect()
+}
+
+/// The link after "<token> " when the token matches (compared in constant time).
+fn check_token<'a>(rest: &'a str, token: &str) -> Option<&'a str> {
+    let (given, arg) = rest.split_once(' ')?;
+    let same = given.len() == token.len() && given.bytes().zip(token.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0;
+    same.then_some(arg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::normalize;
+
+    #[test]
+    fn links_need_the_token() {
+        let token = super::new_token();
+        assert_eq!(token.len(), 64);
+        assert_eq!(super::check_token(&format!("{token} https://youtu.be/abc"), &token), Some("https://youtu.be/abc"));
+        assert_eq!(super::check_token("https://youtu.be/abc", &token), None);
+        assert_eq!(super::check_token(&format!("{} https://youtu.be/abc", "0".repeat(64)), &token), None);
+        assert_ne!(super::new_token(), token);
+    }
 
     #[test]
     fn alive() {

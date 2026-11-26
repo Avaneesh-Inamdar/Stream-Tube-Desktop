@@ -1,6 +1,6 @@
 [package]
 name = "streamtube"
-version = "0.7.2-alpha"
+version = "0.7.5-alpha"
 edition = "2024"
 description = "A YouTube desktop client in Rust + GPUI with SponsorBlock, DeArrow, RYD, local subscriptions & more"
 license = "MIT"
@@ -11,6 +11,7 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = { version = "3", features = ["json", "socks-proxy"] }
+url = "2"
 rusqlite = { version = "0.43", features = ["bundled"] }
 parking_lot = "0.12"
 sha2 = "0.11"
@@ -25,13 +26,22 @@ rand = "0.9"
 open = "5"
 raw-window-handle = "0.6"
 sha1 = "0.11"
-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# already in the tree through GPUI's Windows backend
+windows = { version = "0.62", features = ["Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Compile GPUI shaders at launch so the app can build with Command Line Tools.
+gpui-pre-macos = { version = "=0.3.12", default-features = false, features = ["runtime_shaders"] }
 libc = "0.2"
+# also hides the pointer with the player controls
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSDictionary", "NSObject", "NSString"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSBundle", "NSDictionary", "NSObject", "NSString"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSButton", "NSControl", "NSResponder", "NSView", "NSWindow"] }
+# GPU video path (src/player/gl_macos.rs): the pixel buffer type GPUI's surface() takes
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBuffer", "CVImageBuffer", "CVPixelBuffer"] }
 
 [profile.dev.package."*"]
 opt-level = 2

@@ -84,7 +84,7 @@ fn walk_items(v: &Value, page: &mut Page) {
                             page.items.push(Item::Channel(ch));
                         }
                     }
-                    "playlistRenderer" | "gridPlaylistRenderer" | "radioRenderer" | "compactPlaylistRenderer" => {
+                    "playlistRenderer" | "gridPlaylistRenderer" | "radioRenderer" | "compactPlaylistRenderer" | "gridShowRenderer" => {
                         if let Some(p) = parse_playlist_renderer(c) {
                             page.items.push(Item::Playlist(p));
                         }
@@ -92,6 +92,17 @@ fn walk_items(v: &Value, page: &mut Page) {
                     "continuationItemRenderer" => {
                         if let Some(t) = continuation_token(c) {
                             page.continuation = Some(t);
+                        }
+                    }
+                    // the newer form (playlists since late 2026):
+                    // { trigger, continuationCommand: { innertubeCommand: { continuationCommand: { token } } } }
+                    "continuationItemViewModel" => {
+                        let mut tokens = Vec::new();
+                        if let Some(cmd) = c.get("continuationCommand") {
+                            find_all(cmd, "token", &mut tokens);
+                        }
+                        if let Some(t) = tokens.iter().find_map(|x| x.as_str()) {
+                            page.continuation = Some(t.to_string());
                         }
                     }
                     // Skip noisy sections that duplicate items or are UI chrome.
@@ -130,7 +141,8 @@ pub(crate) fn parse_tile(t: &Value) -> Option<VideoItem> {
         .to_string();
     let meta = t.pointer("/metadata/tileMetadataRenderer")?;
     let title = meta.get("title").map(text).unwrap_or_default();
-    let thumbnail = t.pointer("/header/tileHeaderRenderer/thumbnail").and_then(best_thumb).unwrap_or_else(|| default_thumb(&id));
+    let images = t.pointer("/header/tileHeaderRenderer/thumbnail");
+    let thumbnail = images.and_then(best_thumb).unwrap_or_else(|| default_thumb(&id));
     let mut overlays = Vec::new();
     find_all(t, "thumbnailOverlayTimeStatusRenderer", &mut overlays);
     let badge = overlays.first().and_then(|o| o.get("text")).map(text);
@@ -175,6 +187,7 @@ pub(crate) fn parse_tile(t: &Value) -> Option<VideoItem> {
         id,
         title,
         thumbnail,
+        compact_thumbnail: images.and_then(compact_thumb),
         channel_name,
         channel_id,
         duration_text: badge.filter(|_| duration_secs.is_some()),
@@ -229,6 +242,7 @@ fn parse_video_renderer(r: &Value) -> Option<VideoItem> {
         .is_some();
     Some(VideoItem {
         thumbnail: r.get("thumbnail").and_then(best_thumb).unwrap_or_else(|| default_thumb(&id)),
+        compact_thumbnail: r.get("thumbnail").and_then(compact_thumb),
         published_ts: published_text.as_deref().and_then(parse_relative_time),
         id,
         title,
@@ -302,7 +316,8 @@ fn parse_lockup(l: &Value) -> Option<Item> {
     let thumb_vm = l
         .pointer("/contentImage/thumbnailViewModel")
         .or_else(|| l.pointer("/contentImage/collectionThumbnailViewModel/primaryThumbnail/thumbnailViewModel"));
-    let thumbnail = thumb_vm.and_then(|t| t.get("image")).and_then(best_thumb);
+    let images = thumb_vm.and_then(|t| t.get("image"));
+    let thumbnail = images.and_then(best_thumb);
     // badges (duration / LIVE / "N videos")
     let mut badge_texts = Vec::new();
     if let Some(t) = thumb_vm {
@@ -395,6 +410,7 @@ fn parse_lockup(l: &Value) -> Option<Item> {
             });
             Some(Item::Video(VideoItem {
                 thumbnail: thumbnail.unwrap_or_else(|| default_thumb(&id)),
+                compact_thumbnail: images.and_then(compact_thumb),
                 duration_secs: duration_text.as_deref().and_then(parse_duration),
                 duration_text,
                 published_ts: published.as_deref().and_then(parse_relative_time),
@@ -457,12 +473,18 @@ fn parse_channel_renderer(r: &Value) -> Option<ChannelItem> {
 }
 
 fn parse_playlist_renderer(r: &Value) -> Option<PlaylistItem> {
-    let id = r.get("playlistId")?.as_str()?.to_string();
+    let id = r.get("playlistId").and_then(Value::as_str).or_else(|| {
+        r.pointer("/navigationEndpoint/browseEndpoint/browseId")?
+            .as_str()?
+            .strip_prefix("VL")
+            .filter(|id| !id.is_empty())
+    })?.to_string();
     let thumbnail = r
         .pointer("/thumbnails/0")
         .and_then(best_thumb)
         .or_else(|| r.get("thumbnail").and_then(best_thumb))
-        .or_else(|| r.pointer("/thumbnailRenderer/playlistVideoThumbnailRenderer/thumbnail").and_then(best_thumb));
+        .or_else(|| r.pointer("/thumbnailRenderer/playlistVideoThumbnailRenderer/thumbnail").and_then(best_thumb))
+        .or_else(|| r.pointer("/thumbnailRenderer/showCustomThumbnailRenderer/thumbnail").and_then(best_thumb));
     let owner = r.get("longBylineText").or_else(|| r.get("shortBylineText"));
     Some(PlaylistItem {
         id,
@@ -475,6 +497,7 @@ fn parse_playlist_renderer(r: &Value) -> Option<PlaylistItem> {
             .map(str::to_string),
         video_count_text: opt_text(r.get("videoCountText"))
             .or_else(|| opt_text(r.get("videoCountShortText")))
+            .or_else(|| opt_text(find(r.get("thumbnailOverlays")?, "thumbnailOverlayBottomPanelRenderer")?.get("text")))
             .or_else(|| r.get("videoCount").and_then(Value::as_str).map(|c| format!("{c} videos"))),
         first_video_id: r
             .pointer("/navigationEndpoint/watchEndpoint/videoId")
@@ -587,10 +610,13 @@ pub fn shorts_feed(token: Option<&str>, seed: Option<&str>) -> Result<(Vec<Video
         None => {
             let body = json!({ "params": "CA8%3D", "disablePlayerResponse": true, "inputType": "REEL_WATCH_INPUT_TYPE_SEEDLESS" });
             let r = call("reel/reel_item_watch", body)?;
-            if let Some(id) = r.pointer("/replacementEndpoint/reelWatchEndpoint/videoId").and_then(Value::as_str) {
-                ids.push(id.to_string());
+            let token = r.get("sequenceContinuation").and_then(Value::as_str).ok_or_else(|| anyhow!("no shorts sequence"))?.to_owned();
+            if let Some(id) = r.pointer("/replacementEndpoint/reelWatchEndpoint/videoId").and_then(Value::as_str).filter(|id| !id.is_empty()) {
+                // The seed is already playable. The page can request the sequence after showing it.
+                let first = VideoItem { id: id.to_owned(), thumbnail: default_thumb(id), is_short: true, ..Default::default() };
+                return Ok((vec![first], Some(token)));
             }
-            r.get("sequenceContinuation").and_then(Value::as_str).ok_or_else(|| anyhow!("no shorts sequence"))?.to_string()
+            token
         }
     };
     let s = call("reel/reel_watch_sequence", json!({ "sequenceParams": seq }))?;
@@ -727,12 +753,17 @@ pub fn parse_youtube_url(input: &str) -> Option<ResolvedUrl> {
     if let Some(v) = get_param("v").filter(|v| is_id(v)) {
         return Some(ResolvedUrl::Video(v));
     }
-    if let Some(l) = get_param("list") {
+    // links can come from any web page (streamtube: links), so only take IDs
+    // made of the characters YouTube uses
+    let is_list_id = |x: &str| (2..=64).contains(&x.len()) && x.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if let Some(l) = get_param("list").filter(|l| is_list_id(l)) {
         return Some(ResolvedUrl::Playlist(l));
     }
     if let Some(rest) = s.split("/channel/").nth(1) {
-        let id: String = rest.chars().take_while(|c| *c != '/' && *c != '?').collect();
-        return Some(ResolvedUrl::Channel(id));
+        let id: String = rest.chars().take_while(|c| *c != '/' && *c != '?' && *c != '#').collect();
+        if id.starts_with("UC") && is_list_id(&id) {
+            return Some(ResolvedUrl::Channel(id));
+        }
     }
     None
 }
@@ -795,7 +826,8 @@ pub fn channel(channel_id: &str, tab_params: Option<&str>) -> Result<ChannelPage
                 }
             }
             if !title.is_empty() {
-                tabs.push(ChannelTab { title, params, selected });
+                let kind = tab_kind(tr, &title);
+                tabs.push(ChannelTab { title, kind, params, selected });
             }
         }
     }
@@ -814,6 +846,19 @@ pub fn channel(channel_id: &str, tab_params: Option<&str>) -> Result<ChannelPage
         }
     }
     Ok(ChannelPage { info, banner, tabs, page })
+}
+
+/// A channel tab's kind from its URL ("/@name/videos" -> "videos"). Titles follow
+/// the content language ("Videolar", "Видео"), so they can't tell tabs apart.
+fn tab_kind(tab: &Value, title: &str) -> String {
+    s(tab, "/endpoint/commandMetadata/webCommandMetadata/url")
+        .and_then(|u| u.split('?').next().and_then(|p| p.rsplit('/').next()).map(str::to_ascii_lowercase))
+        .filter(|k| !k.is_empty() && !k.starts_with('@') && !k.starts_with("uc"))
+        .unwrap_or_else(|| match title {
+            "Home" => "featured".into(),
+            "Live" => "streams".into(),
+            other => other.to_ascii_lowercase(),
+        })
 }
 
 /// Just a channel's avatar, for feeds whose items don't include one.
@@ -1352,7 +1397,7 @@ mod tests {
     fn live_channel_playlist() {
         let c = channel("UCsBjURrPoezykLs9EqgamOA", None).unwrap();
         println!("{:?} tabs={:?}", c.info, c.tabs.iter().map(|t| &t.title).collect::<Vec<_>>());
-        let vt = c.tabs.iter().find(|t| t.title == "Videos").unwrap();
+        let vt = c.tabs.iter().find(|t| t.kind == "videos").unwrap();
         let v = channel("UCsBjURrPoezykLs9EqgamOA", vt.params.as_deref()).unwrap();
         assert!(v.page.items.len() > 10);
         println!("{:#?}", v.page.items[0]);
@@ -1481,6 +1526,95 @@ mod heatmap_tests {
         for id in ["dQw4w9WgXcQ", "kJQP7kiw5Fk", "LXb3EKWsInQ"] {
             let w = super::watch_next(id, None).unwrap();
             println!("{id}: heatmap={} chapters={}", w.heatmap.len(), w.chapters.len());
+        }
+    }
+}
+
+#[cfg(test)]
+mod long_playlist_tests {
+    #[test]
+    #[ignore = "network"]
+    fn long_playlists_load_and_watch_next_sends_a_window() {
+        let pid = "UUX6OQ3DkcsbYNE6H8uQQuVA";
+        let mut page = super::playlist(pid).unwrap();
+        let mut vids = page.videos.clone();
+        while vids.len() < 420 {
+            let Some(t) = page.continuation.take() else { break };
+            let p = super::browse_continue(&t).unwrap();
+            vids.extend(p.items.into_iter().filter_map(|i| i.as_video().cloned()));
+            page.continuation = p.continuation;
+        }
+        eprintln!("loaded {}", vids.len());
+        // playlists page past their first 100 videos
+        assert!(vids.len() > 300, "only {} videos", vids.len());
+        for at in [0usize, 150, 298, 350] {
+            let Some(v) = vids.get(at) else { continue };
+            let w = super::watch_next(&v.id, Some(pid)).unwrap();
+            let items = w.playlist.map(|p| p.items).unwrap_or_default();
+            let first = items.first().and_then(|f| vids.iter().position(|x| x.id == f.id));
+            let last = items.last().and_then(|f| vids.iter().position(|x| x.id == f.id));
+            let me = items.iter().position(|x| x.id == v.id);
+            eprintln!("at {at}: window {} items, first={first:?} last={last:?} me={me:?}", items.len());
+        }
+    }
+}
+
+#[cfg(test)]
+mod channel_tab_tests {
+    use super::{Item, collect_items, json};
+
+    #[test]
+    fn channel_show_cards_keep_the_playlist_id_and_episode_count() {
+        let page = collect_items(&json!({
+            "richGridRenderer": {
+                "contents": [{ "richItemRenderer": { "content": { "gridShowRenderer": {
+                    "title": {"simpleText": "Creator show"},
+                    "navigationEndpoint": { "browseEndpoint": { "browseId": "VLPLExampleShow" } },
+                    "thumbnailRenderer": { "showCustomThumbnailRenderer": { "thumbnail": { "thumbnails": [{
+                        "url": "https://i.ytimg.com/vi/example/hqdefault.jpg", "width": 480, "height": 270
+                    }] } } },
+                    "longBylineText": { "runs": [{ "text": "Creator" }] },
+                    "thumbnailOverlays": [{ "thumbnailOverlayBottomPanelRenderer": {
+                        "text": { "runs": [{ "text": "7" }, { "text": " episodes" }] }
+                    } }]
+                } } } }]
+            }
+        }));
+        let [Item::Playlist(show)] = page.items.as_slice() else { panic!("missing show card") };
+        assert_eq!(show.id, "PLExampleShow");
+        assert_eq!(show.title, "Creator show");
+        assert_eq!(show.channel_name.as_deref(), Some("Creator"));
+        assert_eq!(show.video_count_text.as_deref(), Some("7 episodes"));
+        assert_eq!(show.thumbnail.as_deref(), Some("https://i.ytimg.com/vi/example/hqdefault.jpg"));
+    }
+
+    #[test]
+    #[ignore = "network"]
+    fn channel_show_tabs_open_episode_lists() {
+        for id in ["UCGGZ_POGmIWG1pQXTDzQv-g", "UCPD_bxCRGpmmeQcbe2kpPaA"] {
+            let channel = super::channel(id, Some(crate::feed::VIDEOS_TAB)).unwrap();
+            let tab = channel.tabs.iter().find(|tab| tab.kind == "shows").expect("shows tab");
+            let page = super::channel(id, tab.params.as_deref()).unwrap();
+            let show = page.page.items.iter().find_map(|item| {
+                if let Item::Playlist(show) = item { Some(show) } else { None }
+            }).expect("show card");
+            let episodes = super::playlist(&show.id).unwrap().videos;
+            eprintln!("{}: {} ({} episodes loaded)", channel.info.name, show.title, episodes.len());
+            assert!(!episodes.is_empty());
+        }
+    }
+
+    /// Tabs are told apart by kind in any content language.
+    #[test]
+    #[ignore = "network"]
+    fn channel_tabs_have_kinds_in_other_languages() {
+        crate::store::update_settings(|s| s.language = "tr".into());
+        let page = super::channel("UCBJycsmduvYEL83R_U4JriQ", None).unwrap();
+        crate::store::update_settings(|s| s.language = "en".into());
+        let kinds: Vec<_> = page.tabs.iter().map(|t| (t.title.clone(), t.kind.clone())).collect();
+        eprintln!("{kinds:?}");
+        for k in ["featured", "videos", "shorts", "playlists"] {
+            assert!(kinds.iter().any(|(_, kind)| kind == k), "no {k} tab in {kinds:?}");
         }
     }
 }

@@ -2,32 +2,56 @@
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use objc2::{msg_send, runtime::AnyClass};
-use objc2_foundation::{NSDictionary, NSString};
+use objc2_foundation::{NSBundle, NSDictionary, NSString};
 use serde_json::Value;
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
+    sync::OnceLock,
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
-const EXTENSION_ID: &str = "io.github.avaneesh-inamdar.StreamTube.SafariPrototype.Extension";
 const EXTENSION_BUNDLE: &str = "Stream Tube Safari History Extension.appex";
+const TEST_EXTENSION_PREFIX: &str = "io.github.avaneesh-inamdar.StreamTube.SafariPrototype.Test.";
 const MAX_PAYLOAD: u64 = 16_384;
 const TIMEOUT: Duration = Duration::from_secs(300);
 
 #[link(name = "SafariServices", kind = "framework")]
 unsafe extern "C" {}
 
-pub fn available() -> bool {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| {
-            exe.parent()?
-                .parent()
-                .map(|contents| contents.join("PlugIns").join(EXTENSION_BUNDLE))
+fn extension_identifier() -> Option<&'static str> {
+    static IDENTIFIER: OnceLock<Option<String>> = OnceLock::new();
+    IDENTIFIER
+        .get_or_init(|| {
+            let exe = std::env::current_exe().ok()?;
+            let contents = exe.parent()?.parent()?;
+            let extension = contents.join("PlugIns").join(EXTENSION_BUNDLE);
+            let path = NSString::from_str(extension.to_str()?);
+            NSBundle::bundleWithPath(&path)?.bundleIdentifier().map(|identifier| identifier.to_string())
         })
-        .is_some_and(|extension| extension.is_dir())
+        .as_deref()
+}
+
+pub fn available() -> bool {
+    extension_identifier().is_some()
+}
+
+pub(crate) fn profile_name() -> Option<String> {
+    extension_identifier().map(profile_name_for_extension)
+}
+
+fn profile_name_for_extension(identifier: &str) -> String {
+    let test_id = identifier.strip_prefix(TEST_EXTENSION_PREFIX)
+        .and_then(|suffix| suffix.strip_suffix(".Extension"))
+        .filter(|id| {
+            !id.is_empty() && id.len() <= 32 && !id.starts_with('-') && !id.ends_with('-')
+                && id.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        });
+    match test_id {
+        Some(id) => format!("StreamTube Safari Test ({id})"),
+        None => "StreamTube Safari Prototype".into(),
+    }
 }
 
 #[derive(Clone)]
@@ -39,11 +63,14 @@ pub struct Request {
 impl Request {
     /// Called on the main thread while the in-app connection dialog is open.
     pub fn notify_extension(&self) {
+        let Some(identifier) = extension_identifier() else {
+            return;
+        };
         let Some(application) = AnyClass::get(c"SFSafariApplication") else {
             return;
         };
         let name = NSString::from_str("watch-history-request");
-        let identifier = NSString::from_str(EXTENSION_ID);
+        let identifier = NSString::from_str(identifier);
         let token_key = NSString::from_str("token");
         let port_key = NSString::from_str("port");
         let token = NSString::from_str(&self.token);
@@ -153,6 +180,26 @@ fn read_session(stream: &TcpStream, token: &str) -> Option<Vec<Value>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_extension_identifiers_select_separate_profiles() {
+        assert_eq!(
+            profile_name_for_extension("io.github.avaneesh-inamdar.StreamTube.SafariPrototype.Extension"),
+            "StreamTube Safari Prototype"
+        );
+        assert_eq!(
+            profile_name_for_extension(&format!("{TEST_EXTENSION_PREFIX}resume-check.Extension")),
+            "StreamTube Safari Test (resume-check)"
+        );
+        assert_eq!(
+            profile_name_for_extension(&format!("{TEST_EXTENSION_PREFIX}pip.Extension")),
+            "StreamTube Safari Test (pip)"
+        );
+        assert_eq!(
+            profile_name_for_extension(&format!("{TEST_EXTENSION_PREFIX}../outside.Extension")),
+            "StreamTube Safari Prototype"
+        );
+    }
 
     #[test]
     fn handoff_requires_the_current_token() {

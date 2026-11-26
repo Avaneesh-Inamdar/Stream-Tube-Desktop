@@ -35,6 +35,29 @@ Tube over a one-time loopback connection tied to the open dialog. Stream Tube
 uses the session for playback reporting and keeps it in memory until disconnect
 or quit. Reconnect after restarting the prototype.
 
+## Build a test copy alongside older prototypes
+
+Set `STREAMTUBE_SAFARI_TEST_ID` to a label for this copy. Use 1–32 lowercase
+ASCII letters, digits or hyphens, with a letter or digit at each end. The label
+also enables Safari packaging.
+
+```bash
+STREAMTUBE_SAFARI_TEST_ID=resume-check RUSTUP_TOOLCHAIN=1.100.0 \
+  bash packaging/macos/build-app.sh "$HOME/Downloads/StreamTube-builds"
+```
+
+Open the printed **Stream Tube Safari Test (resume-check).app** path and enable
+**Stream Tube Watch History (resume-check)** in Safari for the profile you use
+for YouTube. Start **Connect** in that app, then use the extension with the
+same label on the YouTube tab and approve access when Safari asks.
+
+Each label gets its own app and extension identifiers, URL scheme and data
+directory. This example uses
+`~/Library/Application Support/StreamTube Safari Test (resume-check)`. Use a
+different label for each copy you want to keep available side by side. If you
+rebuild with the same label, replace the previous copy with that label so
+Safari has one app bundle for that extension identifier.
+
 ## Playback diagnostics
 
 Quit the running prototype and launch it with diagnostics enabled. Replace the
@@ -88,3 +111,17 @@ position, sent the final watch-time report and exited Stream Tube.
 
 The preceding periodic report was at `0:25`. The History entry resumed at the
 final position to the whole second.
+
+## Verified last-window close with `resume-check`
+
+On Apple Silicon, the 0.7.5-alpha build packaged with
+`STREAMTUBE_SAFARI_TEST_ID=resume-check` connected through **Stream Tube Watch
+History (resume-check)** alongside the older Safari prototypes. The test played
+*Sintel* from the beginning and closed the last window during playback.
+[Sintel – Open Movie by Blender Foundation](https://www.youtube.com/watch?v=eRsGyueVLvQ)
+
+| Check | Observed result |
+| --- | --- |
+| Position saved when the last window closed | 42.042 seconds |
+| Final watch-time report | `cmt=42.042`, `final=1`, HTTP `204` |
+| Opened directly from YouTube Watch History in Safari | Safari opened the video with `t=42s`. Playback resumed at `0:42` and advanced to `0:44`. |

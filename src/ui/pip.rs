@@ -64,6 +64,45 @@ pub fn open(cx: &mut App) {
     cx.refresh_windows();
 }
 
+/// Starts moving the window under the pointer, as if its title bar was pressed.
+/// GPUI's Windows backend has no `start_window_move`, so Windows asks the
+/// system directly. The request is posted, not sent: the system's move loop
+/// must start from the message loop, not inside this event handler (it calls
+/// back into GPUI, which is busy handling the event).
+pub(crate) fn begin_window_move(window: &Window) {
+    #[cfg(windows)]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        #[repr(C)]
+        struct Pt {
+            x: i32,
+            y: i32,
+        }
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn ReleaseCapture() -> i32;
+            fn GetCursorPos(p: *mut Pt) -> i32;
+            fn PostMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> i32;
+        }
+        const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+        const HTCAPTION: usize = 2;
+        if let Ok(h) = HasWindowHandle::window_handle(window) {
+            if let RawWindowHandle::Win32(w) = h.as_raw() {
+                // SAFETY: plain Win32 calls on a live window owned by this process
+                unsafe {
+                    let mut p = Pt { x: 0, y: 0 };
+                    GetCursorPos(&mut p);
+                    let lparam = ((p.y as u16 as isize) << 16) | (p.x as u16 as isize);
+                    ReleaseCapture();
+                    PostMessageW(w.hwnd.get(), WM_NCLBUTTONDOWN, HTCAPTION, lparam);
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    window.start_window_move();
+}
+
 pub fn window_closed(id: WindowId, cx: &mut App) {
     if handle(cx).is_some_and(|panel| panel.window_id() == id) {
         cx.set_global(PipWindow(None));

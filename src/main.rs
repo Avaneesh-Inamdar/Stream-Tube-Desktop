@@ -6,6 +6,7 @@ mod perf;
 mod recommend;
 mod downloads;
 mod feed;
+mod i18n;
 mod import;
 mod links;
 mod locale;
@@ -93,15 +94,30 @@ fn saved_window_bounds(cx: &App) -> WindowBounds {
     WindowBounds::Windowed(Bounds::centered(None, sz, cx))
 }
 
+/// How much bigger the window reports itself than the size it was opened with (on macOS
+/// the title bar): subtracted when saving, or the window grew by that much every launch.
+static FRAME_EXTRA: std::sync::Mutex<(f32, f32)> = std::sync::Mutex::new((0.0, 0.0));
+
+fn measure_frame_extra(requested: &WindowBounds, window: &Window) {
+    if let (WindowBounds::Windowed(want), WindowBounds::Windowed(got)) = (requested, window.window_bounds()) {
+        let dw = f32::from(got.size.width - want.size.width);
+        let dh = f32::from(got.size.height - want.size.height);
+        if (0.0..=100.0).contains(&dw) && (0.0..=100.0).contains(&dh) {
+            *FRAME_EXTRA.lock().unwrap() = (dw, dh);
+        }
+    }
+}
+
 pub fn save_window_bounds(window: &Window) {
     let (b, maximized) = match window.window_bounds() {
         WindowBounds::Windowed(b) => (b, false),
         WindowBounds::Maximized(b) => (b, true),
         WindowBounds::Fullscreen(b) => (b, false),
     };
+    let extra = *FRAME_EXTRA.lock().unwrap();
     let v = serde_json::json!({
         "x": f32::from(b.origin.x), "y": f32::from(b.origin.y),
-        "w": f32::from(b.size.width), "h": f32::from(b.size.height),
+        "w": f32::from(b.size.width) - extra.0, "h": f32::from(b.size.height) - extra.1,
         "maximized": maximized,
     });
     store::kv_set("window", &v.to_string());
@@ -153,6 +169,7 @@ fn main() {
     application.run(move |cx: &mut App| {
         perf::mark("gpui running");
         gpui_kit::init(cx);
+        i18n::apply_component_locale();
         perf::mark("gpui_kit init");
         player::preview::init(cx);
         perf::mark("preview init");
@@ -160,8 +177,12 @@ fn main() {
         ui::apply_theme(None, cx);
         player::controller::init(cx);
         perf::mark("player init");
+        let requested_bounds = saved_window_bounds(cx);
         let opts = WindowOptions {
-            window_bounds: Some(saved_window_bounds(cx)),
+            // Without this the Wayland/X11 window has no identity, so docks and
+            // taskbars can't match it to streamtube.desktop (StartupWMClass).
+            app_id: Some("streamtube".into()),
+            window_bounds: Some(requested_bounds),
             titlebar: Some(TitlebarOptions {
                 title: Some("Stream Tube".into()),
                 appears_transparent: !cfg!(target_os = "macos"),
@@ -171,6 +192,7 @@ fn main() {
             ..Default::default()
         };
         let (main_window, _) = gpui_kit::open_window(opts, cx, |window, cx| {
+            measure_frame_extra(&requested_bounds, window);
             ui::apply_theme(Some(window), cx);
             cx.new(|cx| ui::app::AppView::new(window, cx))
         })
