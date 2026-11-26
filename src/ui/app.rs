@@ -2236,7 +2236,8 @@ impl AppView {
             .flex_none()
             .items_center()
             .h(px(56.))
-            .pl_4()
+            // macOS: the system's traffic lights sit in the bar's left edge
+            .pl(if cfg!(target_os = "macos") { px(84.) } else { px(16.) })
             .bg(p.bg)
             .child(
                 div()
@@ -2380,8 +2381,9 @@ impl AppView {
                     .child(self.render_dl_button(cx))
                     .child(icon_button("settings", "settings", cx).on_click(cx.listener(|this, _, window, cx| this.go(Route::Settings, window, cx))))
                     .child(self.account_button(cx))
-                    .child(drag_gap("drag-c").w_3())
-                    .child(window_controls(maximized, cx)),
+                    // macOS has the window buttons on the left, drawn by the system
+                    .when(!cfg!(target_os = "macos"), |d| d.child(drag_gap("drag-c").w_3()).child(window_controls(maximized, cx)))
+                    .when(cfg!(target_os = "macos"), |d| d.child(drag_gap("drag-c").w_4())),
             );
         #[cfg(target_os = "linux")]
         let bar = super::topbar_drag::wrap(bar, self.search.clone(), window, cx);

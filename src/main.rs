@@ -110,7 +110,8 @@ fn main() {
                 titlebar: Some(TitlebarOptions {
                     title: Some("Stream Tube".into()),
                     appears_transparent: true,
-                    ..Default::default()
+                    // centered in the app's 56 px top bar (the buttons are 12 px tall)
+                    traffic_light_position: Some(point(px(16.), px(22.))),
                 }),
                 window_min_size: Some(size(px(720.), px(480.))),
                 ..Default::default()
