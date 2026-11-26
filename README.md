@@ -54,6 +54,7 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 - Timestamps in descriptions and comments seek the video and bring the player back into view
 - Resumes where you left off, remembers your last quality, autoplays the next video or loops, and plays whole playlists as a queue
 - Turn on *Original video titles* in Settings to show the creator's title when opening a video.
+- Hover over the video to step through available resolutions or adjust playback speed in 0.5× increments. Click the speed to reset it to 1×.
 - The picture-in-picture button opens the draggable in-app miniplayer or a floating window above other apps. Choose the mode in *Settings → Player*. Theater mode and fullscreen are also available, and the app remembers your theater setting.
 - Keeps playing when minimized, or pauses and resumes when you come back. On Windows, active video playback keeps the display awake.
 - Windows media controls can pause playback, resume it and move through the video queue.
