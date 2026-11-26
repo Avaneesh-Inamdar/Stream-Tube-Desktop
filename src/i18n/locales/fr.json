@@ -875,5 +875,10 @@
 "Picture-in-picture above other apps": "Image dans l’image au-dessus des autres applications",
   "Copied to clipboard": "Copié dans le presse-papiers",
   "Copy title": "Copier le titre",
-  "Copy channel name": "Copier le nom de la chaîne"
+  "Copy channel name": "Copier le nom de la chaîne",
+  "Music mode": "Mode musique",
+  "Leave music mode": "Quitter le mode musique",
+  "Playing from": "Lecture depuis",
+  "Song": "Titre",
+  "Listening to music? Music mode shows the cover art and keeps the player at the bottom.": "Vous écoutez de la musique ? Le mode musique affiche la pochette et garde le lecteur en bas."
 }

@@ -875,5 +875,10 @@
 "Picture-in-picture above other apps": "画中画显示在其他应用上方",
   "Copied to clipboard": "已复制到剪贴板",
   "Copy title": "复制标题",
-  "Copy channel name": "复制频道名称"
+  "Copy channel name": "复制频道名称",
+  "Music mode": "音乐模式",
+  "Leave music mode": "退出音乐模式",
+  "Playing from": "播放来源",
+  "Song": "歌曲",
+  "Listening to music? Music mode shows the cover art and keeps the player at the bottom.": "在听音乐？音乐模式会显示封面，并把播放器固定在底部。"
 }

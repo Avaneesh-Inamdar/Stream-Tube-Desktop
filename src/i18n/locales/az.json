@@ -875,5 +875,10 @@
 "Picture-in-picture above other apps": "Digər tətbiqlərin üzərində şəkil içində şəkil",
   "Copied to clipboard": "Mübadilə buferinə kopyalandı",
   "Copy title": "Başlığı kopyala",
-  "Copy channel name": "Kanal adını kopyala"
+  "Copy channel name": "Kanal adını kopyala",
+  "Music mode": "Musiqi rejimi",
+  "Leave music mode": "Musiqi rejimindən çıx",
+  "Playing from": "Buradan oxudulur",
+  "Song": "Mahnı",
+  "Listening to music? Music mode shows the cover art and keeps the player at the bottom.": "Musiqi dinləyirsiniz? Musiqi rejimi albom üzlüyünü göstərir və pleyeri aşağıda saxlayır."
 }

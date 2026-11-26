@@ -875,5 +875,10 @@
 "Picture-in-picture above other apps": "ピクチャー イン ピクチャーを常に最前面に表示",
   "Copied to clipboard": "クリップボードにコピーしました",
   "Copy title": "タイトルをコピー",
-  "Copy channel name": "チャンネル名をコピー"
+  "Copy channel name": "チャンネル名をコピー",
+  "Music mode": "ミュージックモード",
+  "Leave music mode": "ミュージックモードを終了",
+  "Playing from": "再生元",
+  "Song": "曲",
+  "Listening to music? Music mode shows the cover art and keeps the player at the bottom.": "音楽を聴いていますか？ミュージックモードではジャケットを表示し、プレーヤーを下部に固定します。"
 }

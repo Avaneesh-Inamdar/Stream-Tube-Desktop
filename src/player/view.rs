@@ -1487,6 +1487,13 @@ impl PlayerView {
                     this.poke(cx);
                 })))
             })
+            .when(!ui.fullscreen && !self.pip && !narrow, |d| {
+                // YouTube Music's layout: the cover art, the queue and a player bar
+                d.child(ctl_btn("c-music", "music").on_click(|_, _, cx| {
+                    let on = crate::ui::music::on(cx);
+                    crate::ui::music::set(!on, cx);
+                }))
+            })
             .child(ctl_btn("c-settings", "settings").on_click(cx.listener(|this, _, _, cx| {
                 // a mouse-down here already closed an open menu (outside click); don't reopen it
                 let just_closed = this.menu_closed_at.elapsed() < std::time::Duration::from_millis(400);
