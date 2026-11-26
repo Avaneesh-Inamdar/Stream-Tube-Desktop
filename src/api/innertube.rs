@@ -606,7 +606,20 @@ pub fn search(query: &str, filter: &SearchFilter) -> Result<Page> {
 
 pub fn search_continue(token: &str) -> Result<Page> {
     let r = call("search", json!({ "continuation": token }))?;
-    Ok(collect_items(&r))
+    Ok(search_continuation_page(&r))
+}
+
+fn search_continuation_page(response: &Value) -> Page {
+    let mut page = collect_items(response);
+    if let Some(commands) = response.get("onResponseReceivedCommands").and_then(Value::as_array) {
+        for items in commands
+            .iter()
+            .filter_map(|command| command.pointer("/appendContinuationItemsAction/continuationItems"))
+        {
+            walk_items(items, &mut page);
+        }
+    }
+    page
 }
 
 /// The Shorts player's own feed: a fresh, varied sequence each time.
@@ -1446,6 +1459,25 @@ mod tests {
     }
 
     #[test]
+    fn search_continuation_reads_appended_results_and_next_token() {
+        let response = json!({ "onResponseReceivedCommands": [
+            { "unrelatedCommand": { "videoRenderer": { "videoId": "ignored" } } },
+            { "appendContinuationItemsAction": { "continuationItems": [
+                { "itemSectionRenderer": { "contents": [
+                    { "videoRenderer": { "videoId": "page-two", "title": { "simpleText": "Second page" } } }
+                ] } },
+                { "continuationItemRenderer": { "continuationEndpoint": {
+                    "continuationCommand": { "token": "page-three" }
+                } } }
+            ] } }
+        ] });
+        let page = search_continuation_page(&response);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].as_video().unwrap().id, "page-two");
+        assert_eq!(page.continuation.as_deref(), Some("page-three"));
+    }
+
+    #[test]
     fn url_parse() {
         assert_eq!(parse_youtube_url("https://youtu.be/dQw4w9WgXcQ?t=1"), Some(ResolvedUrl::Video("dQw4w9WgXcQ".into())));
         assert_eq!(parse_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=x"), Some(ResolvedUrl::Video("dQw4w9WgXcQ".into())));
@@ -1494,12 +1526,21 @@ mod tests {
     #[test]
     #[ignore]
     fn live_search() {
-        let p = search("rust programming", &SearchFilter::default()).unwrap();
-        assert!(p.items.len() > 5, "{:?}", p.items.len());
-        let v = p.items.iter().filter_map(|i| i.as_video()).next().unwrap();
-        println!("{v:#?}");
-        assert!(!v.title.is_empty());
-        assert!(p.continuation.is_some());
+        let mut page = search("rust programming", &SearchFilter::default()).unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for number in 1..=3 {
+            let before = seen.len();
+            for video in page.items.iter().filter_map(Item::as_video).filter(|v| !v.is_short) {
+                assert!(!video.title.is_empty());
+                seen.insert(video.id.clone());
+            }
+            let added = seen.len() - before;
+            println!("Page {number}: {added} new videos");
+            assert!(added > 5);
+            if number < 3 {
+                page = search_continue(page.continuation.as_deref().unwrap()).unwrap();
+            }
+        }
     }
 
     #[test]

@@ -603,7 +603,7 @@ pub fn compact_row_with(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn
 
 // ───────────────────────── channel & playlist ─────────────────────────
 
-pub fn channel_row(c: &ChannelItem, cx: &mut App) -> AnyElement {
+pub fn channel_row(c: &ChannelItem, thumb_w: Pixels, cx: &mut App) -> AnyElement {
     let p = pal(cx);
     let id = c.id.clone();
     let subscribed = store::is_subscribed(&c.id);
@@ -617,12 +617,13 @@ pub fn channel_row(c: &ChannelItem, cx: &mut App) -> AnyElement {
         .py_2()
         .cursor_pointer()
         .on_click(move |_, window, cx| navigate(Route::Channel(id.clone()), window, cx))
-        .child(div().w(px(360.)).flex().justify_center().child(avatar(c.avatar.as_deref(), px(136.), &c.name, cx)))
+        .child(div().w(thumb_w).flex_none().flex().justify_center().child(avatar(c.avatar.as_deref(), px(136.).min(thumb_w), &c.name, cx)))
         .child(
             div()
                 .flex()
                 .flex_col()
                 .flex_1()
+                .min_w_0()
                 .gap_1()
                 .child(div().text_lg().text_color(p.text).child(c.name.clone()))
                 .child(
@@ -778,7 +779,7 @@ pub fn playlist_thumb(thumb: Option<String>, count: Option<String>, w: Pixels, h
         )
 }
 
-pub fn playlist_row(pl: &PlaylistItem, cx: &mut App) -> AnyElement {
+pub fn playlist_row(pl: &PlaylistItem, thumb_w: Pixels, cx: &mut App) -> AnyElement {
     let p = pal(cx);
     let id = pl.id.clone();
     div()
@@ -788,13 +789,14 @@ pub fn playlist_row(pl: &PlaylistItem, cx: &mut App) -> AnyElement {
         .w_full()
         .cursor_pointer()
         .on_click(move |_, window, cx| navigate(Route::Playlist(id.clone()), window, cx))
-        .child(playlist_thumb(pl.thumbnail.clone(), pl.video_count_text.clone(), px(360.), px(202.), cx))
+        .child(playlist_thumb(pl.thumbnail.clone(), pl.video_count_text.clone(), thumb_w, thumb_w * (9. / 16.), cx))
         .child(
             div()
                 .flex()
                 .flex_col()
                 .gap_1()
                 .flex_1()
+                .min_w_0()
                 .child(div().text_lg().text_color(p.text).line_clamp(2).child(pl.title.clone()))
                 .when_some(pl.channel_name.clone(), |d, c| d.child(div().text_xs().text_color(p.text2).child(c)))
                 .child(div().text_xs().text_color(p.text2).font_weight(FontWeight::MEDIUM).child(t("View full playlist"))),

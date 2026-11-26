@@ -39,7 +39,8 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 - Nothing to install or keep updated: it isn't an ad blocker that YouTube can break, ads simply aren't part of how the app plays video
 
 **Watching**
-- Home, Shorts, Subscriptions, Explore categories, channels (including their courses and shows), playlists and search, with search suggestions and your recent searches
+- Home, Shorts, Subscriptions, Explore categories, channels (including their courses and shows), and playlists
+- Search with filters, suggestions, recent searches and more results as you scroll
 - A personal Home without an account: "For you" recommends videos related to what you've watched and searched in the app, mixed with new uploads from your subscriptions. Signed in, Home is your own YouTube Home feed
 - A *Recently uploaded* chip on Home, like youtube.com's: videos from your Home feed and subscriptions uploaded in the last two weeks, newest first
 - Hover a video title in a grid or list to read the full title
