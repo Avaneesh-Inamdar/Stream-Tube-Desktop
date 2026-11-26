@@ -1,4 +1,5 @@
-//! Account watch history for the web session and the legacy TV sign-in.
+//! Account watch history: read and reported through the browser session when
+//! one is connected, otherwise through the TV sign-in.
 use super::{auth, innertube, json::find, types::VideoItem, web};
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
@@ -49,14 +50,14 @@ impl Account {
         }
     }
 
-    fn if_current<T>(&self, f: impl FnOnce() -> T) -> Option<T> {
+    pub(super) fn if_current<T>(&self, f: impl FnOnce() -> T) -> Option<T> {
         match &self.0 {
             Session::Web(s) => s.if_current(f),
             Session::Tv(s) => web::if_disconnected(|| s.if_current(f)).flatten(),
         }
     }
 
-    fn call(&self, endpoint: &str, body: Value) -> Result<Value> {
+    pub(super) fn call(&self, endpoint: &str, body: Value) -> Result<Value> {
         anyhow::ensure!(
             self.if_current(|| ()).is_some(),
             "YouTube history account changed"
@@ -64,6 +65,46 @@ impl Account {
         match &self.0 {
             Session::Web(s) => s.call(endpoint, body),
             Session::Tv(s) => s.call(endpoint, body),
+        }
+    }
+
+    /// The player response playback is reported against: the website's for the
+    /// browser session, the TV client's (as the account) for the TV sign-in.
+    /// The player response for a video, as the account. Each client needs its
+    /// own player's `signatureTimestamp`: the web player's for a browser session,
+    /// the TV player's for the TV sign-in.
+    pub(super) fn player_response(&self, video_id: &str) -> Result<Value> {
+        anyhow::ensure!(self.if_current(|| ()).is_some(), "YouTube history account changed");
+        match &self.0 {
+            Session::Web(s) => {
+                let mut body = json!({ "videoId": video_id, "racyCheckOk": true, "contentCheckOk": true });
+                if let Some(sts) = super::web::reporting::sts() {
+                    body["playbackContext"] = json!({ "contentPlaybackContext": { "signatureTimestamp": sts, "html5Preference": "HTML5_PREF_WANTS" } });
+                }
+                s.call("player", body)
+            }
+            Session::Tv(s) => {
+                let token = s.access_token()?;
+                let sts = super::jsc::player().ok().and_then(|p| p.sts);
+                super::streams::tv_player_response(video_id, Some(&token), sts)
+            }
+        }
+    }
+
+    /// Headers that make a stats ping the account's: the session cookies, or
+    /// the TV sign-in's bearer token.
+    pub(super) fn ping_headers(&self) -> Result<Vec<(&'static str, String)>> {
+        Ok(match &self.0 {
+            Session::Web(s) => vec![("Cookie", s.cookie_header())],
+            Session::Tv(s) => vec![("Authorization", format!("Bearer {}", s.access_token()?))],
+        })
+    }
+
+    /// The client a stats ping claims to come from, matching `player_response`.
+    pub(super) fn ping_client(&self) -> (&'static str, &'static str, &'static str) {
+        match &self.0 {
+            Session::Web(_) => ("WEB", web::WEB_VERSION, "DESKTOP"),
+            Session::Tv(_) => ("TVHTML5", super::streams::TV5_VERSION, "TV"),
         }
     }
 

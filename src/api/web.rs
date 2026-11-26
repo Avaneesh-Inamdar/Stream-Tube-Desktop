@@ -1,10 +1,10 @@
 //! Browser sign-in: the YouTube website's own session cookies.
 //!
-//! The TV sign-in can read the account (feeds, history, likes), but YouTube no
-//! longer lets it play videos, so nothing watched through it reaches the account.
-//! With the website's cookies the app reports playback the way youtube.com does:
-//! the video lands in the account's watch history and the position you stopped at
-//! is what other devices resume from.
+//! The TV sign-in reads the account (feeds, history, likes) and, through the TV
+//! client in `streams`, plays videos as the account when a JavaScript runtime is
+//! installed. Without one, the website's cookies are the way to report playback
+//! the way youtube.com does: the video lands in the account's watch history and
+//! the position you stopped at is what other devices resume from.
 //!
 //! Signing in happens in a real browser (Edge, Chrome, Brave or Chromium) started
 //! with its own empty profile. The app reads that profile's youtube.com cookies over
@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
-const WEB_VERSION: &str = "2.20251120.01.00";
+pub(super) const WEB_VERSION: &str = "2.20251120.01.00";
 const ORIGIN: &str = "https://www.youtube.com";
 const SIGN_IN_URL: &str = "https://accounts.google.com/ServiceLogin?service=youtube&uilel=3&passive=true&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26app%3Ddesktop%26next%3Dhttps%253A%252F%252Fwww.youtube.com%252F";
 
@@ -238,6 +238,10 @@ impl HistorySession {
     pub(super) fn call(&self, endpoint: &str, body: Value) -> Result<Value> {
         anyhow::ensure!(self.if_current(|| ()).is_some(), "YouTube history account changed");
         web_call_with(&self.0, endpoint, body)
+    }
+
+    pub(super) fn cookie_header(&self) -> String {
+        cookie_header(&self.0)
     }
 }
 
@@ -633,10 +637,11 @@ mod page_id_tests {
         let old: Session = serde_json::from_value(json!({"cookies": {}, "account": "Test"})).unwrap();
         let mut headers = Vec::new();
         add_page_id(&mut headers, &old);
-        assert!(headers.is_empty());
-    }
-}
-mod reporting;
+#[cfg(test)]
+mod page_id_tests {
+    use super::*;
+    #[test]
+    fn devtools_uses_the_youtube_tab_and_keeps_its_page_id() {
 pub use reporting::{PlaybackReport, pending_reports};
 
 #[cfg(test)]

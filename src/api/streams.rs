@@ -6,6 +6,7 @@ use super::types::*;
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 use std::process::Command;
+use url::Url;
 
 const VR_VERSION: &str = "1.65.10";
 const VR_UA: &str = "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
@@ -64,6 +65,9 @@ fn resolve_anonymous(video_id: &str) -> Result<StreamInfo> {
     let mode = crate::store::settings_snapshot().stream_backend.clone();
     match mode.as_str() {
         "ytdlp" => ytdlp_streams(video_id),
+        "tv" => tv(video_id)
+            .or_else(|e| visionos(video_id).map_err(|e2| anyhow!("{e}\n{e2}")))
+            .or_else(|e| ios(video_id).map_err(|e2| anyhow!("{e}\n{e2}"))),
         // a chosen client first, the other built-in one if it fails
         "visionos" | "innertube" => visionos(video_id)
             .or_else(|e| ios(video_id).map_err(|e2| anyhow!("{e}\n{e2}")))
@@ -75,6 +79,21 @@ fn resolve_anonymous(video_id: &str) -> Result<StreamInfo> {
         _ => {
             // The visionOS client hands out an HLS manifest that needs neither a
             // PO token nor JS challenge solving: fast, and works signed out.
+            // Signed in, the TV client plays as the account: no bot check, and
+            // the view reaches the account. Anonymous, it is one more fallback.
+            let signed_in = crate::api::auth::signed_in();
+            let mut tv_err = None;
+            if signed_in {
+                match tv(video_id) {
+                    Ok(info) => return Ok(info),
+                    Err(e) => {
+                        if crate::perf::on() {
+                            eprintln!("[streams] tv failed: {e}");
+                        }
+                        tv_err = Some(e);
+                    }
+                }
+            }
             let t = std::time::Instant::now();
             let vision = visionos(video_id);
             if crate::perf::on() {
@@ -85,13 +104,24 @@ fn resolve_anonymous(video_id: &str) -> Result<StreamInfo> {
             }
             let vision_err = match vision {
                 Ok(info) => return Ok(info),
-                Err(e) => e,
+                Err(e) => match tv_err {
+                    Some(t) => anyhow!("{t}\n{e}"),
+                    None => e,
+                },
             };
             // videos made for kids (YouTube Kids) are refused to visionOS and
             // Android VR, but the iOS client serves the same kind of HLS manifest
             let vision_err = match ios(video_id) {
                 Ok(info) => return Ok(info),
                 Err(e) => anyhow!("{vision_err}\n{e}"),
+            };
+            let vision_err = if signed_in {
+                vision_err
+            } else {
+                match tv(video_id) {
+                    Ok(info) => return Ok(info),
+                    Err(e) => anyhow!("{vision_err}\n{e}"),
+                }
             };
             let id = video_id.to_string();
             let vr = std::thread::spawn(move || android_vr(&id));
@@ -468,6 +498,144 @@ fn android_vr(video_id: &str) -> Result<StreamInfo> {
     Ok(info)
 }
 
+pub(crate) const TV5_VERSION: &str = "5.20251120";
+const TV5_UA: &str = "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1";
+
+/// TV client, as an older Samsung TV app build (the current 7.x build answers
+/// "The page needs to be reloaded" outside the real app). It is the one client
+/// that accepts the TV sign-in's token: signed in, YouTube skips the "not a bot"
+/// check, plays age-restricted videos and counts the view for the account.
+/// Its stream URLs carry `n` and signature challenges that `jsc` solves.
+fn tv(video_id: &str) -> Result<StreamInfo> {
+    let rt = crate::api::jsc::runtime();
+    let token = crate::api::auth::access_token();
+    let label = if token.is_some() { "TV (signed in)" } else { "TV" };
+    let player = crate::api::jsc::player().map_err(|e| anyhow!("{label}: player script: {e}"))?;
+    let t = std::time::Instant::now();
+    let mut r = tv_player_response(video_id, token.as_deref(), player.sts)?;
+    if let Some(err) = playability_error(&r, Some(label)) {
+        return Err(err);
+    }
+    unlock_stream_urls(&mut r, &player).map_err(|e| anyhow!("{label}: {e}"))?;
+    let mut info = parse_player(&r);
+    info.source = if token.is_some() { "tv-account" } else { "tv" };
+    if crate::perf::on() {
+        eprintln!("[streams] {label} ok in {:?} via {}: {} video, {} audio formats", t.elapsed(), rt.describe(), info.video.len(), info.audio.len());
+    }
+    if info.video.is_empty() && info.muxed.is_empty() && info.hls_url.is_none() {
+        return Err(anyhow!("{label}: no playable formats"));
+    }
+    Ok(info)
+}
+
+/// The TV client's player response, as the account when a token is given.
+/// Besides formats it carries the `playbackTracking` URLs the account's watch
+/// history is reported to.
+pub(crate) fn tv_player_response(video_id: &str, token: Option<&str>, sts: Option<u64>) -> Result<Value> {
+    let s = crate::store::settings_snapshot();
+    let body = json!({
+        "videoId": video_id,
+        "contentCheckOk": true,
+        "racyCheckOk": true,
+        "context": { "client": {
+            "clientName": "TVHTML5", "clientVersion": TV5_VERSION,
+            "deviceMake": "Samsung", "deviceModel": "UKS9800",
+            "osName": "Tizen", "osVersion": "2.4.0",
+            "userAgent": TV5_UA,
+            "hl": s.language, "gl": s.region
+        }},
+        "playbackContext": { "contentPlaybackContext": { "signatureTimestamp": sts } }
+    });
+    let auth = token.map(|t| format!("Bearer {t}"));
+    let mut headers = vec![
+        ("User-Agent", TV5_UA),
+        ("X-YouTube-Client-Name", "7"),
+        ("X-YouTube-Client-Version", TV5_VERSION),
+        ("Origin", "https://www.youtube.com"),
+    ];
+    if let Some(a) = &auth {
+        headers.push(("Authorization", a));
+    }
+    http::post_json("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", &body, &headers)
+}
+
+/// Gives every format a usable `url`: solves the `n` parameter and, for formats
+/// that only come as a `signatureCipher`, the signature. Formats whose challenge
+/// could not be solved lose their URL and are skipped by `parse_format`.
+fn unlock_stream_urls(r: &mut Value, player: &crate::api::jsc::Player) -> Result<()> {
+    // (url, n challenge, (signature challenge, parameter name))
+    struct Entry {
+        url: Url,
+        n: Option<String>,
+        sig: Option<(String, String)>,
+    }
+    fn entry(f: &Value) -> Option<Entry> {
+        let (url, sig) = match f.get("url").and_then(Value::as_str) {
+            Some(u) => (u.to_string(), None),
+            None => {
+                let cipher = f.get("signatureCipher").and_then(Value::as_str)?;
+                let q: std::collections::HashMap<String, String> =
+                    url::form_urlencoded::parse(cipher.as_bytes()).map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
+                let url = q.get("url")?.clone();
+                let s = q.get("s")?.clone();
+                let sp = q.get("sp").cloned().unwrap_or_else(|| "signature".into());
+                (url, Some((s, sp)))
+            }
+        };
+        let url = Url::parse(&url).ok()?;
+        let n = url.query_pairs().find(|(k, _)| k == "n").map(|(_, v)| v.into_owned());
+        Some(Entry { url, n, sig })
+    }
+    let lists = ["adaptiveFormats", "formats"];
+    let mut entries: Vec<Vec<Option<Entry>>> = Vec::new();
+    for list in lists {
+        let fs = r.pointer(&format!("/streamingData/{list}")).and_then(Value::as_array).cloned().unwrap_or_default();
+        entries.push(fs.iter().map(entry).collect());
+    }
+    let n: Vec<String> = entries.iter().flatten().flatten().filter_map(|e| e.n.clone()).collect();
+    let sig: Vec<String> = entries.iter().flatten().flatten().filter_map(|e| e.sig.as_ref().map(|s| s.0.clone())).collect();
+    let solved = if n.is_empty() && sig.is_empty() { Default::default() } else { crate::api::jsc::solve(player, &n, &sig)? };
+    for (list, entries) in lists.iter().zip(entries) {
+        let Some(fs) = r.pointer_mut(&format!("/streamingData/{list}")).and_then(Value::as_array_mut) else { continue };
+        for (f, e) in fs.iter_mut().zip(entries) {
+            let Some(mut e) = e else { continue };
+            let n_ok = match &e.n {
+                Some(c) => match solved.n.get(c) {
+                    Some(v) => {
+                        let pairs: Vec<(String, String)> = e
+                            .url
+                            .query_pairs()
+                            .map(|(k, val)| if k == "n" { (k.into_owned(), v.clone()) } else { (k.into_owned(), val.into_owned()) })
+                            .collect();
+                        e.url.query_pairs_mut().clear().extend_pairs(pairs);
+                        true
+                    }
+                    None => false,
+                },
+                None => true,
+            };
+            let sig_ok = match &e.sig {
+                Some((c, sp)) => match solved.sig.get(c) {
+                    Some(v) => {
+                        e.url.query_pairs_mut().append_pair(sp, v);
+                        true
+                    }
+                    None => false,
+                },
+                None => true,
+            };
+            if let Some(obj) = f.as_object_mut() {
+                if n_ok && sig_ok {
+                    obj.insert("url".into(), json!(e.url.as_str()));
+                } else {
+                    obj.remove("url");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Returns an error when YouTube's `playabilityStatus` is not `OK`.
 /// Keeps the machine-readable `status` (such as `LOGIN_REQUIRED`) alongside a
 /// localized `reason` so `needs_sign_in` still triggers for non-English locales.
@@ -836,7 +1004,7 @@ fn with_sign_in_fallback(video_id: &str, res: Result<StreamInfo>) -> Result<Stre
             Some(Ok(info)) => Ok(info),
             Some(Err(e2)) => Err(anyhow!("{e}\nyt-dlp (signed in): {e2}")),
             None if crate::api::auth::signed_in() => Err(anyhow!(
-                "{e}\nYouTube wants a signed-in viewer for this video. Connect “YouTube watch history” in Settings (it signs in through your browser) and Stream Tube will play it with your account through yt-dlp."
+                "{e}\nYouTube wants a signed-in viewer for this video, and playing it with your account failed. Connect a browser session under “YouTube watch history” in Settings and Stream Tube will play it with your account through yt-dlp."
             )),
             None => Err(e),
         },
@@ -1138,6 +1306,12 @@ mod tests {
         println!("{:?} {:?}", v.map(|v| (&v.quality_label, &v.codecs)), a.map(|a| &a.codecs));
         // HLS sources carry their audio in the manifest
         assert!(v.is_some() && (a.is_some() || s.hls_only));
+        // direct URLs must actually serve data (a TV URL with an unsolved challenge gets 403)
+        if let Some(v) = v.filter(|v| !s.hls_only && v.url.starts_with("https://")) {
+            let bytes = http::get_bytes(&format!("{}&range=0-1000000", v.url), &[]).unwrap();
+            println!("downloaded {} bytes of itag {}", bytes.len(), v.itag);
+            assert!(bytes.len() > 500_000);
+        }
     }
 
     #[test]

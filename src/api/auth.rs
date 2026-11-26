@@ -111,6 +111,7 @@ pub fn sign_out() {
     let mut s = state().lock();
     *s = None;
     persist(&s);
+    crate::api::streams::clear_cache();
 }
 
 fn oauth_post(url: &str, body: Value) -> Result<(u16, Value)> {
@@ -175,6 +176,7 @@ impl LoginGrant {
             history_key: Some(rand::random()),
         });
         persist(&active);
+        crate::api::streams::clear_cache();
         self.account
     }
 }
@@ -303,7 +305,7 @@ impl HistorySession {
         active.as_ref().filter(|s| Arc::ptr_eq(&s.session, &self.identity)).map(|_| f())
     }
 
-    fn access_token(&self) -> Result<String> {
+    pub(super) fn access_token(&self) -> Result<String> {
         let session = state().lock().as_ref().filter(|s| Arc::ptr_eq(&s.session, &self.identity)).cloned();
         session.and_then(access_token_for).ok_or_else(|| anyhow!("not signed in"))
     }
