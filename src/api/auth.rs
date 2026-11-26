@@ -346,7 +346,14 @@ pub fn home() -> Result<Page> {
 /// The signed-in account's YouTube watch history (newest first).
 pub fn history() -> Result<Page> {
     let r = tv_call("browse", json!({ "browseId": "FEhistory" }))?;
-    harvest_removal_tokens(&r);
+    harvest_removal_tokens(&r, true);
+    Ok(videos(collect_items(&r)))
+}
+
+/// The next page of the account's watch history.
+pub fn history_continue(token: &str) -> Result<Page> {
+    let r = tv_call("browse", json!({ "continuation": token }))?;
+    harvest_removal_tokens(&r, true);
     Ok(videos(collect_items(&r)))
 }
 
@@ -357,42 +364,47 @@ fn removal_tokens() -> &'static Mutex<std::collections::HashMap<String, String>>
 }
 
 /// Remembers the removal tokens of every history tile in a browse response.
-fn harvest_removal_tokens(r: &Value) {
-    fn token_in(v: &Value) -> Option<String> {
+/// `history`: the response is the watch history, so its tiles' only hiding
+/// feedback item is "Remove from watch history", whatever the account's language.
+fn harvest_removal_tokens(r: &Value, history: bool) {
+    fn token_in(v: &Value, history: bool) -> Option<String> {
         match v {
             Value::Object(m) => {
                 if let Some(item) = m.get("menuServiceItemRenderer") {
                     let text = item.pointer("/text/runs/0/text").and_then(Value::as_str).unwrap_or("").to_lowercase();
                     if let Some(t) = item.pointer("/serviceEndpoint/feedbackEndpoint/feedbackToken").and_then(Value::as_str) {
-                        if text.contains("history") || text.contains("remove") {
+                        // the label is in the account's language ("Ta bort från visningshistoriken");
+                        // elsewhere a hiding item can be "Not interested", so only trust it in history
+                        let hides = item.pointer("/serviceEndpoint/feedbackEndpoint/uiActions/hideEnclosingContainer").and_then(Value::as_bool) == Some(true);
+                        if (history && hides) || text.contains("history") || text.contains("remove") {
                             return Some(t.to_string());
                         }
                     }
                 }
-                m.values().find_map(token_in)
+                m.values().find_map(|x| token_in(x, history))
             }
-            Value::Array(a) => a.iter().find_map(token_in),
+            Value::Array(a) => a.iter().find_map(|x| token_in(x, history)),
             _ => None,
         }
     }
-    fn walk(v: &Value, out: &mut Vec<(String, String)>) {
+    fn walk(v: &Value, history: bool, out: &mut Vec<(String, String)>) {
         match v {
             Value::Object(m) => {
                 if let Some(tile) = m.get("tileRenderer") {
                     let id = tile.pointer("/onSelectCommand/watchEndpoint/videoId").and_then(Value::as_str);
-                    if let (Some(id), Some(t)) = (id, token_in(tile)) {
+                    if let (Some(id), Some(t)) = (id, token_in(tile, history)) {
                         out.push((id.to_string(), t));
                     }
                     return;
                 }
-                m.values().for_each(|x| walk(x, out));
+                m.values().for_each(|x| walk(x, history, out));
             }
-            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            Value::Array(a) => a.iter().for_each(|x| walk(x, history, out)),
             _ => {}
         }
     }
     let mut out = Vec::new();
-    walk(r, &mut out);
+    walk(r, history, &mut out);
     if !out.is_empty() {
         removal_tokens().lock().extend(out);
     }
@@ -443,7 +455,7 @@ pub fn subscriptions_feed() -> Result<Page> {
 
 pub fn browse_continue(token: &str) -> Result<Page> {
     let r = tv_call("browse", json!({ "continuation": token }))?;
-    harvest_removal_tokens(&r);
+    harvest_removal_tokens(&r, false);
     Ok(videos(collect_items(&r)))
 }
 

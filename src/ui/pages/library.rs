@@ -69,7 +69,7 @@ impl HistoryPage {
             return;
         };
         cx.spawn(async move |this, cx| {
-            let res = blocking(move || crate::api::auth::browse_continue(&tok)).await;
+            let res = blocking(move || crate::api::auth::history_continue(&tok)).await;
             let _ = this.update(cx, |t, cx| {
                 t.yt_loading_more = false;
                 if let Ok(page) = res {
