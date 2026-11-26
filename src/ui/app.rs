@@ -391,6 +391,8 @@ pub struct WebLoginFlow {
     error: Option<String>,
     browser: Option<String>,
     cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    channel_ready: Arc<std::sync::atomic::AtomicBool>,
+    channel_confirmed: Arc<std::sync::atomic::AtomicBool>,
     attempt: u64,
 }
 
@@ -883,27 +885,39 @@ impl AppView {
         let attempt = self.web_login.attempt;
         let cancel = Arc::new(AtomicBool::new(false));
         self.web_login.cancel = Some(cancel.clone());
+        let ready = Arc::new(AtomicBool::new(false));
+        self.web_login.channel_ready = ready.clone();
+        let confirmed = Arc::new(AtomicBool::new(false));
+        self.web_login.channel_confirmed = confirmed.clone();
         self.web_login.error = None;
         self.web_login.browser = crate::api::web::browser_name();
         self.dialog = Some(Dialog::WebSignIn);
         cx.notify();
         // closing the dialog any way at all stops the sign-in and closes the browser
         let watch = cancel.clone();
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(std::time::Duration::from_millis(700)).await;
-            if watch.load(Ordering::Relaxed) {
-                return;
-            }
-            let open = this.update(cx, |t, _| t.web_login.attempt == attempt && matches!(t.dialog, Some(Dialog::WebSignIn))).unwrap_or(false);
-            if !open {
-                watch.store(true, Ordering::Relaxed);
-                return;
+        let channel_ready = ready.clone();
+        cx.spawn(async move |this, cx| {
+            let mut showed_channel = false;
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(700)).await;
+                if watch.load(Ordering::Relaxed) { return; }
+                let changed = !showed_channel && channel_ready.load(Ordering::Relaxed);
+                let open = this.update(cx, |t, cx| {
+                    let open = t.web_login.attempt == attempt && matches!(t.dialog, Some(Dialog::WebSignIn));
+                    if open && changed { cx.notify(); }
+                    open
+                }).unwrap_or(false);
+                if !open {
+                    watch.store(true, Ordering::Relaxed);
+                    return;
+                }
+                showed_channel |= changed;
             }
         })
         .detach();
         cx.spawn(async move |this, cx| {
             let c2 = cancel.clone();
-            let res = blocking(move || crate::api::web::browser_sign_in(c2)).await;
+            let res = blocking(move || crate::api::web::browser_sign_in(c2, ready, confirmed)).await;
             let _ = this.update(cx, |t, cx| {
                 if t.web_login.attempt != attempt {
                     return;
@@ -930,6 +944,7 @@ impl AppView {
     }
 
     fn render_web_sign_in(&self, cx: &mut Context<Self>) -> AnyElement {
+        use std::sync::atomic::Ordering;
         let p = pal(cx);
         let browser = self.web_login.browser.clone().unwrap_or_else(|| "browser".into());
         let mut col = div().flex().flex_col().gap_4().child(
@@ -970,6 +985,19 @@ impl AppView {
                             .child(pill("wsi-retry", Some("refresh-cw"), "Try again", cx).on_click(cx.listener(|this, _, _, cx| this.start_web_sign_in(cx)))),
                     ),
             );
+        } else if self.web_login.channel_ready.load(Ordering::Relaxed) {
+            let confirmed = self.web_login.channel_confirmed.load(Ordering::Relaxed);
+            col = col
+                .child(div().text_sm().text_color(p.text2).child(t(
+                    "In the browser, open your YouTube profile menu and choose the channel for your watch history.",
+                )))
+                .child(div().flex().flex_wrap().justify_end().gap_2().child(cancel).child(
+                    pill("wsi-use-channel", None, if confirmed { "Waiting for sign-in…" } else { "Use current YouTube channel" }, cx)
+                        .when(!confirmed, |button| button.on_click(cx.listener(|this, _, _, cx| {
+                            this.web_login.channel_confirmed.store(true, Ordering::Relaxed);
+                            cx.notify();
+                        }))),
+                ));
         } else {
             col = col
                 .child(
@@ -979,7 +1007,7 @@ impl AppView {
                         .gap_2()
                         .text_sm()
                         .text_color(p.text2)
-                        .child(tf!("Sign in to YouTube in the {0} window that opened. It closes by itself when you're done.", browser))
+                        .child(tf!("Sign in to YouTube in the {0} window that opened.", browser))
                         .child(
                             div()
                                 .text_xs()
