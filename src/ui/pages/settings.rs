@@ -678,6 +678,12 @@ impl SettingsPage {
             .child(row("Play videos on hover", "Muted preview when the pointer rests on a thumbnail", switch("hovp", s.hover_preview, |s, v| s.hover_preview = v, cx), cx))
             .child(row("Region", "Trending, Explore and search results", self.dropdown("dd-region", crate::locale::REGIONS, s.region.clone(), |s, v| s.region = v, cx), cx))
             .child(row("YouTube language", "Titles, dates and YouTube's text", self.dropdown("dd-lang", crate::locale::LANGUAGES, s.language.clone(), |s, v| s.language = v, cx), cx))
+            .child(row(
+                "Original video titles",
+                "Use the creator's title when you open a video",
+                switch("original-video-titles", s.original_video_titles, |s, v| s.original_video_titles = v, cx),
+                cx,
+            ))
     }
 
     fn player(&self, cx: &mut Context<Self>) -> Div {
