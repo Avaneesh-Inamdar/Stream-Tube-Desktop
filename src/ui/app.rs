@@ -781,6 +781,26 @@ impl AppView {
         }
     }
 
+    fn sign_in_pending(&self, attempt: u64) -> bool {
+        self.login.attempt == attempt && matches!(self.dialog, Some(Dialog::SignIn))
+    }
+
+    fn open_sign_in_browser(&self, cx: &mut Context<Self>) {
+        let Some(code) = &self.login.code else { return };
+        let url = code.sign_in_url();
+        let attempt = self.login.attempt;
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = blocking(move || open::that_detached(url.as_str())).await {
+                let _ = this.update(cx, |this, cx| {
+                    if this.sign_in_pending(attempt) {
+                        toast(cx, tf!("Could not open link: {0}", crate::ui::friendly_error(&error.to_string())));
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
     fn start_sign_in(&mut self, cx: &mut Context<Self>) {
         use crate::api::auth::{self, PollResult};
         use std::time::{Duration, Instant};
@@ -793,7 +813,7 @@ impl AppView {
         cx.spawn(async move |this, cx| {
             let fail = |this: &WeakEntity<Self>, cx: &mut AsyncApp, msg: String| {
                 let _ = this.update(cx, |t, cx| {
-                    if t.login.attempt == attempt {
+                    if t.sign_in_pending(attempt) {
                         t.login.error = Some(msg);
                         cx.notify();
                     }
@@ -805,17 +825,25 @@ impl AppView {
             };
             let deadline = Instant::now() + Duration::from_secs(dc.expires_in);
             let mut interval = dc.interval.max(3);
-            let _ = this.update(cx, |t, cx| {
-                if t.login.attempt == attempt {
+            let started = this
+                .update(cx, |t, cx| {
+                    if !t.sign_in_pending(attempt) {
+                        return false;
+                    }
                     t.login.code = Some(dc.clone());
+                    t.open_sign_in_browser(cx);
                     cx.notify();
-                }
-            });
+                    true
+                })
+                .unwrap_or(false);
+            if !started {
+                return;
+            }
             let mut errors = 0;
             loop {
                 cx.background_executor().timer(Duration::from_secs(interval)).await;
                 let waiting = this
-                    .update(cx, |t, _| t.login.attempt == attempt && matches!(t.dialog, Some(Dialog::SignIn)))
+                    .update(cx, |t, _| t.sign_in_pending(attempt))
                     .unwrap_or(false);
                 if !waiting {
                     return;
@@ -827,14 +855,24 @@ impl AppView {
                 match blocking(move || auth::poll_login(&d)).await {
                     Ok(PollResult::Pending) => errors = 0,
                     Ok(PollResult::SlowDown) => interval += 2,
-                    Ok(PollResult::Done(acc)) => {
-                        let _ = this.update(cx, |t, cx| {
-                            t.dialog = None;
-                            t.login.code = None;
-                            t.reload_page = true;
-                            toast(cx, tf!("Signed in as {0}", acc.name));
-                            cx.notify();
-                        });
+                    Ok(PollResult::Approved(grant)) => {
+                        let activated = this
+                            .update(cx, |t, cx| {
+                                if !t.sign_in_pending(attempt) {
+                                    return false;
+                                }
+                                let acc = grant.activate();
+                                t.dialog = None;
+                                t.login.code = None;
+                                t.reload_page = true;
+                                toast(cx, tf!("Signed in as {0}", acc.name));
+                                cx.notify();
+                                true
+                            })
+                            .unwrap_or(false);
+                        if !activated {
+                            return;
+                        }
                         // bring the account's history and subscriptions to this device
                         let _ = cx.update(|cx| super::history::refresh_current(cx, false));
                         let _ = blocking(auth::sync_search_history).await;
@@ -995,6 +1033,10 @@ impl AppView {
 
     fn render_sign_in(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = pal(cx);
+        let cancel = pill("si-cancel", None, "Cancel", cx).on_click(cx.listener(|this, _, _, cx| {
+            this.dialog = None;
+            cx.notify();
+        }));
         let mut col = div().flex().flex_col().gap_4().child(
             div()
                 .flex()
@@ -1010,41 +1052,13 @@ impl AppView {
                     .flex_wrap()
                     .justify_end()
                     .gap_2()
-                    .child(pill("si-cancel", None, "Cancel", cx).on_click(cx.listener(|this, _, _, cx| {
-                        this.dialog = None;
-                        cx.notify();
-                    })))
+                    .child(cancel)
                     .child(pill("si-retry", Some("refresh-cw"), "Try again", cx).on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx)))),
             );
         } else if let Some(dc) = &self.login.code {
             let code = dc.user_code.clone();
-            let url = dc.verification_url.clone();
-            let shown_url = url.trim_start_matches("https://").trim_start_matches("http://").trim_start_matches("www.").to_string();
-            let code2 = code.clone();
-            let url2 = url.clone();
             col = col
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .text_sm()
-                        .text_color(p.text2)
-                        .child(
-                            div().flex().flex_wrap().gap_x_1().child(t("1. On any device, go to")).child(
-                                div()
-                                    .id("si-url")
-                                    .text_color(p.link)
-                                    .cursor_pointer()
-                                    .hover(|s| s.underline())
-                                    .child(shown_url)
-                                    .on_click(move |_, _, _| {
-                                        let _ = open::that(&url2);
-                                    }),
-                            ),
-                        )
-                        .child(t("2. Enter this code and pick your account")),
-                )
+                .child(div().text_sm().text_color(p.text2).child(t("Google opened in your browser with this code filled in. Pick your account and allow access.")))
                 .child(
                     div()
                         .id("si-code")
@@ -1062,35 +1076,37 @@ impl AppView {
                         .font_weight(FontWeight::BOLD)
                         .text_color(p.text)
                         .child(code.clone())
-                        .on_click(move |_, _, cx| copy_to_clipboard(code2.clone(), cx)),
+                        .on_click(move |_, _, cx| copy_to_clipboard(code.clone(), cx)),
                 )
-                .child(div().text_xs().text_color(p.text3).child(t("Waiting for approval…")))
+                .child(div().text_xs().text_color(p.text3).child(tf!(
+                    "On another device, go to {0} and enter the code",
+                    crate::api::auth::DeviceCode::manual_url()
+                )))
                 .child(
                     div()
                         .flex()
                         .flex_wrap()
-                        .justify_end()
-                        .gap_2()
-                        .child(pill("si-cancel", None, "Cancel", cx).on_click(cx.listener(|this, _, _, cx| {
-                            this.dialog = None;
-                            cx.notify();
-                        })))
-                        .child(pill("si-open", Some("external-link"), "Copy code & open", cx).bg(p.link).text_color(white()).on_click(
-                            move |_, _, cx| {
-                                copy_to_clipboard(code.clone(), cx);
-                                let _ = open::that(&url);
-                            },
-                        )),
+                        .items_center()
+                        .justify_between()
+                        .child(div().text_xs().text_color(p.text3).child(t("Waiting for approval…")))
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(cancel)
+                                .child(pill("si-open", Some("external-link"), "Open browser", cx).bg(p.link).text_color(white()).on_click(
+                                    cx.listener(|this, _, _, cx| this.open_sign_in_browser(cx)),
+                                )),
+                        ),
                 );
         } else {
             col = col.child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_3()
-                    .py_4()
-                    .child(spinner(cx))
-                    .child(div().text_sm().text_color(p.text2).child(t("Getting a code…"))),
+                    .justify_between()
+                    .child(div().flex().items_center().gap_3().child(spinner(cx)).child(div().text_sm().text_color(p.text2).child(t("Getting a code…"))))
+                    .child(cancel),
             );
         }
         col.into_any_element()

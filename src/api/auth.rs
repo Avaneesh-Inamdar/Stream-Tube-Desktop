@@ -1,5 +1,6 @@
 //! Google account sign-in using YouTube's TV device flow (the same method SmartTube
-//! uses): the app shows a code, the user enters it at google.com/device, and the
+//! uses). The app opens youtube.com/activate in the default browser with the code
+//! already filled in, so the user only picks an account and allows access. The
 //! resulting token authorizes the TV Innertube client for the personal home feed,
 //! subscriptions, likes and watch history.
 use super::http;
@@ -10,12 +11,16 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
+use url::Url;
 
 // Public OAuth client of the YouTube TV app.
 const CLIENT_ID: &str = "861556708454-d6dlm3lh05idd8npek18k6be8ba3oc68.apps.googleusercontent.com";
 const CLIENT_SECRET: &str = "SboVhoG9s0rNafixCSGGKXAT";
 const SCOPE: &str = "http://gdata.youtube.com https://www.googleapis.com/auth/youtube-paid-content";
 const TV_VERSION: &str = "7.20251120.13.00";
+// YouTube's own activation page. Unlike google.com/device it also lets the user
+// pick a brand account (a channel).
+const ACTIVATE_URL: &str = "https://www.youtube.com/activate";
 const TV_UA: &str = "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/25.lts.30.1034943-gold (unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -37,13 +42,30 @@ struct Stored {
     history_key: Option<u64>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DeviceCode {
     pub device_code: String,
     pub user_code: String,
-    pub verification_url: String,
     pub interval: u64,
     pub expires_in: u64,
+}
+
+impl DeviceCode {
+    /// The activation page with the code filled in.
+    pub fn sign_in_url(&self) -> Url {
+        sign_in_url(&self.user_code)
+    }
+
+    /// Where to enter the code by hand, for another device.
+    pub fn manual_url() -> &'static str {
+        ACTIVATE_URL.trim_start_matches("https://www.")
+    }
+}
+
+fn sign_in_url(user_code: &str) -> Url {
+    let mut url = Url::parse(ACTIVATE_URL).expect("valid activation URL");
+    url.query_pairs_mut().append_pair("user_code", user_code);
+    url
 }
 
 fn state() -> &'static Mutex<Option<Stored>> {
@@ -91,7 +113,19 @@ fn oauth_post(url: &str, body: Value) -> Result<(u16, Value)> {
     http::post_json_status(url, &body, &[("User-Agent", TV_UA)])
 }
 
-/// Step 1: get a code for the user to enter at google.com/device.
+#[cfg(test)]
+mod sign_in_url_tests {
+    use super::{DeviceCode, sign_in_url};
+
+    #[test]
+    fn opens_the_activation_page_with_the_code_filled_in() {
+        assert_eq!(sign_in_url("HDZ-QKX-JSMD").as_str(), "https://www.youtube.com/activate?user_code=HDZ-QKX-JSMD");
+        assert_eq!(sign_in_url("A&B C").as_str(), "https://www.youtube.com/activate?user_code=A%26B+C");
+        assert_eq!(DeviceCode::manual_url(), "youtube.com/activate");
+    }
+}
+
+/// Step 1: get a code for the user to approve at youtube.com/activate.
 pub fn start_login() -> Result<DeviceCode> {
     let device_id: String = {
         use rand::Rng;
@@ -106,7 +140,6 @@ pub fn start_login() -> Result<DeviceCode> {
     Ok(DeviceCode {
         device_code: s("device_code").ok_or_else(|| anyhow!("no device code"))?,
         user_code: s("user_code").ok_or_else(|| anyhow!("no user code"))?,
-        verification_url: s("verification_url").unwrap_or_else(|| "https://www.google.com/device".into()),
         interval: v.get("interval").and_then(Value::as_u64).unwrap_or(5),
         expires_in: v.get("expires_in").and_then(Value::as_u64).unwrap_or(1800),
     })
@@ -115,10 +148,34 @@ pub fn start_login() -> Result<DeviceCode> {
 pub enum PollResult {
     Pending,
     SlowDown,
-    Done(Account),
+    Approved(LoginGrant),
 }
 
-/// Step 2: poll until the user has approved the code.
+pub struct LoginGrant {
+    access_token: String,
+    refresh_token: String,
+    expires_at: i64,
+    account: Account,
+}
+
+impl LoginGrant {
+    /// Activate only after the caller confirms this sign-in attempt is still open.
+    pub fn activate(self) -> Account {
+        let mut active = state().lock();
+        *active = Some(Stored {
+            access_token: self.access_token,
+            refresh_token: self.refresh_token,
+            expires_at: self.expires_at,
+            account: Some(self.account.clone()),
+            session: Arc::new(()),
+            history_key: Some(rand::random()),
+        });
+        persist(&active);
+        self.account
+    }
+}
+
+/// Step 2: poll until the user has approved the code. The grant stays inactive until accepted by the app.
 pub fn poll_login(dc: &DeviceCode) -> Result<PollResult> {
     let (_, v) = oauth_post(
         "https://www.youtube.com/o/oauth2/token",
@@ -137,29 +194,20 @@ pub fn poll_login(dc: &DeviceCode) -> Result<PollResult> {
         };
     }
     let access = v.get("access_token").and_then(Value::as_str).ok_or_else(|| anyhow!("no access token"))?;
-    let refresh = v.get("refresh_token").and_then(Value::as_str).unwrap_or("");
+    let refresh = v
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| anyhow!("Sign-in failed: no refresh token"))?;
     let expires = v.get("expires_in").and_then(Value::as_i64).unwrap_or(3600);
-    {
-        let mut s = state().lock();
-        *s = Some(Stored {
-            access_token: access.to_string(),
-            refresh_token: refresh.to_string(),
-            expires_at: crate::api::json::now() + expires - 60,
-            account: None,
-            session: Arc::new(()),
-            history_key: Some(rand::random()),
-        });
-        persist(&s);
-    }
-    let acc = fetch_account().unwrap_or_else(|_| Account { name: "YouTube account".into(), ..Default::default() });
-    {
-        let mut s = state().lock();
-        if let Some(st) = s.as_mut() {
-            st.account = Some(acc.clone());
-        }
-        persist(&s);
-    }
-    Ok(PollResult::Done(acc))
+    let expires_at = crate::api::json::now() + expires - 60;
+    let account = fetch_account(access).unwrap_or_else(|_| Account { name: "YouTube account".into(), ..Default::default() });
+    Ok(PollResult::Approved(LoginGrant {
+        access_token: access.to_string(),
+        refresh_token: refresh.to_string(),
+        expires_at,
+        account,
+    }))
 }
 
 /// A valid access token, refreshed when needed.
@@ -257,8 +305,8 @@ impl HistorySession {
     }
 }
 
-fn fetch_account() -> Result<Account> {
-    let r = tv_call("account/accounts_list", json!({ "accountReadMask": { "returnOwner": true } }))?;
+fn fetch_account(token: &str) -> Result<Account> {
+    let r = tv_call_with(token, "account/accounts_list", json!({ "accountReadMask": { "returnOwner": true } }))?;
     let item = crate::api::json::find(&r, "accountItem").or_else(|| crate::api::json::find(&r, "accountItemRenderer")).unwrap_or(&r);
     let name = item
         .get("accountName")

@@ -88,7 +88,7 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 
 **Your data stays yours**
 - Subscriptions can live locally. The feed is built by fetching each channel directly, no account needed
-- Sign in with your Google account to get your own Home feed, subscriptions, playlists, likes and subscribe button. Stream Tube imports your YouTube watch history and recent searches automatically after sign-in
+- Sign in with your Google account to get your own Home feed, subscriptions, playlists, likes and subscribe button. Stream Tube opens youtube.com/activate in your default browser with the sign-in code already filled in, so you only pick your account and allow access. Stream Tube imports your YouTube watch history and recent searches automatically after sign-in
 - To send videos and resume positions from Stream Tube back to YouTube, connect a browser session under *Settings → General → YouTube watch history*. That session supports watch history in both directions. Sign in with a fresh browser profile (Chrome, Edge, Brave or Chromium) that is deleted afterwards, or load a `cookies.txt` file
 - Your YouTube watch history refreshes in the background and when you return to Stream Tube
 - History, watch later, favourites and playlists are stored in a local SQLite database, and you can pause or clear history at any time
