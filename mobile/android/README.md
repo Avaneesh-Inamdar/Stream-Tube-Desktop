@@ -2,9 +2,15 @@
 
 Stream Tube for Android brings the Stream Tube Desktop browsing interface to phones. The interface is built in Slint and the Android runtime uses RustFerry. The desktop project was created by Avaneesh Inamdar.
 
-Home opens to a video feed with music, games, tech, and live categories. The bottom bar switches between Home, Shorts, Following, and Library. Search opens from the header. Tap a video to play it, or tap its channel name to see recent uploads and follow the channel.
+Home opens to a video feed with music, games, tech, and live categories. Swipe through the feed to load more videos. The bottom bar switches between Home, Shorts, Subscriptions, and Library. Shorts opens a portrait player. Swipe up for the next video or down to go back.
 
-Settings offers Russian, English, or the device language, plus a thumbnail toggle. Following, saved videos, and viewing history work locally. Connect with Google in Settings to read the YouTube account's subscriptions in Following.
+For you mixes videos related to recent watches and searches with uploads from followed channels. Imported YouTube subscriptions are included after account connection.
+
+Search opens from the header and accepts video titles and YouTube video or playlist links. Tap a video to watch it in a queue. The watch screen has a timeline, play and pause, ten-second jumps and fullscreen. You can save or share the video, open its channel and scroll through its description.
+
+Settings offers the same 11 interface languages as the desktop app, the device language, and a thumbnail toggle. Subscriptions, saved videos, and viewing history work locally. Sign in from Subscriptions or Settings to read your YouTube subscriptions. Settings also lets you switch accounts, refresh subscriptions and disconnect.
+
+SponsorBlock skips sponsor, self-promotion and interaction segments. It marks other supported segments below the player. Settings also offers DeArrow titles and thumbnails and Return YouTube Dislike counts.
 
 ## Build
 

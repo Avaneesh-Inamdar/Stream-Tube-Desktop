@@ -1,7 +1,6 @@
 mod app;
 mod entities;
 mod features;
-#[cfg(target_os = "android")]
 mod shared;
 
 #[cfg(target_os = "android")]

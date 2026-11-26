@@ -10,7 +10,7 @@ pub fn available() -> bool {
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn start(_: i32, _: bool) -> bool {
+pub fn start(_: i32, _: bool, _: bool) -> bool {
     false
 }
 

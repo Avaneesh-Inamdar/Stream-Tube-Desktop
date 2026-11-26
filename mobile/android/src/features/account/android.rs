@@ -27,16 +27,17 @@ pub fn available() -> bool {
     .unwrap_or(false)
 }
 
-pub fn start(request: i32, interactive: bool) -> bool {
+pub fn start(request: i32, interactive: bool, choose_account: bool) -> bool {
     with_application_class(CLASS, |env, activity, google| {
         env.call_static_method(
             google,
             jni_str!("authorize"),
-            jni_sig!("(Landroid/app/Activity;IZ)V"),
+            jni_sig!("(Landroid/app/Activity;IZZ)V"),
             &[
                 JValue::Object(activity),
                 JValue::Int(request),
                 JValue::Bool(interactive),
+                JValue::Bool(choose_account),
             ],
         )?;
         Ok(())

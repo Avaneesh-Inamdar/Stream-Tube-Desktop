@@ -39,6 +39,8 @@ public final class AccountAuthorization extends Fragment {
     private static final int AUTH_CONFIGURATION = 3;
     private static final int NETWORK_ERROR = 4;
     private static final int RECONNECT_NEEDED = 5;
+    private static final int NO_YOUTUBE_CHANNEL = 6;
+    private static final int RATE_LIMITED = 7;
     private static final int MAX_CHANNELS = 500;
     private static final int MAX_RESPONSE_BYTES = 512 * 1024;
     private static final ExecutorService NETWORK = Executors.newSingleThreadExecutor();
@@ -47,15 +49,17 @@ public final class AccountAuthorization extends Fragment {
     private int request;
     private boolean interactive;
     private boolean active;
+    private boolean showingConsent;
 
     public static boolean available(Activity activity) {
         return GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(activity)
             == ConnectionResult.SUCCESS;
     }
 
-    public static void authorize(Activity activity, int request, boolean interactive) {
+    public static void authorize(Activity activity, int request, boolean interactive, boolean chooseAccount) {
         activity.runOnUiThread(() -> {
             if (activity.isDestroyed() || activity.isFinishing()) {
+                deliver(request, CANCELLED, "", "[]");
                 return;
             }
             if (!available(activity)) {
@@ -68,9 +72,11 @@ public final class AccountAuthorization extends Fragment {
                 current.remove();
             }
             AccountAuthorization fragment = new AccountAuthorization();
-            fragment.request = request;
-            fragment.interactive = interactive;
-            fragment.active = true;
+            Bundle options = new Bundle();
+            options.putInt("request", request);
+            options.putBoolean("interactive", interactive);
+            options.putBoolean("chooseAccount", chooseAccount);
+            fragment.setArguments(options);
             activity.getFragmentManager().beginTransaction()
                 .add(fragment, TAG).commitAllowingStateLoss();
         });
@@ -94,16 +100,32 @@ public final class AccountAuthorization extends Fragment {
 
     @Override public void onActivityCreated(Bundle savedState) {
         super.onActivityCreated(savedState);
-        if (!active || getActivity() == null) {
+        Bundle options = getArguments();
+        if (options == null || getActivity() == null) {
             remove();
             return;
         }
-        AuthorizationRequest authorization = AuthorizationRequest.builder()
+        request = options.getInt("request");
+        interactive = options.getBoolean("interactive");
+        active = true;
+        if (savedState != null && savedState.getBoolean("showingConsent")) {
+            showingConsent = true;
+            return;
+        }
+        AuthorizationRequest.Builder authorization = AuthorizationRequest.builder()
             .setRequestedScopes(Collections.singletonList(new Scope(READ_ONLY)))
-            .build();
-        Identity.getAuthorizationClient(getActivity()).authorize(authorization)
+            .setOptOutIncludingGrantedScopes(true);
+        if (options.getBoolean("chooseAccount")) {
+            authorization.setPrompt(AuthorizationRequest.Prompt.SELECT_ACCOUNT);
+        }
+        Identity.getAuthorizationClient(getActivity()).authorize(authorization.build())
             .addOnSuccessListener(this::receive)
             .addOnFailureListener(error -> finish(googleStatus(error), "", "[]"));
+    }
+
+    @Override public void onSaveInstanceState(Bundle out) {
+        super.onSaveInstanceState(out);
+        out.putBoolean("showingConsent", showingConsent);
     }
 
     private void receive(AuthorizationResult result) {
@@ -121,6 +143,7 @@ public final class AccountAuthorization extends Fragment {
                 return;
             }
             try {
+                showingConsent = true;
                 startIntentSenderForResult(intent.getIntentSender(), LAUNCH_CONSENT,
                     null, 0, 0, 0, null);
             } catch (IntentSender.SendIntentException failure) {
@@ -133,7 +156,6 @@ public final class AccountAuthorization extends Fragment {
             finish(RECONNECT_NEEDED, "", "[]");
             return;
         }
-        currentAccessToken = token;
         Activity activity = getActivity();
         NETWORK.execute(() -> {
             try {
@@ -141,13 +163,20 @@ public final class AccountAuthorization extends Fragment {
                 JSONArray identities = profile.optJSONArray("items");
                 JSONObject identity = identities == null ? null : identities.optJSONObject(0);
                 JSONObject snippet = identity == null ? null : identity.optJSONObject("snippet");
-                String name = snippet == null ? "" : snippet.optString("title");
+                if (snippet == null) {
+                    activity.runOnUiThread(() -> finish(NO_YOUTUBE_CHANNEL, "", "[]"));
+                    return;
+                }
+                String name = snippet.optString("title");
                 String channels = readSubscriptions(token).toString();
-                activity.runOnUiThread(() -> finish(OK, name, channels));
+                activity.runOnUiThread(() -> {
+                    if (active) {
+                        currentAccessToken = token;
+                        finish(OK, name, channels);
+                    }
+                });
             } catch (GoogleHttpError failure) {
-                int status = failure.status == 401 ? RECONNECT_NEEDED
-                    : failure.status == 403 ? AUTH_CONFIGURATION : NETWORK_ERROR;
-                activity.runOnUiThread(() -> finish(status, "", "[]"));
+                activity.runOnUiThread(() -> finish(failure.authorizationStatus(), "", "[]"));
             } catch (IOException | JSONException failure) {
                 activity.runOnUiThread(() -> finish(NETWORK_ERROR, "", "[]"));
             }
@@ -159,12 +188,19 @@ public final class AccountAuthorization extends Fragment {
         if (requestCode != LAUNCH_CONSENT || !active || getActivity() == null) {
             return;
         }
-        if (resultCode != Activity.RESULT_OK || data == null) {
+        showingConsent = false;
+        if (data == null) {
             finish(CANCELLED, "", "[]");
             return;
         }
         try {
-            receive(Identity.getAuthorizationClient(getActivity()).getAuthorizationResultFromIntent(data));
+            AuthorizationResult result = Identity.getAuthorizationClient(getActivity())
+                .getAuthorizationResultFromIntent(data);
+            if (resultCode == Activity.RESULT_OK) {
+                receive(result);
+            } else {
+                finish(CANCELLED, "", "[]");
+            }
         } catch (ApiException error) {
             finish(googleStatus(error), "", "[]");
         }
@@ -181,6 +217,9 @@ public final class AccountAuthorization extends Fragment {
             }
             if (status == CommonStatusCodes.NETWORK_ERROR) {
                 return NETWORK_ERROR;
+            }
+            if (status == CommonStatusCodes.SIGN_IN_REQUIRED) {
+                return RECONNECT_NEEDED;
             }
         }
         return GOOGLE_UNAVAILABLE;
@@ -240,7 +279,7 @@ public final class AccountAuthorization extends Fragment {
         try {
             int status = connection.getResponseCode();
             if (status != 200) {
-                throw new GoogleHttpError(status);
+                throw new GoogleHttpError(status, errorReason(connection));
             }
             try (InputStream input = connection.getInputStream();
                  ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
@@ -255,6 +294,26 @@ public final class AccountAuthorization extends Fragment {
             }
         } finally {
             connection.disconnect();
+        }
+    }
+
+    private static String errorReason(HttpsURLConnection connection) {
+        try (InputStream input = connection.getErrorStream()) {
+            if (input == null) {
+                return "";
+            }
+            byte[] body = new byte[8192];
+            int length = input.read(body);
+            if (length <= 0) {
+                return "";
+            }
+            JSONObject error = new JSONObject(new String(body, 0, length, StandardCharsets.UTF_8))
+                .optJSONObject("error");
+            JSONArray errors = error == null ? null : error.optJSONArray("errors");
+            JSONObject first = errors == null ? null : errors.optJSONObject(0);
+            return first == null ? "" : first.optString("reason");
+        } catch (IOException | JSONException ignored) {
+            return "";
         }
     }
 
@@ -280,9 +339,25 @@ public final class AccountAuthorization extends Fragment {
 
     private static final class GoogleHttpError extends IOException {
         final int status;
+        final String reason;
 
-        GoogleHttpError(int status) {
+        GoogleHttpError(int status, String reason) {
             this.status = status;
+            this.reason = reason;
+        }
+
+        int authorizationStatus() {
+            if (reason.equals("youtubeSignupRequired")) {
+                return NO_YOUTUBE_CHANNEL;
+            }
+            if (status == 429 || reason.equals("quotaExceeded") || reason.equals("dailyLimitExceeded")
+                    || reason.equals("rateLimitExceeded") || reason.equals("userRateLimitExceeded")) {
+                return RATE_LIMITED;
+            }
+            if (status == 401) {
+                return RECONNECT_NEEDED;
+            }
+            return status == 403 ? AUTH_CONFIGURATION : NETWORK_ERROR;
         }
     }
 

@@ -1,35 +1,23 @@
-use crate::entities::{Channel, Video};
+use crate::{
+    entities::{Channel, Video},
+    features::services::Extras,
+    shared::i18n::Language,
+};
 use serde::{Deserialize, Serialize};
 
 const STORAGE_KEY: &str = "stream-tube-mobile";
 const LIMIT: usize = 150;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Language {
-    #[default]
-    System,
-    English,
-    Russian,
-}
-
-impl Language {
-    pub fn is_russian(self, system_russian: bool) -> bool {
-        match self {
-            Self::System => system_russian,
-            Self::English => false,
-            Self::Russian => true,
-        }
-    }
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Library {
     pub saved: Vec<Video>,
     pub history: Vec<Video>,
+    pub recent_searches: Vec<String>,
     pub following: Vec<Channel>,
     pub language: Language,
     pub thumbnails: bool,
+    pub extras: Extras,
     pub connected_account: bool,
 }
 
@@ -38,9 +26,11 @@ impl Default for Library {
         Self {
             saved: Vec::new(),
             history: Vec::new(),
+            recent_searches: Vec::new(),
             following: Vec::new(),
             language: Language::System,
             thumbnails: true,
+            extras: Extras::default(),
             connected_account: false,
         }
     }
@@ -59,6 +49,12 @@ impl Library {
         self.history.retain(|item| item.id != video.id);
         self.history.insert(0, video);
         self.history.truncate(LIMIT);
+    }
+
+    pub fn searched(&mut self, query: String) {
+        self.recent_searches.retain(|saved| saved != &query);
+        self.recent_searches.insert(0, query);
+        self.recent_searches.truncate(12);
     }
 
     pub fn toggle_saved(&mut self, video: Video) {
