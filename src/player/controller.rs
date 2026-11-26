@@ -30,6 +30,7 @@ pub enum PlayerEvent {
     PlaybackReadyChanged,
     /// average colour of the picture changed (ambient mode)
     Ambient,
+    QueueChanged,
 }
 
 #[derive(Clone, Copy)]
@@ -83,6 +84,9 @@ pub struct Player {
     pub queue: Vec<VideoItem>,
     pub queue_pos: Option<usize>,
     pub(crate) autoplay_next: Option<VideoItem>,
+    queue_serial: u64,
+    queue_shuffle: bool,
+    queue_scroll_y: Option<(u64, Pixels)>,
     pub chapters: Vec<Chapter>,
     pub heatmap: Vec<(f64, f64, f32)>,
     /// archived annotations of the current video
@@ -220,6 +224,9 @@ impl Player {
             queue: Vec::new(),
             queue_pos: None,
             autoplay_next: None,
+            queue_serial: 0,
+            queue_shuffle: false,
+            queue_scroll_y: None,
             chapters: Vec::new(),
             heatmap: Vec::new(),
             annotations: Arc::new(Vec::new()),
@@ -649,6 +656,97 @@ impl Player {
                 });
             }
         }
+    }
+
+    /// Replaces the queue with playlist items and keeps draining any remaining
+    /// continuation pages in the background so playback starts immediately.
+    pub fn set_playlist_queue(
+        &mut self,
+        videos: Vec<VideoItem>,
+        start_idx: usize,
+        continuation: Option<String>,
+        authed: bool,
+        shuffle: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.queue_serial += 1;
+        let serial = self.queue_serial;
+        self.queue = videos;
+        self.queue_pos = Some(start_idx);
+        self.queue_shuffle = shuffle;
+        self.queue_scroll_y = None;
+        cx.emit(PlayerEvent::QueueChanged);
+        cx.notify();
+        let Some(first) = continuation.filter(|t| !t.is_empty()) else { return };
+        cx.spawn(async move |this, cx| {
+            let mut pager = crate::api::innertube::PlaylistPager::new(Some(first), crate::api::innertube::MAX_PLAYLIST_PAGES);
+            while let Some(tok) = pager.take_next() {
+                let Ok((vids, next)) = blocking(move || crate::api::innertube::playlist_continue(&tok, authed)).await else { break };
+                pager.advance(next);
+                let keep_going = this
+                    .update(cx, |p, cx| {
+                        if p.queue_serial != serial {
+                            return false;
+                        }
+                        if extend_queue(&mut p.queue, p.queue_pos, vids, p.queue_shuffle, &mut rand::rng()) > 0 {
+                            cx.emit(PlayerEvent::QueueChanged);
+                            cx.notify();
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub fn replace_queue(&mut self, queue: Vec<VideoItem>, pos: Option<usize>) {
+        self.queue_serial += 1;
+        self.queue = queue;
+        self.queue_pos = pos;
+        self.queue_shuffle = false;
+        self.queue_scroll_y = None;
+    }
+
+    pub fn reset_queue(&mut self) {
+        self.replace_queue(Vec::new(), None);
+    }
+
+    pub fn on_queue_replaced(&mut self) {
+        self.queue_serial += 1;
+        self.queue_shuffle = false;
+        self.queue_scroll_y = None;
+    }
+
+    pub fn clear_queue(&mut self, cx: &mut Context<Self>) {
+        self.reset_queue();
+        cx.emit(PlayerEvent::QueueChanged);
+        cx.notify();
+    }
+
+    pub fn shuffle_queue(&mut self, cx: &mut Context<Self>) {
+        use rand::seq::SliceRandom;
+        let cur = self.queue_pos.and_then(|i| self.queue.get(i).cloned());
+        self.queue.shuffle(&mut rand::rng());
+        if let Some(c) = cur {
+            self.queue_pos = self.queue.iter().position(|v| v.id == c.id);
+        }
+        self.queue_shuffle = true;
+        self.queue_scroll_y = None;
+        cx.emit(PlayerEvent::QueueChanged);
+        cx.notify();
+    }
+
+    pub fn save_queue_scroll(&mut self, y: Pixels) {
+        self.queue_scroll_y = Some((self.queue_serial, y));
+    }
+
+    pub fn take_queue_scroll(&mut self) -> Option<Pixels> {
+        let (serial, y) = self.queue_scroll_y.take()?;
+        (serial == self.queue_serial).then_some(y)
     }
 
     /// A failed video decoder can leave mpv playing the audio indefinitely
@@ -1581,9 +1679,8 @@ impl Player {
         self.video = None;
         self.streams = None;
         self.loading = false;
-        self.queue.clear();
         self.autoplay_next = None;
-        self.queue_pos = None;
+        self.reset_queue();
         if let Some(old) = self.frame.take() {
             cx.drop_image(old, None);
         }
@@ -2156,5 +2253,58 @@ mod seek_tests {
         assert_eq!(clamp_seek(5.0, 0.0), 5.0);
         assert_eq!(clamp_seek(0.05, 0.05), 0.0);
         assert_eq!(clamp_seek(0.1, 0.1), 0.0);
+    }
+}
+
+/// Appends unseen playlist videos to the queue. When `shuffle` is set, the
+/// upcoming tail after the playing video is shuffled so newly loaded pages are
+/// mixed into playback without moving the current or already-played tracks.
+fn extend_queue(
+    queue: &mut Vec<VideoItem>,
+    pos: Option<usize>,
+    incoming: Vec<VideoItem>,
+    shuffle: bool,
+    rng: &mut impl rand::Rng,
+) -> usize {
+    let added = crate::api::innertube::append_unique_videos(queue, incoming);
+    if added > 0 && shuffle {
+        use rand::seq::SliceRandom;
+        let after = pos.map_or(0, |i| i + 1).min(queue.len());
+        queue[after..].shuffle(rng);
+    }
+    added
+}
+
+#[cfg(test)]
+mod queue_extend_tests {
+    use super::*;
+
+    fn vids(range: std::ops::Range<u32>) -> Vec<VideoItem> {
+        range.map(|i| VideoItem { id: format!("v{i}"), ..Default::default() }).collect()
+    }
+
+    #[::core::prelude::v1::test]
+    fn extends_in_order_past_200_and_deduplicates() {
+        let mut q = vids(0..100);
+        let mut rng = rand::rng();
+        assert_eq!(extend_queue(&mut q, Some(0), vids(90..200), false, &mut rng), 100);
+        assert_eq!(extend_queue(&mut q, Some(50), vids(200..320), false, &mut rng), 120);
+        assert_eq!(q.len(), 320);
+        assert_eq!(q[199].id, "v199");
+        assert_eq!(q[200].id, "v200");
+        assert_eq!(q[319].id, "v319");
+    }
+
+    #[::core::prelude::v1::test]
+    fn shuffled_extension_keeps_played_prefix_and_includes_all_new_items() {
+        let mut q = vids(0..100);
+        let mut rng = rand::rng();
+        let added = extend_queue(&mut q, Some(2), vids(100..250), true, &mut rng);
+        assert_eq!(added, 150);
+        assert_eq!(q.len(), 250);
+        // current track and already-played prefix stay fixed
+        assert_eq!((q[0].id.as_str(), q[1].id.as_str(), q[2].id.as_str()), ("v0", "v1", "v2"));
+        let unique: std::collections::HashSet<&str> = q.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(unique.len(), 250);
     }
 }
