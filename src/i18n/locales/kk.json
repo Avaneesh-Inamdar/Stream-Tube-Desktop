@@ -838,5 +838,6 @@
   "{0} hours": "{0} сағ",
   "{0} minute": "{0} мин",
   "{0} minutes": "{0} мин",
-  "Imported {0} subscriptions, {1} history entries, {2} playlists ({3} videos)": "{0} жазылымдар, {1} журнал жазулары, {2} ойнату тізімдері ({3} бейнелер) импортталды"
+  "Imported {0} subscriptions, {1} history entries, {2} playlists ({3} videos)": "{0} жазылымдар, {1} журнал жазулары, {2} ойнату тізімдері ({3} бейнелер) импортталды",
+  "Picture-in-picture above other apps": "«Сурет ішіндегі суретті» басқа қолданбалардың үстінде көрсету"
 }

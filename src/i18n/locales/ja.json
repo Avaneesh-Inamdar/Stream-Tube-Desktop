@@ -838,5 +838,6 @@
   "{0} hours": "{0}時間",
   "{0} minute": "{0}分",
   "{0} minutes": "{0}分",
-  "Imported {0} subscriptions, {1} history entries, {2} playlists ({3} videos)": "{0}の購読、{1}の履歴エントリ、{2}のプレイリスト（{3}のビデオ）をインポート"
+  "Imported {0} subscriptions, {1} history entries, {2} playlists ({3} videos)": "{0}の購読、{1}の履歴エントリ、{2}のプレイリスト（{3}のビデオ）をインポート",
+  "Picture-in-picture above other apps": "ピクチャー イン ピクチャーを常に最前面に表示"
 }

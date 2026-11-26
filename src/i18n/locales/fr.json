@@ -838,5 +838,6 @@
   "{0} hours": "{0} h",
   "{0} minute": "{0} min",
   "{0} minutes": "{0} min",
-  "Imported {0} subscriptions, {1} history entries, {2} playlists ({3} videos)": "Importé {0} abonnements, {1} entrées d'historique, {2} playlists ({3} vidéos)"
+  "Imported {0} subscriptions, {1} history entries, {2} playlists ({3} videos)": "Importé {0} abonnements, {1} entrées d'historique, {2} playlists ({3} vidéos)",
+  "Picture-in-picture above other apps": "Image dans l’image au-dessus des autres applications"
 }

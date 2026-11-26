@@ -678,6 +678,12 @@ impl SettingsPage {
         let s = store::settings_snapshot();
         card(cx)
             .child(row("Theater mode", "Use the wider player layout when opening a video", switch("theater-mode", s.theater_mode, |s, v| s.theater_mode = v, cx), cx))
+            .child(row(
+                "Picture-in-picture above other apps",
+                "",
+                switch("pip-always-on-top", s.pip_always_on_top, |s, v| s.pip_always_on_top = v, cx),
+                cx,
+            ))
             .child(row("Show video title in player", "Display the title in the upper-left corner of the player", switch("spt", s.show_player_title, |s, v| s.show_player_title = v, cx), cx))
             .child(row(
                 "Default quality",

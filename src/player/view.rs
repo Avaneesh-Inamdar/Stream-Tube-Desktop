@@ -1394,12 +1394,14 @@ impl PlayerView {
                 cx.notify();
             })))
             .when(!self.pip && !narrow, |d| {
-                d.child(ctl_btn("c-mini", "picture-in-picture-2").on_click(|_, window, cx| {
-                    crate::ui::app::go_back_keep_playing(window, cx);
+                d.child(ctl_btn("c-pip", "picture-in-picture").on_click(|_, window, cx| {
+                    if store::settings_snapshot().pip_always_on_top {
+                        crate::ui::app::exit_fullscreen(window, cx);
+                        crate::ui::pip::open(cx);
+                    } else {
+                        crate::ui::app::go_back_keep_playing(window, cx);
+                    }
                 }))
-            })
-            .when(!self.pip && !narrow, |d| {
-                d.child(ctl_btn("c-pip", "picture-in-picture").on_click(|_, _, cx| crate::ui::pip::open(cx)))
             })
             .when(!ui.fullscreen && !self.pip && !narrow, |d| {
                 d.child(ctl_btn("c-theater", "rectangle-horizontal").on_click(|_, _, cx| {

@@ -2625,6 +2625,9 @@ impl AppView {
     }
 
     fn render_mini_player(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if crate::ui::pip::handle(cx).is_some() {
+            return None;
+        }
         let p = pal(cx);
         let pl = player(cx);
         let video = pl.read(cx).video.clone()?;
