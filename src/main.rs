@@ -118,6 +118,10 @@ fn main() {
                     ..Default::default()
                 }),
                 window_min_size: Some(size(px(720.), px(480.))),
+                // GPUI draws an inactive window at most ~30 times a second by default, so a
+                // 60 fps video watched next to another app ran at half rate; frames are only
+                // drawn when something changed, so an idle background window still costs nothing
+                inactive_frame_interval: None,
                 ..Default::default()
             };
             gpui_kit::open_window(opts, cx, |window, cx| {
