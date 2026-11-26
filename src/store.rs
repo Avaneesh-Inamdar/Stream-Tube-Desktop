@@ -32,6 +32,7 @@ pub struct Settings {
     pub proxy: String,
     // Player
     pub theater_mode: bool,
+    pub theater_full_height: bool,
     pub pip_always_on_top: bool,
     pub default_quality: u32,
     pub codec_pref: String,
@@ -178,6 +179,7 @@ impl Default for Settings {
             ytdlp_path: String::new(),
             proxy: String::new(),
             theater_mode: false,
+            theater_full_height: false,
             pip_always_on_top: false,
             default_quality: 1080,
             codec_pref: "vp9".into(),
@@ -1322,13 +1324,16 @@ mod settings_tests {
     use super::*;
 
     #[test]
-    fn theater_mode_round_trips_and_defaults_to_off() {
+    fn theater_settings_round_trip_and_default_to_off() {
         let old = settings_from_value(serde_json::json!({}));
         assert!(!old.theater_mode);
+        assert!(!old.theater_full_height);
 
-        let enabled = Settings { theater_mode: true, ..old };
+        let enabled = Settings { theater_mode: true, theater_full_height: true, ..old };
         let saved = serde_json::to_value(enabled).unwrap();
-        assert!(settings_from_value(saved).theater_mode);
+        let restored = settings_from_value(saved);
+        assert!(restored.theater_mode);
+        assert!(restored.theater_full_height);
     }
 
     #[test]
