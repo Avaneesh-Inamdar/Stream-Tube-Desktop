@@ -2085,7 +2085,7 @@ impl AppView {
                         .rounded_md()
                         .overflow_hidden()
                         .bg(p.chip)
-                        .child(img(j.video.thumbnail.clone()).size_full().rounded_md().object_fit(ObjectFit::Cover)),
+                        .child(img(j.video.thumbnail.clone()).size_full().aspect_ratio(72. / 40.).rounded_md().object_fit(ObjectFit::Cover)),
                 )
                 .child(
                     div()
