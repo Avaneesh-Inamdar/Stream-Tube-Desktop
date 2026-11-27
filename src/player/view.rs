@@ -277,6 +277,10 @@ impl Render for PlayerView {
                             // only converts colors, and the GPU scales the image for display.
                             let (vw, vh) = (vsize.0 as f32, vsize.1 as f32);
                             if vw > 0.0 && vh > 0.0 {
+                                // The software render API converts every frame on the
+                                // CPU. At full 1080p that costs ~150 ms, far beyond the
+                                // frame budget, so mpv drops most frames. Render at a
+                                // smaller target and let the GPU scale it up.
                                 let k = (1920.0 / vw).min(1080.0 / vh).min(1.0);
                                 m.set_render_size((vw * k) as u32, (vh * k) as u32);
                             } else {

@@ -398,9 +398,15 @@ impl Player {
             opts_owned.push(("log-file".into(), f));
         }
         let refs: Vec<(&str, &str)> = opts_owned.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-        match Mpv::new(&refs, move |ev| {
+        #[cfg(windows)]
+        let created = Mpv::new_gpu(&refs, move |ev| {
             let _ = tx.unbounded_send(ev);
-        }) {
+        });
+        #[cfg(not(windows))]
+        let created = Mpv::new(&refs, move |ev| {
+            let _ = tx.unbounded_send(ev);
+        });
+        match created {
             Ok(m) => {
                 self.mpv = Some(m.clone());
                 self.engine_generation += 1;
