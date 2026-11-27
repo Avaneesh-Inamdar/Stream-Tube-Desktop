@@ -2687,7 +2687,8 @@ impl AppView {
             .flex_none()
             .items_center()
             .h(px(56.))
-            .pl_4()
+            // macOS: room for the system's window buttons, which fullscreen hides
+            .pl(if cfg!(target_os = "macos") && !window.is_fullscreen() { px(84.) } else { px(16.) })
             .bg(p.bg)
             .child(
                 div()

@@ -207,8 +207,10 @@ fn main() {
             window_bounds: Some(requested_bounds),
             titlebar: Some(TitlebarOptions {
                 title: Some("Stream Tube".into()),
-                appears_transparent: !cfg!(target_os = "macos"),
-                ..Default::default()
+                appears_transparent: true,
+                // macOS: the system's buttons sit in the app's 56 px top bar, left of
+                // the menu button (the buttons are 12 px tall)
+                traffic_light_position: cfg!(target_os = "macos").then(|| point(px(16.), px(22.))),
             }),
             window_min_size: Some(size(px(720.), px(480.))),
             // GPUI draws an inactive window at most ~30 times a second by default, so a
