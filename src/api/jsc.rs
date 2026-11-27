@@ -117,7 +117,10 @@ pub fn runtime() -> Runtime {
 
 /// yt-dlp arguments for the Deno or Node.js found here. yt-dlp only looks for
 /// Deno by itself, and without a runtime it gets no formats from YouTube.
-pub fn ytdlp_args() -> Vec<String> {
+pub fn ytdlp_args(ytdlp: &str) -> Vec<String> {
+    if !ytdlp_has_js_runtimes(ytdlp) {
+        return Vec::new();
+    }
     let rt = runtime();
     let name = match rt.kind {
         Kind::Deno => "deno",
@@ -125,6 +128,25 @@ pub fn ytdlp_args() -> Vec<String> {
         Kind::Embedded => return Vec::new(),
     };
     vec!["--js-runtimes".into(), format!("{name}:{}", rt.path.display())]
+}
+
+/// Whether this yt-dlp knows --js-runtimes (2025.11.12 and later): older ones
+/// refuse to start with an unknown option. Rechecked when the file changes.
+fn ytdlp_has_js_runtimes(ytdlp: &str) -> bool {
+    type Seen = Vec<(String, Option<std::time::SystemTime>, bool)>;
+    static SEEN: Mutex<Seen> = Mutex::new(Vec::new());
+    let modified = std::fs::metadata(ytdlp).and_then(|m| m.modified()).ok();
+    if let Some((_, _, ok)) = SEEN.lock().iter().find(|(p, m, _)| p == ytdlp && *m == modified) {
+        return *ok;
+    }
+    let mut cmd = Command::new(ytdlp);
+    cmd.arg("--version");
+    crate::api::streams::hide_window(&mut cmd);
+    let ok = cmd.output().ok().and_then(|o| parse_version(&String::from_utf8_lossy(&o.stdout))).is_some_and(|v| v >= (2025, 11, 12));
+    let mut seen = SEEN.lock();
+    seen.retain(|(p, _, _)| p != ytdlp);
+    seen.push((ytdlp.to_string(), modified, ok));
+    ok
 }
 
 /// Directories the runtimes are usually installed to, for when the app was

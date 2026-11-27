@@ -105,6 +105,7 @@ fn main() {
     }
     perf::init();
     store::init();
+    api::web::remove_cookie_files(false);
     perf::mark("store");
     display::choose();
     perf::mark("display");

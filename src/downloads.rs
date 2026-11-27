@@ -297,6 +297,7 @@ fn run_job(job: &Job, track: Option<&CaptionTrack>, cancel: &AtomicBool, progres
     }
     let url = format!("https://www.youtube.com/watch?v={}", job.video.id);
     if let Some(bin) = streams::ytdlp_path() {
+        let sign_in = SignIn::default();
         let fmt = match job.format.as_str() {
             "audio" => "bestaudio[ext=m4a]/bestaudio".to_string(),
             // one file with video and audio (no FFmpeg needed)
@@ -304,12 +305,12 @@ fn run_job(job: &Job, track: Option<&CaptionTrack>, cancel: &AtomicBool, progres
             "best" => "bv*+ba/b".to_string(),
             h => format!("bv*[height<={h}]+ba/b[height<={h}]/b"),
         };
-        let res = match ytdlp_run(&bin, &dir, &url, &fmt, &s, &[], ytdlp_name.as_deref(), cancel, progress) {
+        let res = match ytdlp_run(&bin, &dir, &url, &fmt, &s, &[], ytdlp_name.as_deref(), &sign_in, cancel, progress) {
             Err(e) if e.to_string().contains("403") && !cancel.load(Ordering::SeqCst) => {
                 // a stream URL was refused: retry preferring the HLS formats, which don't need a PO token
                 progress(0.0, translate("Retrying…"));
                 let hls = format!("{}/{}", fmt.replace("bv*", "bv*[protocol^=m3u8]"), fmt);
-                ytdlp_run(&bin, &dir, &url, &hls, &s, &[], ytdlp_name.as_deref(), cancel, progress)
+                ytdlp_run(&bin, &dir, &url, &hls, &s, &[], ytdlp_name.as_deref(), &sign_in, cancel, progress)
             }
             other => other,
         };
@@ -318,7 +319,7 @@ fn run_job(job: &Job, track: Option<&CaptionTrack>, cancel: &AtomicBool, progres
                 // videos made for kids are refused to yt-dlp's default clients;
                 // the iOS client still serves them (its HLS formats need no PO token)
                 progress(0.0, translate("Retrying…"));
-                match ytdlp_run(&bin, &dir, &url, &fmt, &s, &["--extractor-args", YTDLP_IOS], ytdlp_name.as_deref(), cancel, progress) {
+                match ytdlp_run(&bin, &dir, &url, &fmt, &s, &["--extractor-args", YTDLP_IOS], ytdlp_name.as_deref(), &sign_in, cancel, progress) {
                     Err(e2) if e2.to_string() == "cancelled" => Err(e2),
                     Err(_) if !cancel.load(Ordering::SeqCst) => {
                         // yt-dlp found no formats either: download the HLS manifest the
@@ -327,7 +328,7 @@ fn run_job(job: &Job, track: Option<&CaptionTrack>, cancel: &AtomicBool, progres
                             Ok(manifest) => {
                                 let fmt = if job.format == "single" { "bv*+ba/b".to_string() } else { fmt.clone() };
                                 let name = ytdlp_name.clone().unwrap_or_else(|| format!("{} [{}]", sanitize(&job.video.title).trim_end_matches('.').replace('%', "%%"), job.video.id));
-                                ytdlp_run(&bin, &dir, &manifest, &fmt, &s, &[], Some(&name), cancel, progress)
+                                ytdlp_run(&bin, &dir, &manifest, &fmt, &s, &[], Some(&name), &sign_in, cancel, progress)
                                     .map_err(|e3| if e3.to_string() == "cancelled" { e3 } else { e })
                             }
                             Err(_) => Err(e),
@@ -352,34 +353,66 @@ pub fn retry_with_ios(err: &str) -> bool {
     !e.contains("cancelled") && (e.contains("not available") || e.contains("unavailable") || e.contains("requested format") || e.contains("reloaded"))
 }
 
+/// The browser sign-in's cookies for yt-dlp during one download: written at the
+/// job's first sign-in error, reused by its later retries, removed when it ends.
+#[derive(Default)]
+struct SignIn(std::cell::RefCell<Option<std::path::PathBuf>>);
+
+impl SignIn {
+    fn path(&self) -> Option<String> {
+        self.0.borrow().as_ref().map(|p| p.to_string_lossy().into_owned())
+    }
+
+    /// Writes the cookies file; false when no browser session is connected.
+    fn start(&self) -> bool {
+        if self.0.borrow().is_none() {
+            *self.0.borrow_mut() = crate::api::web::write_cookies_file();
+        }
+        self.0.borrow().is_some()
+    }
+}
+
+impl Drop for SignIn {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.get_mut().take() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
 /// `name`: the file name without extension, when the URL isn't a YouTube page
 /// (yt-dlp would otherwise name the file after the manifest).
 ///
 /// When YouTube refuses the anonymous request (bot check, sign-in required), the
-/// run is repeated with the browser sign-in's cookies, as playback does.
+/// run is repeated with the browser sign-in's cookies, as playback does; later
+/// runs of the same download then use them straight away.
 #[allow(clippy::too_many_arguments)]
-fn ytdlp_run(bin: &str, dir: &std::path::Path, url: &str, fmt: &str, s: &store::Settings, extra: &[&str], name: Option<&str>, cancel: &AtomicBool, progress: &dyn Fn(f32, &str)) -> anyhow::Result<String> {
-    let res = match ytdlp_run_once(bin, dir, url, fmt, s, extra, name, cancel, progress) {
-        Err(e) if !cancel.load(Ordering::SeqCst) && streams::needs_sign_in(&e.to_string()) => match crate::api::web::write_cookies_file() {
-            Some(cookies) => {
+fn ytdlp_run(bin: &str, dir: &std::path::Path, url: &str, fmt: &str, s: &store::Settings, extra: &[&str], name: Option<&str>, sign_in: &SignIn, cancel: &AtomicBool, progress: &dyn Fn(f32, &str)) -> anyhow::Result<String> {
+    // yt-dlp drops the iOS client when given cookies, and a manifest isn't a YouTube page
+    let can_sign_in = !extra.contains(&YTDLP_IOS) && url.starts_with("https://www.youtube.com/watch");
+    let with_cookies = |path: &str| {
+        let mut args = extra.to_vec();
+        args.extend(["--cookies", path]);
+        ytdlp_run_once(bin, dir, url, fmt, s, &args, name, cancel, progress)
+    };
+    let res = match sign_in.path().filter(|_| can_sign_in) {
+        Some(path) => with_cookies(&path),
+        None => match ytdlp_run_once(bin, dir, url, fmt, s, extra, name, cancel, progress) {
+            Err(e) if can_sign_in && !cancel.load(Ordering::SeqCst) && streams::needs_sign_in(&e.to_string()) && sign_in.start() => {
                 progress(0.0, translate("Retrying…"));
-                let path = cookies.to_string_lossy().into_owned();
-                let mut args = extra.to_vec();
-                args.extend(["--cookies", path.as_str()]);
-                let res = ytdlp_run_once(bin, dir, url, fmt, s, &args, name, cancel, progress);
-                let _ = std::fs::remove_file(&cookies);
-                res
+                with_cookies(&sign_in.path().unwrap_or_default())
             }
-            None => Err(e),
+            other => other,
         },
-        other => other,
     };
     res.map_err(|e| {
         let msg = e.to_string();
-        if msg.contains("confirm you") && msg.contains("bot") {
-            anyhow::anyhow!("YouTube asked for a bot check. Connect a browser session under \u{201c}YouTube watch history\u{201d} in Settings, turn on \"Use IPv4 only\" in Settings → Network, or update yt-dlp.")
-        } else {
+        if !(msg.contains("confirm you") && msg.contains("bot")) {
             e
+        } else if sign_in.path().is_some() || crate::api::web::connected() {
+            anyhow::anyhow!("YouTube asked for a bot check even with your account. Turn on \"Use IPv4 only\" in Settings → Network, or update yt-dlp.")
+        } else {
+            anyhow::anyhow!("YouTube asked for a bot check. Connect a browser session under \u{201c}YouTube watch history\u{201d} in Settings, turn on \"Use IPv4 only\" in Settings → Network, or update yt-dlp.")
         }
     })
 }
@@ -389,7 +422,7 @@ fn ytdlp_run_once(bin: &str, dir: &std::path::Path, url: &str, fmt: &str, s: &st
     {
         let mut cmd = Command::new(bin);
         cmd.args(extra);
-        cmd.args(crate::api::jsc::ytdlp_args());
+        cmd.args(crate::api::jsc::ytdlp_args(bin));
         // stderr is otherwise in the console code page (cp1251, cp1252…), which
         // isn't UTF-8 and would lose the error text
         cmd.args(["--encoding", "utf-8"]);
@@ -1058,12 +1091,12 @@ mod kids_download_tests {
         let url = "https://www.youtube.com/watch?v=e_04ZrNroTo";
         let fmt = "bv*[height<=360]+ba/b[height<=360]/b";
         // yt-dlp alone fails, with an error that leads to the retries
-        if let Err(e) = super::ytdlp_run(&bin, &dir, url, fmt, &s, &["--extractor-args", super::YTDLP_IOS], None, &cancel, &|_, _| {}) {
+        if let Err(e) = super::ytdlp_run(&bin, &dir, url, fmt, &s, &["--extractor-args", super::YTDLP_IOS], None, &super::SignIn::default(), &cancel, &|_, _| {}) {
             println!("yt-dlp iOS: {e}");
         }
         let manifest = crate::api::streams::ios_hls_manifest("e_04ZrNroTo").unwrap();
         let name = format!("{} [e_04ZrNroTo]", super::sanitize("Kids: test / video?").replace('%', "%%"));
-        let path = super::ytdlp_run(&bin, &dir, &manifest, fmt, &s, &[], Some(&name), &cancel, &|p, d| println!("{p:.2} {d}")).unwrap();
+        let path = super::ytdlp_run(&bin, &dir, &manifest, fmt, &s, &[], Some(&name), &super::SignIn::default(), &cancel, &|p, d| println!("{p:.2} {d}")).unwrap();
         println!("{path}");
         assert!(path.contains("e_04ZrNroTo"));
         assert!(std::fs::metadata(&path).unwrap().len() > 1_000_000);

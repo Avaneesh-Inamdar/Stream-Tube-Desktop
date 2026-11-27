@@ -73,6 +73,20 @@ pub fn disconnect() {
     let mut s = session().lock();
     *s = None;
     save(None);
+    remove_cookie_files(true);
+}
+
+/// Deletes the cookie files written for yt-dlp: all of them, or (`all` false) the
+/// ones left by earlier runs, e.g. when the app quit during a download.
+pub fn remove_cookie_files(all: bool) {
+    let own = format!("yt-dlp-cookies-{}-", std::process::id());
+    let Ok(dir) = std::fs::read_dir(crate::store::data_dir()) else { return };
+    for entry in dir.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("yt-dlp-cookies-") && name.ends_with(".txt") && (all || !name.starts_with(&own)) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Stores a set of youtube.com cookies and checks they belong to a signed-in account.

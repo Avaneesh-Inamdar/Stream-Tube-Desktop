@@ -1014,11 +1014,11 @@ fn with_sign_in_fallback(video_id: &str, res: Result<StreamInfo>) -> Result<Stre
 
 fn ytdlp_streams_with(video_id: &str, cookies: Option<&std::path::Path>) -> Result<StreamInfo> {
     let bin = ytdlp_path().ok_or_else(|| anyhow!("yt-dlp not found (install it or set its path in Settings)"))?;
-    let mut cmd = Command::new(bin);
+    let mut cmd = Command::new(&bin);
     // The app chooses its own tracks. Request the inventory even when
     // yt-dlp cannot choose a default download format.
     cmd.args(["-J", "--ignore-no-formats-error", "--no-playlist"]);
-    cmd.args(crate::api::jsc::ytdlp_args());
+    cmd.args(crate::api::jsc::ytdlp_args(&bin));
     if let Some(c) = cookies {
         cmd.arg("--cookies").arg(c);
     }
