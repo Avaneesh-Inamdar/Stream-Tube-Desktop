@@ -389,7 +389,7 @@ fn video_title(id: impl Into<ElementId>, title: String) -> Stateful<Div> {
     let full_title = title.clone();
     div()
         .id("video-title")
-        .line_clamp(2)
+        .text_ellipsis().line_clamp(2)
         .tooltip(move |window, cx| Tooltip::new(full_title.clone()).max_w(px(420.)).build(window, cx))
         .child(gpui_kit::base::SelectableText::new(id, title))
 }
@@ -628,7 +628,7 @@ pub fn video_row(v: &VideoItem, thumb_w: Pixels, cx: &mut App) -> AnyElement {
                         div()
                             .text_xs()
                             .text_color(p.text2)
-                            .line_clamp(2)
+                            .text_ellipsis().line_clamp(2)
                             .child(gpui_kit::base::SelectableText::new(SharedString::from(format!("vrd-{}", v.id)), s)),
                     )
                 }),
@@ -750,7 +750,7 @@ pub fn channel_row(c: &ChannelItem, thumb_w: Pixels, cx: &mut App) -> AnyElement
                     )),
                 )
                 .when_some(c.description.clone(), |d, s| {
-                    d.child(div().text_xs().text_color(p.text2).line_clamp(2).child(gpui_kit::base::SelectableText::new(SharedString::from(format!("chr-d-{}", c.id)), s)))
+                    d.child(div().text_xs().text_color(p.text2).text_ellipsis().line_clamp(2).child(gpui_kit::base::SelectableText::new(SharedString::from(format!("chr-d-{}", c.id)), s)))
                 }),
         )
         .child(subscribe_button(SharedString::from(format!("chs-{}", c.id)), &c2, subscribed, cx))
@@ -825,7 +825,7 @@ pub fn channel_card(c: &ChannelItem, width: Pixels, cx: &mut App) -> AnyElement 
             navigate(Route::Channel(id.clone()), window, cx)
         })
         .child(avatar(c.avatar.as_deref(), px(104.), &c.name, cx))
-        .child(div().text_base().text_color(p.text).text_center().line_clamp(1).child(gpui_kit::base::SelectableText::new(SharedString::from(format!("ccn-{}", c.id)), c.name.clone())))
+        .child(div().text_base().text_color(p.text).text_center().text_ellipsis().line_clamp(1).child(gpui_kit::base::SelectableText::new(SharedString::from(format!("ccn-{}", c.id)), c.name.clone())))
         .when_some(c.subscribers_text.clone().filter(|_| !store::settings_snapshot().hide_subscriber_counts), |d, s| d.child(div().text_xs().text_color(p.text2).child(s)))
         .child(subscribe_button(SharedString::from(format!("ccs-{}", c.id)), c, subscribed, cx))
         .into_any_element()
@@ -859,7 +859,7 @@ pub fn playlist_card(pl: &PlaylistItem, width: Pixels, cx: &mut App) -> AnyEleme
                         .text_base()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(p.text)
-                        .line_clamp(2)
+                        .text_ellipsis().line_clamp(2)
                         .child(gpui_kit::base::SelectableText::new(SharedString::from(format!("pct-{}", pl.id)), pl.title.clone())),
                 )
                 .when_some(pl.channel_name.clone(), |d, c| d.child(div().text_sm().text_color(p.text2).truncate().child(c)))
@@ -937,7 +937,7 @@ pub fn playlist_row(pl: &PlaylistItem, thumb_w: Pixels, cx: &mut App) -> AnyElem
                 .gap_1()
                 .flex_1()
                 .min_w_0()
-                .child(div().text_lg().text_color(p.text).line_clamp(2).child(gpui_kit::base::SelectableText::new(SharedString::from(format!("prt-{}", pl.id)), pl.title.clone())))
+                .child(div().text_lg().text_color(p.text).text_ellipsis().line_clamp(2).child(gpui_kit::base::SelectableText::new(SharedString::from(format!("prt-{}", pl.id)), pl.title.clone())))
                 .when_some(pl.channel_name.clone(), |d, c| d.child(div().text_xs().text_color(p.text2).child(c)))
                 .child(div().text_xs().text_color(p.text2).font_weight(FontWeight::MEDIUM).child(t("View full playlist"))),
         )

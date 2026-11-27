@@ -269,11 +269,22 @@ fn settings_search_text(text: &str) -> String {
     text.replace(['İ', 'ı'], "i").to_lowercase()
 }
 
+thread_local! {
+    /// rows that matched the settings search in the section being drawn
+    static HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn matches_settings_search(labels: &[&str]) -> bool {
     QUERY.with(|query| {
         let query = query.borrow();
-        query.is_empty()
-            || labels.iter().any(|label| settings_search_text(label).contains(query.as_str()))
+        if query.is_empty() {
+            return true;
+        }
+        let hit = labels.iter().any(|label| settings_search_text(label).contains(query.as_str()));
+        if hit {
+            HITS.with(|h| h.set(h.get() + 1));
+        }
+        hit
     })
 }
 
@@ -1381,8 +1392,18 @@ impl Render for SettingsPage {
         if !query.is_empty() {
             // search: matching rows from every section
             let mut all = div().flex().flex_col().gap_4();
+            let mut any = false;
             for (sec, name, _) in SECTIONS {
-                all = all.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text2).child(t(name).to_uppercase())).child(render_section(self, *sec, cx));
+                // only the sections with a matching row (an empty card read as a broken page)
+                HITS.with(|h| h.set(0));
+                let section = render_section(self, *sec, cx);
+                if HITS.with(|h| h.get()) > 0 {
+                    any = true;
+                    all = all.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text2).child(t(name).to_uppercase())).child(section);
+                }
+            }
+            if !any {
+                all = all.child(div().text_sm().text_color(p.text2).child(t("No settings match your search")));
             }
             QUERY.with(|q| q.borrow_mut().clear());
             return page_scroll("settings-scroll", &self.scroll).child(

@@ -952,7 +952,7 @@ impl WatchPage {
                                 .cursor_pointer()
                                 .hover(move |s| s.bg(p.hover))
                                 .when_some(c.thumbnail.clone(), |d, th| d.child(img(SharedString::from(th)).w(px(152.)).h(px(86.)).rounded(radius)))
-                                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text).line_clamp(2).child(c.title.clone()))
+                                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text).text_ellipsis().line_clamp(2).child(c.title.clone()))
                                 .child(div().text_xs().text_color(p.link).child(crate::api::json::format_duration(t as u64)))
                                 .on_click(move |_, window, cx| {
                                     cx.stop_propagation();
@@ -1443,7 +1443,7 @@ impl WatchPage {
                             .flex_1()
                             .min_w_0()
                             .gap_1()
-                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).line_clamp(2).child(c.title.clone()))
+                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).text_ellipsis().line_clamp(2).child(c.title.clone()))
                             .child(
                                 div()
                                     .w_auto()
@@ -1849,7 +1849,7 @@ impl WatchPage {
                                     .flex_col()
                                     .flex_1()
                                     .min_w_0()
-                                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).line_clamp(2).child(pl.title.clone()))
+                                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).text_ellipsis().line_clamp(2).child(pl.title.clone()))
                                     .when_some(pl.channel_name.clone(), |d, c| d.child(div().text_xs().text_color(p.text2).child(c))),
                             ),
                     );
