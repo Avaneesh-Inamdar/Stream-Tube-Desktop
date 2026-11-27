@@ -18,6 +18,32 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new(reload, Reload, Some("StreamTube"))]);
 }
 
+use std::cell::Cell;
+use std::rc::Rc;
+
+#[cfg(target_os = "macos")]
+use crate::macos::{natural_scrolling, swipe_between_pages};
+#[cfg(not(target_os = "macos"))]
+fn swipe_between_pages() -> bool {
+    false
+}
+#[cfg(not(target_os = "macos"))]
+fn natural_scrolling() -> bool {
+    true
+}
+
+/// A two-finger sideways swipe on the trackpad goes back or forward, as in a browser:
+/// how far it has gone, from the start of the touch to the fingers lifting.
+#[derive(Default)]
+struct Swipe {
+    tracking: bool,
+    dx: f32,
+    dy: f32,
+}
+
+/// How far the fingers travel for a swipe to go back or forward.
+const SWIPE_DISTANCE: f32 = 140.0;
+
 // ───────────────────────── routes ─────────────────────────
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -731,6 +757,24 @@ impl Render for Shell {
             .children(main)
             .children(preview)
             .children(mini)
+            // trackpad swipes back / forward over the whole window, the video included
+            // (drawn above the page, it would keep them from the page's own listeners)
+            .child({
+                let app = self.app.downgrade();
+                canvas(
+                    |_, _, _| {},
+                    move |_, _, window, _| {
+                        let app = app.clone();
+                        window.on_mouse_event(move |ev: &ScrollEvent, phase, window, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = app.update(cx, |app, cx| app.on_swipe(ev, window, cx));
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .size_full()
+            })
     }
 }
 
@@ -772,6 +816,9 @@ pub struct AppView {
     /// sidebar lists read from the database, refreshed when `store::generation` moves
     sidebar_cache: Option<SidebarData>,
     last_bounds_save: std::time::Instant,
+    swipe: Swipe,
+    /// the tab strip, which scrolls sideways itself
+    tabs_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     dialog: Option<Dialog>,
     /// the signed-in account's playlists for the Save dialog (None while loading)
     yt_playlists: Option<Vec<PlaylistItem>>,
@@ -1028,6 +1075,8 @@ impl AppView {
             shown_video: None,
             sidebar_cache: None,
             last_bounds_save: std::time::Instant::now(),
+            swipe: Swipe::default(),
+            tabs_bounds: Rc::default(),
             dialog: None,
             yt_playlists: None,
             yt_playlist_session: None,
@@ -1834,6 +1883,7 @@ impl AppView {
 
     fn render_tabs(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.tabs.len() < 2 && !store::settings_snapshot().always_show_tab_bar {
+            self.tabs_bounds.set(None);
             return None;
         }
         let p = pal(cx);
@@ -1848,7 +1898,11 @@ impl AppView {
             .bg(p.bg)
             .border_b_1()
             .border_color(p.border)
-            .overflow_x_scroll();
+            .overflow_x_scroll()
+            .child({
+                let tabs_bounds = self.tabs_bounds.clone();
+                canvas(move |b, _, _| tabs_bounds.set(Some(b)), |_, _, _, _| {}).absolute().size_full()
+            });
         for i in 0..self.tabs.len() {
             let active = i == self.active_tab;
             let pinned = self.tabs[i].pinned;
@@ -1995,6 +2049,78 @@ impl AppView {
             window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
             cx.notify();
         }
+    }
+
+    fn on_swipe(&mut self, ev: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // a mouse wheel has no touch, and other platforms don't report one
+        if !cfg!(target_os = "macos") || !ev.delta.precise() {
+            return;
+        }
+        match ev.touch_phase {
+            TouchPhase::Started => {
+                let over_tabs = self.tabs_bounds.get().is_some_and(|b| b.contains(&ev.position));
+                self.swipe = Swipe { tracking: !over_tabs && swipe_between_pages(), ..Default::default() };
+            }
+            TouchPhase::Moved if self.swipe.tracking => {
+                let d = ev.delta.pixel_delta(window.line_height());
+                self.swipe.dx += f32::from(d.x);
+                self.swipe.dy += f32::from(d.y);
+                // a page being scrolled up or down
+                if self.swipe.dy.abs() > 24.0 && self.swipe.dy.abs() > self.swipe.dx.abs() {
+                    self.swipe.tracking = false;
+                }
+                cx.notify();
+            }
+            TouchPhase::Ended if self.swipe.tracking => {
+                let swiped = self.swipe_progress().filter(|(_, progress)| *progress >= 1.0);
+                self.swipe = Swipe::default();
+                match swiped {
+                    Some((true, _)) => self.back(window, cx),
+                    Some((false, _)) => self.forward(window, cx),
+                    None => {}
+                }
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    /// Back (true) or forward and how far towards going there, during a sideways swipe
+    /// that can go somewhere.
+    fn swipe_progress(&self) -> Option<(bool, f32)> {
+        let s = &self.swipe;
+        if !s.tracking || s.dx.abs() < 2.5 * s.dy.abs() {
+            return None;
+        }
+        // the fingers moving right go back; with natural scrolling the content follows them
+        let back = (s.dx > 0.0) == natural_scrolling();
+        let possible = if back { !self.history.is_empty() } else { !self.forward.is_empty() };
+        possible.then(|| (back, s.dx.abs() / SWIPE_DISTANCE))
+    }
+
+    /// The arrow that slides in from the window's edge during a swipe, filled once
+    /// letting go would go back or forward.
+    fn render_swipe(&self, cx: &App) -> Option<impl IntoElement> {
+        let (back, progress) = self.swipe_progress().filter(|(_, progress)| *progress > 0.15)?;
+        let p = pal(cx);
+        let ready = progress >= 1.0;
+        let offset = px(-44. + 60. * progress.min(1.0));
+        Some(deferred(
+            div()
+                .absolute()
+                .top(relative(0.5))
+                .mt(px(-22.))
+                .when(back, |d| d.left(offset))
+                .when(!back, |d| d.right(offset))
+                .size(px(44.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(if ready { p.accent } else { p.chip })
+                .opacity(progress.min(1.0))
+                .child(icon(if back { "arrow-left" } else { "arrow-right" }).size_5().text_color(if ready { white() } else { p.text })),
+        ))
     }
 
     pub fn forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3977,7 +4103,7 @@ impl Render for AppView {
             // deferred: drawn above the player, which `Shell` draws over this view
             root = root.children(self.render_drawer(cx).map(deferred));
         }
-        root = root.children(self.render_dl_panel(cx));
+        root = root.children(self.render_dl_panel(cx)).children(self.render_swipe(cx));
         root = root.children(self.render_menu(cx)).children(self.render_dialog(cx)).child(deferred(self.render_toasts(cx)));
         root
     }
