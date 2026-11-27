@@ -104,15 +104,16 @@ fn main() {
         std::env::set_var("NO_PROXY", "127.0.0.1,localhost,::1");
     }
     perf::init();
-    store::init();
-    perf::mark("store");
-    display::choose();
-    perf::mark("display");
-    // one running app: a second launch (e.g. a clicked streamtube: link) hands over and exits
+    // one running app: a second launch (e.g. a clicked streamtube: link) hands over and
+    // exits before it opens the database the running one is using
     let arg = std::env::args().nth(1).unwrap_or_default();
     if !display::relaunched() && links::forward_to_running(&arg) {
         return;
     }
+    store::init();
+    perf::mark("store");
+    display::choose();
+    perf::mark("display");
     let incoming = links::listen();
     perf::mark("links");
     gpui_kit::application()
