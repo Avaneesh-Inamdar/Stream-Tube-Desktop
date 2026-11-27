@@ -104,6 +104,7 @@ impl ChannelPage {
         self.searching = None;
         self.tab_items = Load::Loading;
         self.continuation = None;
+        self.loading_more = false;
         self.sorts.clear();
         self.serial += 1;
         let serial = self.serial;
@@ -133,6 +134,7 @@ impl ChannelPage {
         self.searching = Some(q.clone());
         self.tab_items = Load::Loading;
         self.continuation = None;
+        self.loading_more = false;
         self.serial += 1;
         let serial = self.serial;
         let id = self.id.clone();
@@ -199,11 +201,13 @@ impl ChannelPage {
         cx.spawn(async move |this, cx| {
             let res = blocking(move || innertube::browse_continue(&tok)).await;
             let _ = this.update(cx, |this, cx| {
-                this.loading_more = false;
-                // the tab, order or search changed meanwhile
+                // the tab, order or search changed meanwhile: the new list owns
+                // loading_more now, and resetting it here would let a second
+                // request for the same page start while the first one runs
                 if this.serial != serial {
                     return;
                 }
+                this.loading_more = false;
                 match res {
                     Ok(mut p) => {
                         fill_channel(&mut p.items, info.as_ref());
