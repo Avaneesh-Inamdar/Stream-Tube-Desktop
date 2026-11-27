@@ -23,6 +23,8 @@ libloading = "0.9"
 image = { version = "0.25", default-features = false }
 futures = "0.3"
 smallvec = "1"
+unicode-linebreak = "0.1"
+unicode-segmentation = "1"
 rand = "0.9"
 open = "5"
 raw-window-handle = "0.6"

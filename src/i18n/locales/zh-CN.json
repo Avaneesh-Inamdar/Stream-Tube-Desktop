@@ -1,4 +1,8 @@
 {
+  "File name": "文件名",
+  "Use {title}, {channel} and {id}. Leave empty for the default": "可使用 {title}、{channel} 和 {id}。留空则使用默认名称",
+  "If Google says the browser or app may not be secure, use a cookies.txt file exported from a browser where you're signed in.": "如果 Google 提示此浏览器或应用可能不安全，请使用从已登录的浏览器导出的 cookies.txt 文件。",
+  "Nothing to import in this file": "此文件中没有可导入的内容",
   "Write a reply": "写回复",
   "Write a comment": "写评论",
   "Reply posted": "回复已发布",

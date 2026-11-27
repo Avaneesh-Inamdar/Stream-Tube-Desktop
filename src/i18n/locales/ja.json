@@ -1,4 +1,8 @@
 {
+  "File name": "ファイル名",
+  "Use {title}, {channel} and {id}. Leave empty for the default": "{title}、{channel}、{id} が使えます。空欄にすると既定の名前になります",
+  "If Google says the browser or app may not be secure, use a cookies.txt file exported from a browser where you're signed in.": "Google に「ブラウザまたはアプリが安全でない可能性があります」と表示された場合は、ログイン済みのブラウザからエクスポートした cookies.txt ファイルを使ってください。",
+  "Nothing to import in this file": "このファイルにはインポートできるものがありません",
   "Write a reply": "返信を書く",
   "Write a comment": "コメントを書く",
   "Reply posted": "返信を投稿しました",

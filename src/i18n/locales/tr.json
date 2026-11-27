@@ -1,4 +1,8 @@
 {
+  "File name": "Dosya adı",
+  "Use {title}, {channel} and {id}. Leave empty for the default": "{title}, {channel} ve {id} kullanın. Varsayılan ad için boş bırakın",
+  "If Google says the browser or app may not be secure, use a cookies.txt file exported from a browser where you're signed in.": "Google tarayıcının veya uygulamanın güvenli olmayabileceğini söylerse, oturum açtığınız bir tarayıcıdan dışa aktarılmış bir cookies.txt dosyası kullanın.",
+  "Nothing to import in this file": "Bu dosyada içe aktarılacak bir şey yok",
   "Write a reply": "Yanıt yazın",
   "Write a comment": "Yorum yazın",
   "Reply posted": "Yanıt yayımlandı",
