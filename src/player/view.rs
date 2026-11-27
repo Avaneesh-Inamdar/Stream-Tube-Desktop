@@ -246,6 +246,9 @@ impl PlayerView {
             return;
         }
         if self.comp_tick.is_none() {
+            if let Some(db) = pl.compressor_reduction_db() {
+                self.comp_reduction_db = db;
+            }
             self.comp_tick = Some(cx.spawn(async move |this, cx| loop {
                 cx.background_executor().timer(Duration::from_millis(120)).await;
                 if this.update(cx, |this, cx| {
@@ -1817,7 +1820,7 @@ impl PlayerView {
     fn render_compressor_button(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let p = pal(cx);
         let enabled = self.player.read(cx).compressor_enabled;
-        let reducing = self.comp_reduction_db >= 1.0;
+        let reducing = self.comp_reduction_db >= 0.5;
         div()
             .relative()
             .flex_none()
@@ -1869,7 +1872,7 @@ impl PlayerView {
         let reduction = self.comp_reduction_db.round() as u32;
         let (status, description) = if !enabled {
             (translate("Off").to_string(), translate("Evens out sudden volume spikes").to_string())
-        } else if self.comp_reduction_db >= 1.0 {
+        } else if self.comp_reduction_db >= 0.5 {
             (tf!("-{0} dB", reduction), tf!("Reducing loud audio by {0} dB", reduction))
         } else {
             (translate("0 dB").to_string(), translate("Active — audio level is normal").to_string())
