@@ -213,6 +213,12 @@ pub fn go_back(window: &mut Window, cx: &mut App) {
     }
 }
 
+pub fn go_forward(window: &mut Window, cx: &mut App) {
+    if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+        app.update(cx, |a, cx| a.forward(window, cx));
+    }
+}
+
 /// Leaves the watch page while keeping playback (mini player).
 pub fn go_back_keep_playing(window: &mut Window, cx: &mut App) {
     exit_fullscreen(window, cx);
