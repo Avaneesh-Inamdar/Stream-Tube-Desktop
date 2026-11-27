@@ -74,6 +74,7 @@ pub struct WatchPage {
     chapters_ticker: Option<Task<()>>,
     chapters_shown: Option<usize>,
     _sub: Subscription,
+    _music: Subscription,
 }
 
 /// The chapters panel beside the player is open (toggled from the player's
@@ -172,8 +173,14 @@ impl WatchPage {
             chapters_ticker: None,
             chapters_shown: None,
             _sub: sub,
+            _music: cx.observe_global::<crate::ui::music::MusicMode>(|_, cx| cx.notify()),
         };
         CHAPTERS_OPEN.store(false, std::sync::atomic::Ordering::SeqCst);
+        crate::ui::music::note_playlist(s.playlist_id.as_deref(), cx);
+        if s.playlist_id.as_deref().is_some_and(|l| l.starts_with("RD")) {
+            // a mix (from the Music page or a link): listening rather than watching
+            crate::ui::music::offer(cx);
+        }
         s.make_chat(window, cx);
         s.load(cx);
         s
@@ -498,6 +505,9 @@ impl WatchPage {
                         });
                         let comments_token = w.comments_token.clone();
                         let has_chat = w.live_chat.is_some();
+                        if let (Some(pid), Some(list)) = (this.playlist_id.clone(), w.playlist.as_ref()) {
+                            crate::ui::music::note_playlist_title(&pid, &list.title, cx);
+                        }
                         this.info = Load::Ready(w);
                         if has_chat {
                             this.start_chat(cx);
@@ -1581,16 +1591,21 @@ impl WatchPage {
                         // the panel's overflow_hidden clips to a rectangle, so the header rounds its own top corners
                         .rounded_t_xl()
                         .bg(p.surface)
+                        .gap_2()
                         .child(
+                            // a long title is cut short so the buttons stay in the panel
                             div()
                                 .flex()
                                 .flex_col()
-                                .child(selectable_text("queue-title", title).text_base().font_weight(FontWeight::BOLD).text_color(p.text))
+                                .flex_1()
+                                .min_w_0()
+                                .child(selectable_text("queue-title", title).text_base().font_weight(FontWeight::BOLD).text_color(p.text).truncate())
                                 .child(div().text_xs().text_color(p.text2).child(format!("{} / {}", pos.map(|p| p + 1).unwrap_or(0), queue.len()))),
                         )
                         .child(
                             div()
                                 .flex()
+                                .flex_none()
                                 .child(icon_button("q-shuffle", "shuffle", cx).on_click(move |_, _, cx| {
                                     plc2.update(cx, |p, cx| p.shuffle_queue(cx));
                                 }))
@@ -1602,6 +1617,172 @@ impl WatchPage {
                 .child(nested_scroll("queue-wrap", list))
                 .into_any_element(),
         )
+    }
+
+    /// Music mode's "Now playing": the cover art (or the video) and what plays next,
+    /// laid out like YouTube Music.
+    fn render_now_playing(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::ui::music;
+        let p = pal(cx);
+        let ui = *cx.global::<UiState>();
+        let m = music::state(cx);
+        let (id, title, channel, queue, pos) = {
+            let r = self.player.read(cx);
+            let (id, title, channel) = r
+                .video
+                .as_ref()
+                .map(|v| (v.id.clone(), v.title.clone(), v.channel_name.clone()))
+                .unwrap_or_else(|| (self.id.clone(), String::new(), String::new()));
+            (id, title, channel, r.queue.clone(), r.queue_pos)
+        };
+        let width = ui.content_width.max(px(320.));
+        // the page area: the window minus the top bar and the music bar
+        let height = (ui.viewport.height - px(56. + music::BAR_HEIGHT)).max(px(240.));
+        let two_col = width > px(900.);
+        let side_w = if two_col { px(440.) } else { width };
+        let art_w = if two_col { width - side_w - px(48.) } else { width };
+        let art_h = height - px(48. + 56. + 72.);
+
+        let segment = |label: &'static str, video: bool| {
+            let active = m.video == video;
+            div()
+                .id(label)
+                .px_4()
+                .py_1()
+                .rounded_full()
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .cursor_pointer()
+                .when(active, |d| d.bg(p.chip_active_bg).text_color(p.chip_active_fg))
+                .when(!active, |d| d.text_color(p.text2).hover(|s| s.text_color(p.text)))
+                .child(translate(label).to_string())
+                .on_click(move |_, _, cx| music::set_video(video, cx))
+        };
+        let toggle = div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(div().flex().gap_1().p_1().rounded_full().bg(p.chip).child(segment("Song", false)).child(segment("Video", true)))
+            // back to the regular watch page with comments and related videos
+            .child(pill("music-leave", Some("x"), "Leave music mode", cx).on_click(|_, _, cx| music::set(false, cx)));
+        let art = if m.video {
+            let w = art_w.min(art_h * (16. / 9.));
+            div().w(w).h(w * (9. / 16.)).rounded_xl().overflow_hidden().bg(black()).child(crate::ui::slot::player_slot(cx))
+        } else {
+            let size = art_w.min(art_h).min(px(720.));
+            div().size(size).rounded_xl().overflow_hidden().bg(p.surface).shadow_2xl().child(music::cover(&id, px(12.)))
+        };
+        let left = div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_5()
+            .w(art_w)
+            .h(height - px(48.))
+            .child(toggle)
+            .child(art)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .max_w(art_w)
+                    .child(div().text_xl().font_weight(FontWeight::BOLD).text_color(p.text).truncate().child(title))
+                    .child(div().text_base().text_color(p.text2).truncate().child(channel)),
+            );
+
+        let source = self
+            .info
+            .ready()
+            .and_then(|w| w.playlist.as_ref().map(|l| l.title.clone()))
+            // the next song's page is still loading: the list it plays from is known
+            .or_else(|| m.playlist_title.clone().filter(|(id, _)| self.playlist_id.as_ref() == Some(id)).map(|(_, t)| t))
+            .unwrap_or_else(|| translate("Up next").to_string());
+        let mut list = div().id("music-queue").flex().flex_col().flex_1().min_h_0().overflow_y_scroll();
+        if queue.len() > 1 {
+            for (i, v) in queue.iter().enumerate() {
+                let current = pos == Some(i);
+                let pl = self.player.clone();
+                list = list.child(
+                    div()
+                        .id(("music-q", i))
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .px_2()
+                        .py_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .when(current, |d| d.bg(p.surface2))
+                        .hover(move |s| s.bg(p.hover))
+                        .on_click(move |_, _, cx| pl.update(cx, |p, cx| p.play_queue_index(i, cx)))
+                        .child(
+                            div()
+                                .relative()
+                                .size(px(48.))
+                                .flex_none()
+                                .rounded_sm()
+                                .overflow_hidden()
+                                .bg(p.surface)
+                                .child(music::cover(&v.id, px(4.)))
+                                .when(current, |d| {
+                                    d.child(div().absolute().inset_0().bg(hsla(0., 0., 0., 0.5)).flex().items_center().justify_center().child(icon("audio-lines").size_5().text_color(white())))
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(p.text).truncate().child(v.title.clone()))
+                                .child(div().text_sm().text_color(p.text2).truncate().child(v.channel_name.clone())),
+                        )
+                        .children(v.duration_text.clone().map(|d| div().flex_none().text_sm().text_color(p.text2).child(d))),
+                );
+            }
+        } else if let Some(w) = self.info.ready().cloned() {
+            // nothing queued: YouTube's suggestions, as autoplay would take them
+            list = list.child(self.render_related(&w, cx));
+        } else {
+            list = list.child(spinner(cx));
+        }
+        let right = div()
+            .flex()
+            .flex_col()
+            .w(side_w)
+            .h(height - px(48.))
+            .flex_none()
+            .child(
+                div()
+                    .flex()
+                    .pb_2()
+                    .mb_3()
+                    .border_b_1()
+                    .border_color(p.border)
+                    .child(div().pb_2().border_b_2().border_color(p.text).text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(translate("Up next").to_uppercase())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .pb_3()
+                    .child(div().text_xs().text_color(p.text2).child(translate("Playing from").to_string()))
+                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).truncate().child(source)),
+            )
+            .child(list);
+        div()
+            .size_full()
+            .flex()
+            .justify_center()
+            .gap_12()
+            .px_6()
+            .pt_6()
+            .when(!two_col, |d| d.flex_col().overflow_hidden())
+            .child(left)
+            .child(right)
+            .into_any_element()
     }
 
     fn render_related(&mut self, w: &WatchInfo, cx: &mut Context<Self>) -> AnyElement {
@@ -1719,6 +1900,9 @@ impl Render for WatchPage {
         if ui.fullscreen {
             return div().size_full().bg(black()).child(crate::ui::slot::player_slot(cx)).into_any_element();
         }
+        if crate::ui::music::on(cx) {
+            return self.render_now_playing(cx);
+        }
         let vp = ui.viewport;
         let avail = vp.width - px(48.);
         let side_w = px(402.);
@@ -1823,7 +2007,7 @@ fn vote_count(n: u64) -> String {
 }
 
 /// Likes / dislikes a video locally and on the signed-in account.
-fn set_rating(id: &str, r: i8, cx: &mut App) {
+pub(crate) fn set_rating(id: &str, r: i8, cx: &mut App) {
     store::set_rating(id, r);
     if crate::api::auth::signed_in() {
         let id = id.to_string();

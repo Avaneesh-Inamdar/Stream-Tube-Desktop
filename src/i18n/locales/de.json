@@ -877,5 +877,10 @@
 "Picture-in-picture above other apps": "Bild-in-Bild über anderen Apps",
   "Copied to clipboard": "In die Zwischenablage kopiert",
   "Copy title": "Titel kopieren",
-  "Copy channel name": "Kanalnamen kopieren"
+  "Copy channel name": "Kanalnamen kopieren",
+  "Music mode": "Musikmodus",
+  "Leave music mode": "Musikmodus verlassen",
+  "Playing from": "Wiedergabe aus",
+  "Song": "Song",
+  "Listening to music? Music mode shows the cover art and keeps the player at the bottom.": "Du hörst Musik? Der Musikmodus zeigt das Cover und hält den Player unten."
 }

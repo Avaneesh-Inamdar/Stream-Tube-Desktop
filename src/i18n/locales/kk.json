@@ -877,5 +877,10 @@
 "Picture-in-picture above other apps": "«Сурет ішіндегі суретті» басқа қолданбалардың үстінде көрсету",
   "Copied to clipboard": "Алмасу буферіне көшірілді",
   "Copy title": "Атауын көшіру",
-  "Copy channel name": "Арна атауын көшіру"
+  "Copy channel name": "Арна атауын көшіру",
+  "Music mode": "Музыка режимі",
+  "Leave music mode": "Музыка режимінен шығу",
+  "Playing from": "Қайдан ойнатылады",
+  "Song": "Ән",
+  "Listening to music? Music mode shows the cover art and keeps the player at the bottom.": "Музыка тыңдап отырсыз ба? Музыка режимі мұқабаны көрсетіп, ойнатқышты төменде ұстайды."
 }

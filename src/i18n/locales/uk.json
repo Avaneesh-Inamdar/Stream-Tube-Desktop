@@ -877,5 +877,10 @@
 "Picture-in-picture above other apps": "Картинка в картинці поверх інших програм",
   "Copied to clipboard": "Скопійовано в буфер обміну",
   "Copy title": "Скопіювати назву",
-  "Copy channel name": "Скопіювати назву каналу"
+  "Copy channel name": "Скопіювати назву каналу",
+  "Music mode": "Музичний режим",
+  "Leave music mode": "Вийти з музичного режиму",
+  "Playing from": "Грає з",
+  "Song": "Пісня",
+  "Listening to music? Music mode shows the cover art and keeps the player at the bottom.": "Слухаєте музику? Музичний режим показує обкладинку й тримає плеєр унизу."
 }

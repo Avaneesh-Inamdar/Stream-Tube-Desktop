@@ -3,6 +3,7 @@ pub mod app_icon;
 pub mod cards;
 pub(crate) mod history;
 pub mod image_cache;
+pub mod music;
 pub mod pages;
 pub mod pip;
 pub mod slot;

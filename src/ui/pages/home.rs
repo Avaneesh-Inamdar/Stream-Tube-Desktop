@@ -153,6 +153,8 @@ pub struct HomePage {
     rows: Arc<Vec<FeedRow>>,
     row_size: (Pixels, Pixels),
     serial: u64,
+    /// redraws the music mode button when the mode changes elsewhere
+    _music: Subscription,
 }
 
 #[derive(PartialEq)]
@@ -241,6 +243,11 @@ impl HomePage {
             rows: Arc::default(),
             row_size: (px(0.), px(0.)),
             serial: 0,
+            _music: cx.observe_global::<crate::ui::music::MusicMode>(|this, cx| {
+                if this.chip == MUSIC_CHIP {
+                    cx.notify();
+                }
+            }),
         };
         s.load(cx);
         s
@@ -514,6 +521,13 @@ impl Render for HomePage {
                     },
                 )));
             }
+        }
+        if self.chip == MUSIC_CHIP {
+            let on = crate::ui::music::on(cx);
+            chips = chips.child(div().flex_1()).child(
+                chip("chip-music-mode", t(if on { "Leave music mode" } else { "Music mode" }), on, cx)
+                    .on_click(move |_, _, cx| crate::ui::music::set(!on, cx)),
+            );
         }
         let message = |content: AnyElement| {
             div().absolute().inset_0().px_6().pt_2().pb_24().child(content).into_any_element()

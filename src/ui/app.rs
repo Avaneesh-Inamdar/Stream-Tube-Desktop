@@ -660,7 +660,14 @@ impl Render for Shell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::display::mark_drawn();
         let a = self.app.read(cx);
-        let has_slot = matches!(a.route, Route::Watch { .. } | Route::Shorts(_));
+        let music = super::music::state(cx);
+        // music mode's "Now playing" shows the cover art unless the video is asked
+        // for (fullscreen always shows the video)
+        let has_slot = match a.route {
+            Route::Watch { .. } => !music.on || music.video || cx.global::<UiState>().fullscreen,
+            Route::Shorts(_) => true,
+            _ => false,
+        };
         let clip = cx.global::<crate::ui::slot::PageClip>().0.clone();
         let main = has_slot.then(|| crate::ui::pip::main_surface(&a.main_view, cx).clip(clip.clone()));
         // only over a thumbnail drawn on this page (the slot is cleared when a
@@ -670,7 +677,8 @@ impl Render for Shell {
             crate::ui::slot::SlotFollower::with_slot(slot, AnyView::from(a.preview_view.clone())).clip(clip.clone())
         });
         // the same conditions as `AppView::render_mini_player` (fullscreen is a watch page)
-        let mini = (!has_slot && player(cx).read(cx).video.is_some()).then(|| {
+        // in music mode the bar along the bottom takes the mini player's place
+        let mini = (!has_slot && !music.on && player(cx).read(cx).video.is_some()).then(|| {
             let slot = cx.global::<crate::ui::slot::MiniSlot>().0.clone();
             crate::ui::slot::SlotFollower::with_slot(slot, a.mini_view.clone())
         });
@@ -705,6 +713,8 @@ pub struct AppView {
     suggestion_serial: u64,
     sel_suggestion: Option<usize>,
     mini_view: Entity<PlayerView>,
+    /// The player bar in music mode
+    music_bar: Entity<super::music::MusicBar>,
     /// Mini player placement: distance from the window's right and bottom edges, and width
     mini_geom: (f32, f32, f32),
     mini_drag: Option<MiniDrag>,
@@ -875,6 +885,9 @@ impl AppView {
             true
         });
         let mini_view = cx.new(|cx| PlayerView::new(p.clone(), true, cx));
+        super::music::init(cx);
+        let music_bar = cx.new(super::music::MusicBar::new);
+        subs.push(cx.observe_global::<super::music::MusicMode>(|_, cx| cx.notify()));
         let main_view = cx.new(|cx| PlayerView::new(p.clone(), false, cx));
         let preview_view = cx.new(crate::player::preview::PreviewView::new);
         let images = crate::ui::image_cache::init(cx);
@@ -963,6 +976,7 @@ impl AppView {
             suggestion_serial: 0,
             sel_suggestion: None,
             mini_view,
+            music_bar,
             mini_geom: load_mini_geom(),
             mini_drag: None,
             mini_dragged: false,
@@ -3028,7 +3042,7 @@ impl AppView {
     }
 
     fn render_mini_player(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if crate::ui::pip::owner(cx).as_ref() == Some(&player(cx)) {
+        if crate::ui::pip::owner(cx).as_ref() == Some(&player(cx)) || super::music::on(cx) {
             return None;
         }
         let p = pal(cx);
@@ -3795,6 +3809,10 @@ impl Render for AppView {
                     .children(sidebar)
                     .child(page_area.flex_1().min_w_0().h_full()),
             );
+            // Shorts keep their own player
+            if super::music::on(cx) && !is_shorts {
+                root = root.child(self.music_bar.clone());
+            }
             {
                 // a smaller window keeps the mini player on screen
                 let vp = window.viewport_size();
