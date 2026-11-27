@@ -115,6 +115,18 @@ pub fn runtime() -> Runtime {
     found.unwrap_or_else(Runtime::embedded)
 }
 
+/// yt-dlp arguments for the Deno or Node.js found here. yt-dlp only looks for
+/// Deno by itself, and without a runtime it gets no formats from YouTube.
+pub fn ytdlp_args() -> Vec<String> {
+    let rt = runtime();
+    let name = match rt.kind {
+        Kind::Deno => "deno",
+        Kind::Node => "node",
+        Kind::Embedded => return Vec::new(),
+    };
+    vec!["--js-runtimes".into(), format!("{name}:{}", rt.path.display())]
+}
+
 /// Directories the runtimes are usually installed to, for when the app was
 /// started with a minimal PATH (Finder, a desktop launcher).
 fn extra_dirs() -> Vec<PathBuf> {

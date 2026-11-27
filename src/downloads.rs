@@ -354,11 +354,45 @@ pub fn retry_with_ios(err: &str) -> bool {
 
 /// `name`: the file name without extension, when the URL isn't a YouTube page
 /// (yt-dlp would otherwise name the file after the manifest).
+///
+/// When YouTube refuses the anonymous request (bot check, sign-in required), the
+/// run is repeated with the browser sign-in's cookies, as playback does.
 #[allow(clippy::too_many_arguments)]
 fn ytdlp_run(bin: &str, dir: &std::path::Path, url: &str, fmt: &str, s: &store::Settings, extra: &[&str], name: Option<&str>, cancel: &AtomicBool, progress: &dyn Fn(f32, &str)) -> anyhow::Result<String> {
+    let res = match ytdlp_run_once(bin, dir, url, fmt, s, extra, name, cancel, progress) {
+        Err(e) if !cancel.load(Ordering::SeqCst) && streams::needs_sign_in(&e.to_string()) => match crate::api::web::write_cookies_file() {
+            Some(cookies) => {
+                progress(0.0, translate("Retrying…"));
+                let path = cookies.to_string_lossy().into_owned();
+                let mut args = extra.to_vec();
+                args.extend(["--cookies", path.as_str()]);
+                let res = ytdlp_run_once(bin, dir, url, fmt, s, &args, name, cancel, progress);
+                let _ = std::fs::remove_file(&cookies);
+                res
+            }
+            None => Err(e),
+        },
+        other => other,
+    };
+    res.map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("confirm you") && msg.contains("bot") {
+            anyhow::anyhow!("YouTube asked for a bot check. Connect a browser session under \u{201c}YouTube watch history\u{201d} in Settings, turn on \"Use IPv4 only\" in Settings → Network, or update yt-dlp.")
+        } else {
+            e
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ytdlp_run_once(bin: &str, dir: &std::path::Path, url: &str, fmt: &str, s: &store::Settings, extra: &[&str], name: Option<&str>, cancel: &AtomicBool, progress: &dyn Fn(f32, &str)) -> anyhow::Result<String> {
     {
         let mut cmd = Command::new(bin);
         cmd.args(extra);
+        cmd.args(crate::api::jsc::ytdlp_args());
+        // stderr is otherwise in the console code page (cp1251, cp1252…), which
+        // isn't UTF-8 and would lose the error text
+        cmd.args(["--encoding", "utf-8"]);
         if let Some(p) = crate::store::proxy_setting() {
             cmd.arg("--proxy").arg(p);
         }
@@ -392,9 +426,10 @@ fn ytdlp_run(bin: &str, dir: &std::path::Path, url: &str, fmt: &str, s: &store::
         // drain stderr on its own thread so a chatty yt-dlp can't block on a full pipe
         let stderr = child.stderr.take().unwrap();
         let err_reader = std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = std::io::Read::read_to_string(&mut BufReader::new(stderr), &mut s);
-            s
+            // lossy: read_to_string would return nothing for a stray non-UTF-8 byte
+            let mut b = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut BufReader::new(stderr), &mut b);
+            String::from_utf8_lossy(&b).into_owned()
         });
         let mut final_path = String::new();
         // video and audio arrive one after the other: weight them 90 / 10
@@ -425,9 +460,6 @@ fn ytdlp_run(bin: &str, dir: &std::path::Path, url: &str, fmt: &str, s: &store::
         let err = err_reader.join().unwrap_or_default();
         if !status.success() {
             let last = err.lines().rev().find(|l| l.contains("ERROR")).or(err.lines().last()).unwrap_or("yt-dlp failed").to_string();
-            if last.contains("confirm you") && last.contains("bot") {
-                anyhow::bail!("YouTube asked for a bot check. Turn on \"Use IPv4 only\" in Settings → Network, or update yt-dlp.");
-            }
             anyhow::bail!("{}", last.trim_start_matches("ERROR: ").trim());
         }
         Ok(if final_path.is_empty() { dir.to_string_lossy().into_owned() } else { final_path })

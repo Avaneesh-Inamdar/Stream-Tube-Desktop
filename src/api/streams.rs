@@ -983,7 +983,7 @@ pub(crate) fn verification_requested(error: &str) -> bool {
         || e.contains("age_check_required")
 }
 
-fn needs_sign_in(error: &str) -> bool {
+pub(crate) fn needs_sign_in(error: &str) -> bool {
     let e = error.to_ascii_lowercase();
     verification_requested(&e) || e.contains("sign in to") || e.contains("age-restricted") || e.contains("--cookies")
 }
@@ -1018,6 +1018,7 @@ fn ytdlp_streams_with(video_id: &str, cookies: Option<&std::path::Path>) -> Resu
     // The app chooses its own tracks. Request the inventory even when
     // yt-dlp cannot choose a default download format.
     cmd.args(["-J", "--ignore-no-formats-error", "--no-playlist"]);
+    cmd.args(crate::api::jsc::ytdlp_args());
     if let Some(c) = cookies {
         cmd.arg("--cookies").arg(c);
     }
