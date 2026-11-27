@@ -21,6 +21,10 @@ pub struct ChannelPage {
     serial: u64,
     /// the channel description is shown in full
     about_open: bool,
+    /// clicking a video toggles it for downloading instead of opening it
+    selecting: bool,
+    /// IDs of the videos picked, in the order they were picked
+    selected: Vec<String>,
     _sub: Subscription,
 }
 
@@ -57,6 +61,8 @@ impl ChannelPage {
             searching: None,
             serial: 0,
             about_open: false,
+            selecting: false,
+            selected: Vec::new(),
             _sub: sub,
         };
         s.load(cx);
@@ -98,6 +104,7 @@ impl ChannelPage {
         let Some(t) = d.tabs.get(idx).cloned() else { return };
         self.tab = idx;
         self.searching = None;
+        self.stop_selecting();
         self.tab_items = Load::Loading;
         self.continuation = None;
         self.serial += 1;
@@ -123,8 +130,31 @@ impl ChannelPage {
         cx.notify();
     }
 
+    fn stop_selecting(&mut self) {
+        self.selecting = false;
+        self.selected.clear();
+    }
+
+    fn toggle_selected(&mut self, id: &str) {
+        if let Some(i) = self.selected.iter().position(|s| s == id) {
+            self.selected.remove(i);
+        } else {
+            self.selected.push(id.to_string());
+        }
+    }
+
+    /// Queues the picked videos with the default download format.
+    fn download_selected(&mut self, cx: &mut Context<Self>) {
+        let items = self.tab_items.ready().cloned().unwrap_or_default();
+        let videos: Vec<VideoItem> = self.selected.iter().filter_map(|id| items.iter().filter_map(Item::as_video).find(|v| v.id == *id).cloned()).collect();
+        self.stop_selecting();
+        crate::downloads::start_many(videos, cx);
+        cx.notify();
+    }
+
     fn search_channel(&mut self, q: String, cx: &mut Context<Self>) {
         self.searching = Some(q.clone());
+        self.stop_selecting();
         self.tab_items = Load::Loading;
         self.continuation = None;
         self.serial += 1;
@@ -340,6 +370,81 @@ impl Render for ChannelPage {
                 .child(Input::new(&self.search).appearance(false).cleanable(true)),
         );
         let tab_kind = d.tabs.get(self.tab).map(|t| t.kind.clone()).unwrap_or_default();
+        let has_videos = self.tab_items.ready().is_some_and(|items| items.iter().any(|i| i.as_video().is_some()));
+        // picking videos to download: a toggle, then a bar with the count and actions
+        let select_bar = (has_videos && tab_kind != "featured").then(|| {
+            let n = self.selected.len();
+            let mut row = div().flex().items_center().gap_3();
+            if self.selecting {
+                row = row
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(p.text).child(tf!("{0} selected", n)))
+                    .child(pill("ch-select-all", Some("square-check"), t("Select all"), cx).on_click(cx.listener(|this, _, _, cx| {
+                        let ids: Vec<String> = this.tab_items.ready().into_iter().flatten().filter_map(Item::as_video).map(|v| v.id.clone()).collect();
+                        for id in ids {
+                            if !this.selected.contains(&id) {
+                                this.selected.push(id);
+                            }
+                        }
+                        cx.notify();
+                    })))
+                    .child(
+                        pill("ch-select-dl", Some("download"), t("Download"), cx)
+                            .when(n == 0, |el| el.opacity(0.5))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if !this.selected.is_empty() {
+                                    this.download_selected(cx);
+                                }
+                            })),
+                    )
+                    .child(pill("ch-select-cancel", Some("x"), t("Cancel"), cx).on_click(cx.listener(|this, _, _, cx| {
+                        this.stop_selecting();
+                        cx.notify();
+                    })));
+            } else {
+                row = row.child(pill("ch-select", Some("square-check"), t("Select"), cx).on_click(cx.listener(|this, _, _, cx| {
+                    this.selecting = true;
+                    cx.notify();
+                })));
+            }
+            row
+        });
+        let selecting = self.selecting;
+        let selected = self.selected.clone();
+        // in select mode a cover over each video card takes the click and shows a checkbox
+        let pickable = |card: AnyElement, item: &Item, w: Pixels, cx: &mut Context<Self>| -> AnyElement {
+            let Some(v) = item.as_video().filter(|_| selecting) else { return card };
+            let on = selected.contains(&v.id);
+            let id = v.id.clone();
+            div()
+                .relative()
+                .w(w)
+                .child(card)
+                .child(
+                    div()
+                        .id(SharedString::from(format!("ch-pick-{}", v.id)))
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .cursor_pointer()
+                        .rounded_xl()
+                        .when(on, |el| el.border_2().border_color(p.accent))
+                        .child(
+                            div()
+                                .absolute()
+                                .top_2()
+                                .left_2()
+                                .p_1()
+                                .rounded_md()
+                                .bg(gpui::black().opacity(0.6))
+                                .child(icon(if on { "square-check" } else { "square" }).size_5().text_color(gpui::white())),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_selected(&id);
+                            cx.notify();
+                        })),
+                )
+                .into_any_element()
+        };
         let body: AnyElement = match &self.tab_items {
             Load::Loading => spinner(cx).into_any_element(),
             Load::Error(e) => error_state(e, cx).into_any_element(),
@@ -355,10 +460,26 @@ impl Render for ChannelPage {
                     empty_state("video-off", "This channel has no content here", "", cx).into_any_element()
                 } else if tab_kind == "shorts" && self.searching.is_none() {
                     let (_, w) = grid_columns(width, 200.0, window.rem_size());
-                    grid(items.iter().filter_map(|i| i.as_video()).map(|v| shorts_card(v, w, cx)).collect(), width).into_any_element()
+                    let cards = items
+                        .iter()
+                        .filter_map(|i| i.as_video().map(|v| (*i, v)))
+                        .map(|(i, v)| {
+                            let card = shorts_card(v, w, cx);
+                            pickable(card, i, w, cx)
+                        })
+                        .collect();
+                    grid(cards, width).into_any_element()
                 } else {
                     let (_, w) = grid_columns(width, 280.0, window.rem_size());
-                    let mut col = div().flex().flex_col().gap_6().child(grid(items.iter().map(|i| grid_item(i, w, tab_kind == "featured" || self.searching.is_some(), cx)).collect(), width));
+                    let show_channel = tab_kind == "featured" || self.searching.is_some();
+                    let cards = items
+                        .iter()
+                        .map(|i| {
+                            let card = grid_item(i, w, show_channel, cx);
+                            pickable(card, i, w, cx)
+                        })
+                        .collect();
+                    let mut col = div().flex().flex_col().gap_6().child(grid(cards, width));
                     if self.loading_more {
                         col = col.child(spinner(cx));
                     }
@@ -374,7 +495,7 @@ impl Render for ChannelPage {
                     .px_6()
                     .pt_4()
                     .pb_24()
-                    .child(div().w(width).flex().flex_col().gap_4().child(header).child(tabs).child(body)),
+                    .child(div().w(width).flex().flex_col().gap_4().child(header).child(tabs).children(select_bar).child(body)),
             )
             .into_any_element()
     }
