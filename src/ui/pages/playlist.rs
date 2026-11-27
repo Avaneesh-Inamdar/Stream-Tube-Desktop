@@ -385,6 +385,7 @@ impl Render for PlaylistPage {
         }
         let videos = self.videos.ready().cloned().unwrap_or_default();
         let thumb = videos.first().map(|v| v.thumbnail.clone());
+        let radius = rems(0.75 * thumbnail_corner_scale());
         let local_id = if let Source::Local(id) = self.source { Some(id) } else { None };
         let remote_info = self.info.clone();
         let saved = remote_info.as_ref().map(|i| store::is_playlist_saved(&i.id)).unwrap_or(false);
@@ -402,10 +403,10 @@ impl Render for PlaylistPage {
                 div()
                     .w_full()
                     .h(px(176.))
-                    .rounded_xl()
+                    .rounded(radius)
                     .overflow_hidden()
                     .bg(p.surface)
-                    .when_some(thumb, |d, t| d.child(img(SharedString::from(t)).size_full().rounded_xl().object_fit(ObjectFit::Cover))),
+                    .when_some(thumb, |d, t| d.child(img(SharedString::from(t)).size_full().rounded(radius).object_fit(ObjectFit::Cover))),
             )
             .child(
                 selectable_text(

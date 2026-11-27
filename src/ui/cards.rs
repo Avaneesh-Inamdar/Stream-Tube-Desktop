@@ -121,7 +121,7 @@ fn badge(v: &VideoItem, cx: &App) -> Option<AnyElement> {
 pub fn thumbnail(v: &VideoItem, url: String, w: Pixels, h: Pixels, radius: Pixels, cx: &App) -> Div {
     let p = pal(cx);
     let progress = watched_progress(&v.id, cx);
-    let radius = radius * (store::settings_snapshot().thumb_radius / 12.0);
+    let radius = radius * thumbnail_corner_scale();
     div()
         .relative()
         .w(w)
@@ -833,6 +833,8 @@ pub fn playlist_card(pl: &PlaylistItem, width: Pixels, cx: &mut App) -> AnyEleme
 
 pub fn playlist_thumb(thumb: Option<String>, count: Option<String>, w: Pixels, h: Pixels, cx: &App) -> Div {
     let p = pal(cx);
+    let scale = thumbnail_corner_scale();
+    let radius = rems(0.75 * scale);
     div()
         .relative()
         .w(w)
@@ -845,17 +847,17 @@ pub fn playlist_thumb(thumb: Option<String>, count: Option<String>, w: Pixels, h
                 .left(px(12.))
                 .right(px(12.))
                 .h_4()
-                .rounded_t_lg()
+                .rounded_t(rems(0.5 * scale))
                 .bg(p.hover),
         )
         .child(
             div()
                 .relative()
                 .size_full()
-                .rounded_xl()
+                .rounded(radius)
                 .overflow_hidden()
                 .bg(p.surface)
-                .when_some(thumb, |d, t| d.child(img(SharedString::from(t)).size_full().rounded_xl().object_fit(ObjectFit::Cover)))
+                .when_some(thumb, |d, t| d.child(img(SharedString::from(t)).size_full().rounded(radius).object_fit(ObjectFit::Cover)))
                 .child(
                     div()
                         .absolute()
