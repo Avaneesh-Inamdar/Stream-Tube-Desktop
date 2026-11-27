@@ -63,6 +63,68 @@ mod playback_error_tests {
     }
 }
 
+/// How close to the live edge playback counts as "at live" (seconds).
+const LIVE_EDGE_TOLERANCE_SECS: f64 = 15.0;
+/// How close to the live edge seekbar hover/click snaps to "LIVE" (seconds).
+const LIVE_HOVER_EDGE_SECS: f64 = 5.0;
+
+fn player_is_live(pl: &Player) -> bool {
+    pl.is_live()
+}
+
+fn player_live_window(pl: &Player) -> f64 {
+    pl.live_dvr_window()
+}
+
+fn player_live_pos(pl: &Player) -> f64 {
+    pl.live_position()
+}
+
+fn player_live_behind(pl: &Player) -> f64 {
+    pl.live_behind()
+}
+
+fn player_at_live_edge(pl: &Player) -> bool {
+    pl.is_at_live_edge()
+}
+
+fn player_go_live(p: &mut Player, cx: &mut Context<Player>) {
+    p.go_live(cx);
+}
+
+fn live_indicator_label(at_live_edge: bool, behind_secs: f64, live_label: &str) -> String {
+    if at_live_edge || behind_secs < 1.0 {
+        live_label.to_string()
+    } else {
+        format!("-{}  {}", format_duration(behind_secs as u64), live_label)
+    }
+}
+
+fn live_hover_label(t: f64, edge: f64, live_label: &str) -> (String, bool) {
+    let behind = (edge - t).max(0.0);
+    if behind <= LIVE_HOVER_EDGE_SECS {
+        (live_label.to_string(), true)
+    } else {
+        (format!("-{}", format_duration(behind as u64)), false)
+    }
+}
+
+fn seekbar_fraction(time: f64, duration: f64, is_live: bool, at_live_edge: bool, drag_seek: Option<f32>) -> f32 {
+    if let Some(f) = drag_seek {
+        return f.clamp(0.0, 1.0);
+    }
+    if is_live && at_live_edge {
+        return 1.0;
+    }
+    if duration > 0.0 {
+        (time / duration).clamp(0.0, 1.0) as f32
+    } else if is_live {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Menu {
     Main,
@@ -97,6 +159,8 @@ pub struct PlayerView {
     player: Entity<Player>,
     /// Repaints "Stats for nerds" every second while it's open (one task, not one per frame)
     stats_tick: Option<Task<()>>,
+    /// Repaints the live `-MM:SS` indicator every second while paused or behind live with controls shown.
+    live_tick: Option<Task<()>>,
     pub mini: bool,
     /// shown in the picture-in-picture window
     pub pip: bool,
@@ -139,6 +203,7 @@ impl PlayerView {
         let sub = cx.observe(&player, |_, _, cx| cx.notify());
         Self {
             stats_tick: None,
+            live_tick: None,
             player,
             mini,
             pip: false,
@@ -255,8 +320,10 @@ impl Render for PlayerView {
         let pl = self.player.read(cx);
         let mini = self.mini;
         let paused = pl.paused;
-        let time = self.drag_seek.map(|f| f as f64 * pl.duration).unwrap_or(pl.time);
-        let duration = pl.duration;
+        let is_live = player_is_live(pl);
+        let duration = if is_live { player_live_window(pl) } else { pl.duration };
+        let current_time = if is_live { player_live_pos(pl) } else { pl.time };
+        let time = self.drag_seek.map(|f| f as f64 * duration).unwrap_or(current_time);
         let frame = pl.frame.clone();
         let loading = pl.loading || pl.buffering || (pl.seeking && !pl.paused);
         let error = pl.error.clone().or(pl.init_error.clone());
@@ -513,7 +580,10 @@ impl Render for PlayerView {
                         cx.spawn(async move |this, cx| {
                             cx.background_executor().timer(Duration::from_millis(450)).await;
                             let _ = this.update(cx, |this, cx| {
-                                if this.press == Some(at) && this.drag_seek.is_none() {
+                                if this.press == Some(at)
+                                    && this.drag_seek.is_none()
+                                    && !player_at_live_edge(this.player.read(cx))
+                                {
                                     this.press_boosted = true;
                                     this.player.update(cx, |p, cx| p.start_boost(cx));
                                     cx.notify();
@@ -567,7 +637,7 @@ impl Render for PlayerView {
                 })),
         );
 
-        if !mini && !audio_only {
+        if !mini && !audio_only && !is_live {
             if let Some(layer) = self.render_annotations(time, vsize, aspect, full_height, cx) {
                 root = root.child(layer);
             }
@@ -639,8 +709,8 @@ impl Render for PlayerView {
                                         cx.stop_propagation();
                                         retry_player.update(cx, |p, cx| {
                                             if let Some(v) = p.video.clone() {
-                                                let t = p.time;
-                                                p.play(v, Some(t), cx);
+                                                let t = if player_is_live(p) { None } else { Some(p.time) };
+                                                p.play(v, t, cx);
                                             }
                                         });
                                     }),
@@ -700,10 +770,10 @@ impl Render for PlayerView {
             );
         }
 
-        // SponsorBlock prompt / highlight
+        // SponsorBlock prompt / highlight (disabled on live streams)
         let pl = self.player.read(cx);
-        let prompt = pl.sb_prompt.clone();
-        let highlight = pl.highlight().cloned().filter(|h| pl.time < h.start && pl.time < 30.0);
+        let prompt = if is_live { None } else { pl.sb_prompt.clone() };
+        let highlight = if is_live { None } else { pl.highlight().cloned().filter(|h| pl.time < h.start && pl.time < 30.0) };
         if let Some(seg) = prompt {
             let pp = self.player.clone();
             let end = seg.end;
@@ -937,8 +1007,38 @@ impl PlayerView {
     }
 }
 
-/// How far behind the end of a live stream's window still counts as live.
-const LIVE_EDGE_SLACK: f64 = 20.0;
+#[cfg(test)]
+mod live_control_tests {
+    use super::{live_hover_label, live_indicator_label, seekbar_fraction};
+
+    #[::core::prelude::v1::test]
+    fn live_hover_formats_negative_dvr_offset_and_snaps_near_edge() {
+        assert_eq!(live_hover_label(3598.0, 3600.0, "LIVE"), ("LIVE".into(), true));
+        assert_eq!(live_hover_label(3595.0, 3600.0, "В ЭФИРЕ"), ("В ЭФИРЕ".into(), true));
+        assert_eq!(live_hover_label(3605.0, 3600.0, "LIVE"), ("LIVE".into(), true));
+        assert_eq!(live_hover_label(3594.0, 3600.0, "LIVE"), ("-0:06".into(), false));
+        assert_eq!(live_hover_label(3000.0, 3600.0, "LIVE"), ("-10:00".into(), false));
+        assert_eq!(live_hover_label(0.0, 3661.0, "LIVE"), ("-1:01:01".into(), false));
+    }
+
+    #[::core::prelude::v1::test]
+    fn live_indicator_shows_offset_only_when_behind_live_edge() {
+        assert_eq!(live_indicator_label(true, 12.0, "LIVE"), "LIVE");
+        assert_eq!(live_indicator_label(false, 0.4, "LIVE"), "LIVE");
+        assert_eq!(live_indicator_label(false, 45.0, "LIVE"), "-0:45  LIVE");
+        assert_eq!(live_indicator_label(false, 605.0, "В ЭФИРЕ"), "-10:05  В ЭФИРЕ");
+    }
+
+    #[::core::prelude::v1::test]
+    fn live_seekbar_fraction_clamps_to_edge_when_at_live_and_tracks_dvr_when_behind() {
+        assert_eq!(seekbar_fraction(985.0, 1000.0, true, true, None), 1.0);
+        assert_eq!(seekbar_fraction(500.0, 1000.0, true, false, None), 0.5);
+        assert_eq!(seekbar_fraction(985.0, 1000.0, true, true, Some(0.4)), 0.4);
+        assert_eq!(seekbar_fraction(0.0, 0.0, true, true, None), 1.0);
+        assert_eq!(seekbar_fraction(0.0, 0.0, false, false, None), 0.0);
+        assert_eq!(seekbar_fraction(30.0, 120.0, false, false, None), 0.25);
+    }
+}
 
 /// The video's right-click menu: youtube.com's items in youtube.com's order,
 /// then the app's own actions below a divider.
@@ -1105,7 +1205,10 @@ fn navigate_to_current(this: &mut PlayerView, window: &mut Window, cx: &mut Cont
 
 impl PlayerView {
     fn render_mini_controls(&self, show: bool, paused: bool, time: f64, duration: f64, radius: Pixels, cx: &mut Context<Self>) -> impl IntoElement {
-        let frac = if duration > 0.0 { (time / duration) as f32 } else { 0.0 };
+        let pl = self.player.read(cx);
+        let is_live = player_is_live(pl);
+        let at_live_edge = player_at_live_edge(pl);
+        let frac = seekbar_fraction(time, duration, is_live, at_live_edge, None);
         let pp = self.player.clone();
         let pp2 = self.player.clone();
         let pp3 = self.player.clone();
@@ -1220,23 +1323,56 @@ impl PlayerView {
         let paused = pl.paused;
         let volume = pl.volume;
         let muted = pl.muted;
-        let segments = pl.segments.clone();
-        let chapters = pl.chapters.clone();
+        let is_live = player_is_live(pl);
+        let bar_duration = if is_live { player_live_window(pl) } else { duration };
+        let behind = if is_live && self.drag_seek.is_some() {
+            (bar_duration - time).max(0.0)
+        } else {
+            player_live_behind(pl)
+        };
+        let at_live_edge = if is_live && self.drag_seek.is_some() {
+            !paused && behind <= LIVE_EDGE_TOLERANCE_SECS
+        } else {
+            player_at_live_edge(pl)
+        };
+        // Keep the behind-live `-MM:SS` indicator ticking while controls are visible and paused/behind.
+        if is_live && (paused || !at_live_edge) && self.live_tick.is_none() {
+            self.live_tick = Some(cx.spawn(async move |this, cx| loop {
+                cx.background_executor().timer(Duration::from_millis(1000)).await;
+                let keep = this.update(cx, |this, cx| {
+                    let pl = this.player.read(cx);
+                    let need = (pl.is_foreground() || this.pip)
+                        && player_is_live(pl)
+                        && this.controls_visible(pl.paused)
+                        && (pl.paused || !player_at_live_edge(pl));
+                    if need {
+                        cx.notify();
+                    } else {
+                        this.live_tick = None;
+                    }
+                    need
+                });
+                if !matches!(keep, Ok(true)) {
+                    break;
+                }
+            }));
+        }
+        let segments = if is_live { Vec::new() } else { pl.segments.clone() };
+        let chapters = if is_live { Vec::new() } else { pl.chapters.clone() };
         let cache = pl.buffered_ranges();
         let caption_on = pl.caption.is_some();
         let has_captions = pl.streams.as_ref().map(|s| !s.captions.is_empty()).unwrap_or(false);
-        let storyboard = pl.storyboard.clone();
+        let storyboard = if is_live { None } else { pl.storyboard.clone() };
         let st = store::settings_snapshot();
-        let heatmap = if st.show_heatmap { pl.heatmap.clone() } else { Vec::new() };
-        let jump_to = if st.jump_ahead && !self.mini { pl.jump_ahead_target() } else { None };
+        let heatmap = if !is_live && st.show_heatmap { pl.heatmap.clone() } else { Vec::new() };
+        let jump_to = if !is_live && st.jump_ahead && !self.mini { pl.jump_ahead_target() } else { None };
         let has_next = pl.queue_pos.map(|i| i + 1 < pl.queue.len()).unwrap_or(false)
             || crate::player::controller::player(cx) == self.player && crate::ui::app::has_autoplay_next(cx);
-        let chapter_title = pl.current_chapter().map(|c| c.title.clone());
-        let is_live = pl.streams.as_ref().map(|s| s.is_live).unwrap_or(false);
-        let sb_show = store::settings_snapshot().sponsorblock;
-        let sb_actions = store::settings_snapshot().sb_actions.clone();
-        let frac = if duration > 0.0 { (time / duration) as f32 } else { 0.0 };
-        let hover = self.hover_frac.filter(|_| duration > 0.0 && self.hovering);
+        let chapter_title = if is_live { None } else { pl.current_chapter().map(|c| c.title.clone()) };
+        let sb_show = !is_live && st.sponsorblock;
+        let sb_actions = st.sb_actions.clone();
+        let frac = seekbar_fraction(time, bar_duration, is_live, at_live_edge, self.drag_seek);
+        let hover = self.hover_frac.filter(|_| bar_duration > 0.0 && self.hovering);
         let accent = p.accent;
         let seek_b = self.seek_bounds.clone();
         let vol_b = self.vol_bounds.clone();
@@ -1253,12 +1389,12 @@ impl PlayerView {
 
         // seek bar: one segment per chapter (2px gaps), hovered chapter grows
         let active = hover.is_some() || self.drag_seek.is_some();
-        let hover_t = hover.map(|h| h as f64 * duration);
+        let hover_t = hover.map(|h| h as f64 * bar_duration);
         let mut spans: Vec<(f32, f32)> = Vec::new();
-        if duration > 0.0 && !chapters.is_empty() && !store::settings_snapshot().hide_chapters {
+        if bar_duration > 0.0 && !chapters.is_empty() && !st.hide_chapters {
             for (i, c) in chapters.iter().enumerate() {
-                let a = (c.start / duration).clamp(0.0, 1.0) as f32;
-                let b = chapters.get(i + 1).map(|n| (n.start / duration) as f32).unwrap_or(1.0).clamp(a, 1.0);
+                let a = (c.start / bar_duration).clamp(0.0, 1.0) as f32;
+                let b = chapters.get(i + 1).map(|n| (n.start / bar_duration) as f32).unwrap_or(1.0).clamp(a, 1.0);
                 if b > a {
                     spans.push((a, b));
                 }
@@ -1272,13 +1408,13 @@ impl PlayerView {
         }
         let multi = spans.len() > 1;
         let base_h = if active { 5. } else { 3. };
-        let sb_spans: Vec<(f32, f32, u32)> = if sb_show && duration > 0.0 {
+        let sb_spans: Vec<(f32, f32, u32)> = if sb_show && bar_duration > 0.0 {
             segments
                 .iter()
                 .filter(|s| sb_actions.get(&s.category).is_some_and(|a| a != "off"))
                 .map(|s| {
-                    let a = (s.start / duration) as f32;
-                    let w = (((s.end - s.start) / duration) as f32).max(0.004);
+                    let a = (s.start / bar_duration) as f32;
+                    let w = (((s.end - s.start) / bar_duration) as f32).max(0.004);
                     (a, a + w, services::sponsor_category_color(&s.category))
                 })
                 .collect()
@@ -1303,9 +1439,9 @@ impl PlayerView {
                 .overflow_hidden()
                 .bg(hsla(0., 0., 1., 0.25))
                 .children(cache.iter().filter_map(|&(start, end)| {
-                    if duration <= 0.0 { return None }
-                    let left = local((start / duration) as f32);
-                    let right = local((end / duration) as f32);
+                    if bar_duration <= 0.0 { return None }
+                    let left = local((start / bar_duration) as f32);
+                    let right = local((end / bar_duration) as f32);
                     (right > left).then(|| div().absolute().top_0().left(relative(left)).h_full().w(relative(right - left)).bg(hsla(0., 0., 1., 0.4)))
                 }))
                 .when_some(hover, |d, hv| d.child(div().absolute().top_0().left_0().h_full().w(relative(local(hv))).bg(hsla(0., 0., 1., 0.5))))
@@ -1329,15 +1465,15 @@ impl PlayerView {
             );
         }
         // "Most replayed" graph above the bar while hovering it, like YouTube
-        if active && duration > 0.0 && !heatmap.is_empty() {
+        if active && !is_live && bar_duration > 0.0 && !heatmap.is_empty() {
             let mut graph = div().absolute().left_0().right_0().bottom(px(base_h + 2.)).h(px(34.));
             for (start, len, k) in heatmap.iter().copied() {
                 graph = graph.child(
                     div()
                         .absolute()
                         .bottom_0()
-                        .left(relative((start / duration) as f32))
-                        .w(relative((len / duration) as f32))
+                        .left(relative((start / bar_duration) as f32))
+                        .w(relative((len / bar_duration) as f32))
                         .h(relative(k.clamp(0.04, 1.0)))
                         .bg(hsla(0., 0., 1., 0.22)),
                 );
@@ -1366,15 +1502,15 @@ impl PlayerView {
             }),
         );
 
-        // hover preview: storyboard frame, chapter title, time
+        // hover preview: storyboard frame, chapter title, time (or live DVR offset)
         let preview = hover_t.map(|t| {
             let chap = chapters.iter().rev().find(|c| c.start <= t).map(|c| c.title.clone()).filter(|_| multi);
             let (fw, fh) = storyboard.as_ref().map(|sb| {
                 let k = 192.0 / sb.width.max(1) as f32;
                 (px(sb.width as f32 * k), px(sb.height as f32 * k))
             }).unwrap_or((px(192.), px(108.)));
-            let sb_el = storyboard.as_ref().filter(|_| store::settings_snapshot().show_storyboard).and_then(|sb| {
-                let (url, col, row) = sb.frame_at(t, duration)?;
+            let sb_el = storyboard.as_ref().filter(|_| st.show_storyboard).and_then(|sb| {
+                let (url, col, row) = sb.frame_at(t, bar_duration)?;
                 Some(
                     div()
                         .relative()
@@ -1395,9 +1531,14 @@ impl PlayerView {
                         ),
                 )
             });
+            let (preview_label, preview_live_edge) = if is_live {
+                live_hover_label(t, bar_duration, translate("LIVE"))
+            } else {
+                (format_duration(t as u64), false)
+            };
             let b = self.seek_bounds.get();
             let half = fw / 2.;
-            let x = (b.size.width * (t / duration.max(0.001)) as f32).max(half).min((b.size.width - half).max(half));
+            let x = (b.size.width * (t / bar_duration.max(0.001)) as f32).max(half).min((b.size.width - half).max(half));
             div()
                 .absolute()
                 .bottom(px(64.))
@@ -1409,7 +1550,19 @@ impl PlayerView {
                 .w(fw)
                 .children(sb_el)
                 .when_some(chap, |d, c| d.child(div().text_sm().text_color(white()).font_weight(FontWeight::MEDIUM).truncate().max_w_full().child(c)))
-                .child(div().text_sm().text_color(white()).font_weight(FontWeight::MEDIUM).child(format_duration(t as u64)))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .text_sm()
+                        .text_color(white())
+                        .font_weight(FontWeight::MEDIUM)
+                        .when(preview_live_edge, |d| {
+                            d.child(div().size(px(6.)).flex_none().rounded_full().bg(rgb(0xff0000)))
+                        })
+                        .child(preview_label),
+                )
         });
 
         let pp = self.player.clone();
@@ -1428,33 +1581,10 @@ impl PlayerView {
         };
         let vol_icon = if muted || volume <= 0.0 { "volume-x" } else if volume < 50.0 { "volume-1" } else { "volume-2" };
         let vol_frac = if muted { 0.0 } else { (volume / 100.0).min(1.0) as f32 };
-        // like youtube.com: a red dot at the live edge, grey behind it; clicking
-        // the badge goes back to live (#281)
-        let behind_live = is_live && duration > 0.0 && duration - time > LIVE_EDGE_SLACK;
-        let time_text: AnyElement = if is_live {
-            div()
-                .id("c-live")
-                .flex()
-                .items_center()
-                .gap_1p5()
-                .px_1()
-                .rounded_md()
-                .when(behind_live, |d| d.cursor_pointer().hover(|s| s.bg(hsla(0., 0., 1., 0.15))))
-                .child(div().size_2().rounded_full().bg(if behind_live { hsla(0., 0., 0.75, 1.) } else { rgb(0xff0000).into() }))
-                .child(translate("LIVE").to_string())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    if behind_live {
-                        this.player.update(cx, |p, cx| {
-                            let end = p.duration;
-                            p.seek_to(end);
-                            cx.notify();
-                        });
-                    }
-                }))
-                .into_any_element()
+        let time_text = if is_live {
+            live_indicator_label(at_live_edge, behind, translate("LIVE"))
         } else {
-            format!("{} / {}", format_duration(time as u64), format_duration(duration as u64)).into_any_element()
+            format!("{} / {}", format_duration(time as u64), format_duration(duration as u64))
         };
 
         let left = div()
@@ -1529,7 +1659,44 @@ impl PlayerView {
                             ),
                     )),
             )
-            .when(!hide_time, |d| {
+            .when(!hide_time && is_live, |d| {
+                let dot_color: Hsla = if at_live_edge { rgb(0xff0000).into() } else { hsla(0., 0., 0.65, 1.) };
+                d.child(
+                    div()
+                        .id("c-live")
+                        .ml_1()
+                        .px_2()
+                        .py_1()
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(hsla(0., 0., 1., 0.15)))
+                        .when(narrow, |d| d.min_w_0())
+                        .when(!narrow, |d| d.flex_none().whitespace_nowrap())
+                        .when(!at_live_edge, |d| {
+                            d.tooltip(|window, cx| component::tooltip::Tooltip::new(translate("Go live")).build(window, cx))
+                        })
+                        .child(div().size(px(7.)).flex_none().rounded_full().bg(dot_color))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(white())
+                                .when(narrow, |d| d.min_w_0().truncate())
+                                .child(time_text.clone()),
+                        )
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.drag_seek = None;
+                            this.player.update(cx, |p, cx| player_go_live(p, cx));
+                            this.poke(cx);
+                        })),
+                )
+            })
+            .when(!hide_time && !is_live, |d| {
                 d.child(
                     div()
                         .ml_1()
@@ -1759,9 +1926,21 @@ impl PlayerView {
     /// Ends a seek-bar or volume drag: seeks to where the bar was let go.
     fn finish_drag(&mut self, cx: &mut Context<Self>) {
         if let Some(f) = self.drag_seek.take() {
-            self.player.update(cx, |p, _| {
-                let d = p.duration;
-                p.seek_interactive(f as f64 * d)
+            self.player.update(cx, |p, cx| {
+                if player_is_live(p) {
+                    let win = player_live_window(p);
+                    if win > 0.0 {
+                        let behind = ((1.0 - f as f64) * win).max(0.0);
+                        if behind <= LIVE_HOVER_EDGE_SECS {
+                            player_go_live(p, cx);
+                        } else {
+                            p.seek_live_behind(behind, cx);
+                        }
+                    }
+                } else {
+                    let d = p.duration;
+                    p.seek_interactive(f as f64 * d);
+                }
             });
         }
         if std::mem::take(&mut self.drag_vol) {

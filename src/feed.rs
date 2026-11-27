@@ -29,7 +29,11 @@ pub fn cached_feed(channel_filter: Option<&[String]>) -> (Vec<VideoItem>, Option
 }
 
 pub fn sort_feed(v: &mut Vec<VideoItem>) {
-    v.sort_by(|a, b| b.published_ts.unwrap_or(0).cmp(&a.published_ts.unwrap_or(0)));
+    v.sort_by(|a, b| {
+        b.is_live
+            .cmp(&a.is_live)
+            .then_with(|| b.published_ts.unwrap_or(0).cmp(&a.published_ts.unwrap_or(0)))
+    });
     let mut seen = std::collections::HashSet::new();
     v.retain(|x| seen.insert(x.id.clone()));
 }
@@ -59,8 +63,9 @@ fn fetch_channel(sub: &Subscription, full: bool, shorts: bool, live: bool) -> Op
                                     v.channel_name = sub.name.clone();
                                 }
                                 v.channel_id.get_or_insert(sub.channel_id.clone());
-                                // shorts lack dates; place them by fetch time ordering
-                                if v.published_ts.is_none() {
+                                // shorts lack dates; place them by fetch time ordering without
+                                // stamping active live or upcoming broadcasts as a week old
+                                if v.published_ts.is_none() && !v.is_live && !v.is_upcoming {
                                     v.published_ts = Some(crate::api::json::now() - 7 * 86400);
                                 }
                                 Some(v)

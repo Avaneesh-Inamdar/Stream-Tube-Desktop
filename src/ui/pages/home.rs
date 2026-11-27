@@ -49,7 +49,56 @@ fn feed_source() -> &'static str {
 
 /// Bumped when the cached items change shape (a new field, a different reading of a
 /// tile), so a feed cached by an older version is not shown.
-const CACHE_VERSION: i64 = 2;
+const CACHE_VERSION: i64 = 3;
+
+fn is_live_chip(chip: usize) -> bool {
+    chip > 0 && chip != RECENT && EXPLORE.get(chip - 1).is_some_and(|&(name, _)| name == "Live")
+}
+
+fn item_key(item: &Item) -> (std::mem::Discriminant<Item>, String) {
+    let id = match item {
+        Item::Video(v) => v.id.clone(),
+        Item::Channel(c) => c.id.clone(),
+        Item::Playlist(p) => p.id.clone(),
+    };
+    (std::mem::discriminant(item), id)
+}
+
+fn append_unique_items(existing: &mut Vec<Item>, incoming: Vec<Item>) {
+    let mut index: std::collections::HashMap<_, usize> =
+        existing.iter().enumerate().map(|(i, it)| (item_key(it), i)).collect();
+    for item in incoming {
+        let key = item_key(&item);
+        if let Some(&pos) = index.get(&key) {
+            // Prefer fresher live status when a later page reports the same video.
+            if matches!(&item, Item::Video(v) if v.is_live)
+                && !matches!(&existing[pos], Item::Video(v) if v.is_live)
+            {
+                existing[pos] = item;
+            }
+        } else {
+            index.insert(key, existing.len());
+            existing.push(item);
+        }
+    }
+}
+
+/// Deduplicates items from the Explore "Live" shelves and places active live
+/// streams ahead of upcoming events and replays, preserving relative order.
+fn prepare_live_items(items: Vec<Item>) -> Vec<Item> {
+    let mut unique = Vec::with_capacity(items.len());
+    append_unique_items(&mut unique, items);
+    sort_live_items(&mut unique);
+    unique
+}
+
+fn sort_live_items(items: &mut [Item]) {
+    items.sort_by_key(|item| match item {
+        Item::Video(v) if v.is_live => 0u8,
+        Item::Video(v) if v.is_upcoming => 1,
+        _ => 2,
+    });
+}
 
 /// The home feed from the last session, shown at once when the app starts while
 /// the new one loads. Kept for three days.
@@ -164,15 +213,26 @@ enum FeedRow {
     Loading { gap: Pixels },
 }
 
-fn feed_rows(items: &[Item], settings: &store::Settings, columns: usize, width: Pixels, rem: Pixels, cx: &App) -> Vec<FeedRow> {
+fn feed_rows(items: &[Item], settings: &store::Settings, live_chip: bool, columns: usize, width: Pixels, rem: Pixels, cx: &App) -> Vec<FeedRow> {
     let shorts_count = ((f32::from(width + rem) / f32::from(px(200.) + rem)).ceil() as usize).clamp(1, 8);
     let row_gap = grid_row_gap();
     let section_gap = rem * 2.0;
+    let effective;
+    let filter_settings = if live_chip && settings.hide_live {
+        let mut adjusted = settings.clone();
+        adjusted.hide_live = false;
+        effective = adjusted;
+        &effective
+    } else {
+        settings
+    };
     let mut cards = Vec::new();
     let mut shorts = Vec::new();
     for (index, item) in items.iter().enumerate() {
         if let Item::Video(video) = item {
-            if store::is_filtered(video, settings) || (settings.hide_watched_in_feed && is_watched(&video.id, cx)) {
+            if store::is_filtered(video, filter_settings)
+                || (settings.hide_watched_in_feed && !video.is_live && is_watched(&video.id, cx))
+            {
                 continue;
             }
             if video.is_short {
@@ -372,7 +432,8 @@ impl HomePage {
                         }
                     }
                     let p = innertube::explore(EXPLORE[chip - 1].1)?;
-                    Ok((p.items, p.continuation))
+                    let items = if is_live_chip(chip) { prepare_live_items(p.items) } else { p.items };
+                    Ok((items, p.continuation))
                 }
             })
             .await;
@@ -442,7 +503,13 @@ impl HomePage {
                 this.loading_more = false;
                 if let Ok(p) = res {
                     if let Some(items) = this.items.ready_mut() {
-                        Arc::make_mut(items).extend(p.items);
+                        if is_live_chip(this.chip) {
+                            let list = Arc::make_mut(items);
+                            append_unique_items(list, p.items);
+                            sort_live_items(list);
+                        } else {
+                            Arc::make_mut(items).extend(p.items);
+                        }
                     }
                     this.continuation = p.continuation;
                 } else {
@@ -494,7 +561,7 @@ impl Render for HomePage {
         let rem = window.rem_size();
         let width = content_width(cx);
         let (columns, card_width) = grid_columns(width, 300.0, rem);
-        let mut chips = div().flex().gap_3().py_3().px_6().bg(p.bg).child(
+        let mut chips = div().flex().flex_wrap().items_center().gap_x_3().gap_y_2().py_3().px_6().bg(p.bg).child(
             chip(
                 "chip-all",
                 if crate::api::auth::signed_in() || crate::api::web::connected() || !store::subscriptions().is_empty() {
@@ -541,7 +608,7 @@ impl Render for HomePage {
             Load::Error(e) => message(error_state(e, cx).into_any_element()),
             Load::Ready(items) => {
                 let items = items.clone();
-                let mut rows = feed_rows(&items, &s, columns, width, rem, cx);
+                let mut rows = feed_rows(&items, &s, is_live_chip(self.chip), columns, width, rem, cx);
                 if rows.is_empty() && self.continuation.is_none() {
                     message(empty_state("tv", "Nothing here yet", "", cx).into_any_element())
                 } else {
@@ -568,7 +635,49 @@ impl Render for HomePage {
             .size_full()
             .flex()
             .flex_col()
-            .child(chips.overflow_hidden())
+            .child(chips)
             .child(scroll_viewport("home-scroll", &self.scroll, body, window, cx))
+    }
+}
+
+#[cfg(test)]
+mod home_live_tests {
+    use super::*;
+
+    fn video(id: &str, is_live: bool, is_upcoming: bool) -> Item {
+        Item::Video(VideoItem {
+            id: id.into(),
+            is_live,
+            is_upcoming,
+            ..Default::default()
+        })
+    }
+
+    #[::core::prelude::v1::test]
+    fn identifies_the_live_explore_chip() {
+        let live_idx = EXPLORE.iter().position(|&(name, _)| name == "Live").unwrap() + 1;
+        assert!(is_live_chip(live_idx));
+        assert!(!is_live_chip(0));
+        assert!(!is_live_chip(RECENT));
+        assert!(!is_live_chip(MUSIC_CHIP));
+    }
+
+    #[::core::prelude::v1::test]
+    fn live_chip_deduplicates_and_puts_active_streams_first() {
+        let items = vec![
+            video("vod1", false, false),
+            video("up1", false, true),
+            video("live1", true, false),
+            video("live1", true, false),
+            video("live2", true, false),
+            video("up1", false, true),
+        ];
+        let mut prepared = prepare_live_items(items);
+        let ids: Vec<_> = prepared.iter().filter_map(|i| i.as_video().map(|v| v.id.as_str())).collect();
+        assert_eq!(ids, vec!["live1", "live2", "up1", "vod1"]);
+
+        append_unique_items(&mut prepared, vec![video("live2", true, false), video("live3", true, false)]);
+        let ids: Vec<_> = prepared.iter().filter_map(|i| i.as_video().map(|v| v.id.as_str())).collect();
+        assert_eq!(ids, vec!["live1", "live2", "up1", "vod1", "live3"]);
     }
 }

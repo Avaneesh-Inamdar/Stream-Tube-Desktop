@@ -41,6 +41,53 @@ pub enum KeyboardFeedback {
 
 const SEEK_DISK_CACHE_LIMIT: u64 = 128 * 1024 * 1024;
 const BACK_CACHE_SIZE: &str = "12MiB";
+const LIVE_EDGE_MARGIN: f64 = 2.0;
+const LIVE_AT_EDGE_THRESHOLD: f64 = 15.0;
+const LIVE_RELOAD_BEHIND_THRESHOLD: f64 = 30.0;
+const LIVE_GO_LIVE_SEEK_MAX_BEHIND: f64 = 120.0;
+const LIVE_EDGE_STALE_SECS: u64 = 15;
+const LIVE_EDGE_PAUSED_STALE_SECS: u64 = 8;
+const LIVE_EOF_RECOVERY_WINDOW: Duration = Duration::from_secs(30);
+const LIVE_EOF_MAX_RECOVERIES: usize = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LoadTarget {
+    LiveEdge,
+    LiveBehind(f64),
+    VodTime(f64),
+}
+
+impl LoadTarget {
+    fn from_vod(start: Option<f64>) -> Self {
+        match start.filter(|t| t.is_finite() && *t > 0.0) {
+            Some(t) => Self::VodTime(t),
+            None => Self::VodTime(0.0),
+        }
+    }
+}
+
+#[derive(Default)]
+struct LiveEofGuard {
+    attempts: Vec<Instant>,
+}
+
+impl LiveEofGuard {
+    fn clear(&mut self) {
+        self.attempts.clear();
+    }
+
+    /// Records a live-EOF recovery attempt at `now`. Returns `true` if recovery
+    /// is allowed (at most `LIVE_EOF_MAX_RECOVERIES` within `LIVE_EOF_RECOVERY_WINDOW`).
+    fn allow(&mut self, now: Instant) -> bool {
+        self.attempts
+            .retain(|&t| now.saturating_duration_since(t) < LIVE_EOF_RECOVERY_WINDOW);
+        if self.attempts.len() >= LIVE_EOF_MAX_RECOVERIES {
+            return false;
+        }
+        self.attempts.push(now);
+        true
+    }
+}
 
 /// The caption margin (mpv's 720-line scale) while the controls are hidden.
 pub const CAPTION_MARGIN: u32 = 40;
@@ -124,6 +171,31 @@ pub struct Player {
     pub audio_track: Option<String>,
     /// "Stats for nerds" overlay
     pub show_stats: bool,
+    /// Last observed live edge (`max(duration, cache_time)`) and when it last advanced.
+    live_edge_at: Option<(f64, Instant)>,
+    /// Active loopback live DASH session (1440p/4K live streams) for virtual DVR seeking.
+    live_dash: Option<crate::api::streams::live_dash::LiveDashHandle>,
+    /// Maps mpv's `time-pos` to wall-clock behind-live seconds on live DASH:
+    /// `(first_pts, observed_wall_time, initial_behind_secs)`.
+    live_dash_anchor: Option<(f64, Instant, f64)>,
+    /// Behind-live offset requested when opening/reloading a live DASH session.
+    live_dash_pending_behind: f64,
+    /// Bounds automatic reload recoveries when a live stream hits EOF.
+    live_eof_guard: LiveEofGuard,
+    /// Per-`loadfile` generation tracking via `CommandReply` + `StartFile` so stale
+    /// events from a replaced file cannot clear `loading` or anchor the wrong PTS.
+    expected_load_gen: u64,
+    reply_load_gen: u64,
+    active_load_gen: u64,
+    /// True once `PlaybackRestart` arrived for the active live DASH load.
+    live_dash_restart_seen: bool,
+    /// Invalidates in-flight background `live_dash::probe_head` tasks.
+    dash_probe_serial: u64,
+    /// Forces HLS playback for the current live video after a fatal live DASH failure.
+    force_live_hls: bool,
+    live_dash_fallback_used: bool,
+    /// Desired behind-live offset to apply once a newly loaded live HLS rendition reports its edge.
+    pending_hls_live_behind: Option<f64>,
 }
 
 impl EventEmitter<PlayerEvent> for Player {}
@@ -199,6 +271,10 @@ fn eq_filter(id: &str) -> &'static str {
 
 impl Player {
     fn new(cx: &mut Context<Self>) -> Self {
+        Self::empty().with_cx(cx)
+    }
+
+    fn empty() -> Self {
         let s = store::settings_snapshot();
         Self {
             caption_margin: std::cell::Cell::new(CAPTION_MARGIN),
@@ -268,8 +344,203 @@ impl Player {
             last_activity: std::time::Instant::now(),
             audio_track: None,
             show_stats: false,
+            live_edge_at: None,
+            live_dash: None,
+            live_dash_anchor: None,
+            live_dash_pending_behind: 0.0,
+            live_eof_guard: LiveEofGuard::default(),
+            expected_load_gen: 0,
+            reply_load_gen: 0,
+            active_load_gen: 0,
+            live_dash_restart_seen: false,
+            dash_probe_serial: 0,
+            force_live_hls: false,
+            live_dash_fallback_used: false,
+            pending_hls_live_behind: None,
         }
-        .with_cx(cx)
+    }
+
+    pub fn is_live(&self) -> bool {
+        self.streams.as_ref().is_some_and(|s| s.is_live)
+            || self.video.as_ref().is_some_and(|v| v.is_live)
+    }
+
+    pub fn live_edge(&self) -> f64 {
+        let d = if self.duration.is_finite() && self.duration > 0.0 { self.duration } else { 0.0 };
+        let c = if self.cache_time.is_finite() && self.cache_time > 0.0 { self.cache_time } else { 0.0 };
+        d.max(c)
+    }
+
+    /// Seekable DVR timeline length in seconds for the current live stream
+    /// (`live_dash` DVR window on 1440p/4K DASH, or `live_edge` on HLS).
+    pub fn live_dvr_window(&self) -> f64 {
+        if !self.is_live() {
+            return 0.0;
+        }
+        if let Some(dash) = &self.live_dash {
+            dash.dvr_window_secs()
+        } else {
+            self.live_edge()
+        }
+    }
+
+    pub fn live_behind(&self) -> f64 {
+        if !self.is_live() {
+            return 0.0;
+        }
+        if let Some(dash) = &self.live_dash {
+            if let Some((base_pts, base_wall, base_behind)) = self.live_dash_anchor {
+                return live_dash_behind_at(
+                    base_pts,
+                    self.time,
+                    base_wall.elapsed().as_secs_f64(),
+                    base_behind,
+                    dash.dvr_window_secs(),
+                );
+            }
+            return self.live_dash_pending_behind.max(0.0);
+        }
+        let edge = self.live_edge();
+        if edge > 0.0 && self.time.is_finite() {
+            (edge - self.time).max(0.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Current playback position along the `0..live_dvr_window()` seekbar.
+    pub fn live_position(&self) -> f64 {
+        let win = self.live_dvr_window();
+        if win > 0.0 {
+            (win - self.live_behind()).clamp(0.0, win)
+        } else {
+            0.0
+        }
+    }
+
+    pub fn is_at_live_edge(&self) -> bool {
+        self.is_live() && !self.paused && !self.eof && self.live_behind() <= LIVE_AT_EDGE_THRESHOLD
+    }
+
+    /// Seeks a live broadcast to `behind_secs` before the live edge (`< 3s` jumps to live).
+    pub fn seek_live_behind(&mut self, behind_secs: f64, cx: &mut Context<Self>) {
+        if !self.is_live() {
+            return;
+        }
+        let behind = if behind_secs.is_finite() { behind_secs.max(0.0) } else { 0.0 };
+        if behind < 3.0 {
+            self.go_live(cx);
+            return;
+        }
+        let win = self.live_dvr_window();
+        if win <= 0.0 {
+            return;
+        }
+        let clamped = behind.clamp(0.0, win);
+        if self.live_dash.is_some() {
+            self.eof = false;
+            self.error = None;
+            self.load_current(LoadTarget::LiveBehind(clamped), true, cx);
+            self.sync_idle(cx);
+            cx.notify();
+            return;
+        }
+        let edge = self.live_edge();
+        if edge > 0.0 {
+            self.seek_interactive((edge - clamped).max(0.0));
+            cx.notify();
+        }
+    }
+
+    /// Moves a live broadcast forward (`delta_secs > 0`) or backward (`delta_secs < 0`)
+    /// inside its DVR window, snapping to the live edge when stepping past it.
+    pub fn seek_live_delta(&mut self, delta_secs: f64, cx: &mut Context<Self>) -> f64 {
+        if !self.is_live() || !delta_secs.is_finite() || delta_secs == 0.0 {
+            return 0.0;
+        }
+        let win = self.live_dvr_window();
+        if win <= 0.0 {
+            return 0.0;
+        }
+        let before_behind = self.live_behind();
+        let target_behind = (before_behind - delta_secs).clamp(0.0, win);
+        if delta_secs > 0.0 && target_behind <= 5.0 {
+            if !self.is_at_live_edge() {
+                self.go_live(cx);
+            }
+            return before_behind;
+        }
+        let moved = before_behind - target_behind;
+        if moved.abs() >= 0.5 {
+            self.seek_live_behind(target_behind, cx);
+        }
+        moved
+    }
+
+    pub fn go_live(&mut self, cx: &mut Context<Self>) {
+        if !self.is_live() {
+            return;
+        }
+        let was_eof = self.eof;
+        let was_paused = self.paused;
+        self.eof = false;
+        if self.live_dash.is_some() {
+            self.error = None;
+            if self.streams.is_some() {
+                self.update_paused(false);
+                self.load_current(LoadTarget::LiveEdge, false, cx);
+            } else if let Some(video) = self.video.clone() {
+                self.play(video, None, cx);
+            }
+            self.sync_idle(cx);
+            cx.notify();
+            return;
+        }
+        let edge = self.live_edge();
+        let behind = self.live_behind();
+        let stale = self.live_edge_is_stale(Instant::now());
+        // When mpv paused/rewound long enough for the HLS playlist to stop refreshing
+        // (verified with libmpv: duration freezes once the demuxer cache fills), or
+        // after EOF / large rewind / error, reload so we land at the true live edge.
+        if should_reload_to_go_live(edge, behind, was_eof, self.error.is_some(), stale) {
+            self.error = None;
+            if self.streams.is_some() {
+                self.update_paused(false);
+                self.load_current(LoadTarget::LiveEdge, false, cx);
+            } else if let Some(video) = self.video.clone() {
+                self.play(video, None, cx);
+            }
+            self.sync_idle(cx);
+            cx.notify();
+            return;
+        }
+        let target = clamp_live_seek(edge, edge);
+        self.seek(target, "absolute+keyframes");
+        if was_paused {
+            self.set_paused(false, cx);
+        }
+        cx.notify();
+    }
+
+    fn record_live_edge(&mut self, now: Instant) {
+        if !self.is_live() {
+            return;
+        }
+        let edge = self.live_edge();
+        if edge <= 0.0 {
+            return;
+        }
+        let advanced = match self.live_edge_at {
+            None => true,
+            Some((prev, _)) => edge > prev + 0.5,
+        };
+        if advanced {
+            self.live_edge_at = Some((edge, now));
+        }
+    }
+
+    fn live_edge_is_stale(&self, now: Instant) -> bool {
+        is_live_edge_stale(self.live_edge_at, self.paused, now)
     }
 
     fn with_cx(self, _cx: &mut Context<Self>) -> Self {
@@ -290,6 +561,10 @@ impl Player {
         if self.in_pip || self.foreground && crate::ui::pip::handle(cx).is_none() {
             crate::idle_inhibit::set_playing(cx, self.should_inhibit_idle());
         }
+    }
+
+    pub(crate) fn is_foreground(&self) -> bool {
+        self.foreground
     }
 
     pub(crate) fn set_foreground(&mut self, active: bool, cx: &mut Context<Self>) {
@@ -418,6 +693,10 @@ impl Player {
             Ok(m) => {
                 self.mpv = Some(m.clone());
                 self.engine_generation += 1;
+                self.expected_load_gen = 0;
+                self.reply_load_gen = 0;
+                self.active_load_gen = 0;
+                self.live_dash_restart_seen = false;
                 let generation = self.engine_generation;
                 cx.spawn(async move |this, cx| {
                     use futures::StreamExt;
@@ -470,16 +749,70 @@ impl Player {
         self.mpv.clone()
     }
 
+    fn is_active_load(&self) -> bool {
+        self.expected_load_gen > 0 && self.active_load_gen == self.expected_load_gen
+    }
+
+    fn maybe_apply_pending_hls_dvr(&mut self) {
+        if self.loading || self.live_dash.is_some() {
+            return;
+        }
+        let Some(behind) = self.pending_hls_live_behind else { return };
+        let edge = self.live_edge();
+        if edge <= 0.0 {
+            return;
+        }
+        self.pending_hls_live_behind = None;
+        let target = clamp_live_seek((edge - behind).max(0.0), edge);
+        self.seek_interactive(target);
+    }
+
+    fn try_fallback_live_dash_to_hls(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.live_dash.is_some()
+            && !self.live_dash_fallback_used
+            && self.streams.as_ref().is_some_and(|i| i.is_live && i.hls_url.is_some())
+        {
+            let target = self.reload_target();
+            self.live_dash_fallback_used = true;
+            self.force_live_hls = true;
+            self.error = None;
+            eprintln!("[player] Live DASH failed; falling back to HLS");
+            self.load_current(target, true, cx);
+            return true;
+        }
+        false
+    }
+
     fn handle_event(&mut self, ev: MpvEvent, cx: &mut Context<Self>) {
         let tracked = matches!(
             &ev,
-            MpvEvent::FileLoaded
+            MpvEvent::CommandReply { .. }
+                | MpvEvent::StartFile
+                | MpvEvent::FileLoaded
                 | MpvEvent::PlaybackRestart
                 | MpvEvent::EndFile { .. }
                 | MpvEvent::Prop(..)
                 | MpvEvent::Shutdown
         );
         match ev {
+            MpvEvent::CommandReply { id, error } => {
+                if id == self.expected_load_gen && id > 0 {
+                    if let Some(e) = error {
+                        if !self.try_fallback_live_dash_to_hls(cx) {
+                            self.loading = false;
+                            self.error = Some(tf!("Playback error: {0}", e));
+                        }
+                        cx.notify();
+                    } else {
+                        self.reply_load_gen = id;
+                    }
+                }
+            }
+            MpvEvent::StartFile => {
+                if self.expected_load_gen > 0 && self.reply_load_gen == self.expected_load_gen {
+                    self.active_load_gen = self.expected_load_gen;
+                }
+            }
             MpvEvent::Frame => {
                 if !self.foreground && !self.in_pip {
                     if let Some(mpv) = &self.mpv { let _ = mpv.take_frame(); }
@@ -526,16 +859,26 @@ impl Player {
                 }
             }
             MpvEvent::FileLoaded => {
+                if !self.is_active_load() {
+                    return;
+                }
                 if self.video.as_ref().is_some_and(|v| v.is_short) {
                     self.cache_time = 0.0;
                 }
                 self.loading = false;
                 self.eof = false;
                 self.apply_caption();
+                self.maybe_apply_pending_hls_dvr();
                 cx.emit(PlayerEvent::Loaded);
                 cx.notify();
             }
             MpvEvent::PlaybackRestart => {
+                if !self.is_active_load() {
+                    return;
+                }
+                if self.live_dash.is_some() && !self.loading {
+                    self.live_dash_restart_seen = true;
+                }
                 self.frame_progress = None;
                 if !self.loading && !self.buffering && self.error.is_none() && self.streams.is_some() {
                     if let Some((action, started)) = self.playback_timing.take() {
@@ -547,8 +890,14 @@ impl Player {
                 cx.notify();
             }
             MpvEvent::EndFile { eof, error } => {
+                if !self.is_active_load() {
+                    return;
+                }
                 if let Some(e) = error {
                     if self.video.is_some() {
+                        if self.try_fallback_live_dash_to_hls(cx) {
+                            return;
+                        }
                         if self.loading && !self.fallback_tried {
                             self.fallback_to_ytdlp(cx);
                         } else {
@@ -563,6 +912,10 @@ impl Player {
                 cx.notify();
             }
             MpvEvent::Prop(name, val) => {
+                let is_global_prop = matches!(name, "speed" | "volume" | "mute" | "pause");
+                if !is_global_prop && !self.is_active_load() {
+                    return;
+                }
                 // While frames are flowing, the frame event already redraws the player;
                 // only redraw for clock/cache updates when no video frames arrive.
                 let quiet = matches!(name, "time-pos" | "demuxer-cache-time" | "demuxer-cache-state")
@@ -573,6 +926,18 @@ impl Player {
                 match (name, val) {
                     ("time-pos", PropValue::Double(t)) => {
                         self.time = t;
+                        if self.live_dash_anchor.is_none()
+                            && !self.loading
+                            && self.live_dash_restart_seen
+                            && t.is_finite()
+                        {
+                            if let Some(dash) = &self.live_dash {
+                                let actual_behind = dash
+                                    .actual_start_behind_secs()
+                                    .unwrap_or(self.live_dash_pending_behind);
+                                self.live_dash_anchor = Some((t, Instant::now(), actual_behind));
+                            }
+                        }
                         if t > 0. && self.error.is_none() && !self.loading && !self.buffering && !self.paused && !self.playback_ready {
                             self.set_playback_ready(true, cx);
                         }
@@ -580,7 +945,11 @@ impl Player {
                             self.on_time(cx);
                         }
                     }
-                    ("duration", PropValue::Double(d)) => self.duration = d,
+                    ("duration", PropValue::Double(d)) => {
+                        self.duration = d;
+                        self.record_live_edge(Instant::now());
+                        self.maybe_apply_pending_hls_dvr();
+                    }
                     ("pause", PropValue::Flag(b)) => {
                         self.update_paused(b);
                         self.frame_progress = None;
@@ -603,7 +972,11 @@ impl Player {
                         self.seeking = b;
                         self.frame_progress = None;
                     }
-                    ("demuxer-cache-time", PropValue::Double(c)) => self.cache_time = c,
+                    ("demuxer-cache-time", PropValue::Double(c)) => {
+                        self.cache_time = c;
+                        self.record_live_edge(Instant::now());
+                        self.maybe_apply_pending_hls_dvr();
+                    }
                     ("demuxer-cache-state", PropValue::Cache { ranges, disk_bytes }) if !self.loading && self.streams.is_some() => {
                         self.seek_disk_bytes = self.seek_disk_bytes.max(disk_bytes);
                         if let Some((from, end)) = self.seek_cache_target {
@@ -637,23 +1010,36 @@ impl Player {
     }
 
     fn on_ended(&mut self, cx: &mut Context<Self>) {
-        let Some(video) = &self.video else { return };
-        if self.loading || self.error.is_some() || self.eof {
+        if self.video.is_none() || self.loading || self.error.is_some() || self.eof {
             return;
         }
-        let live = video.is_live || self.streams.as_ref().is_some_and(|info| info.is_live);
+        if self.is_live() {
+            // Hitting EOF on a livestream (scrubbing to the live edge, expired URLs,
+            // or a transient buffer underrun) must never set `eof`, advance the queue,
+            // or emit `PlayerEvent::Ended` (which would autoplay-skip to the next video).
+            self.eof = false;
+            if self.live_dash.as_ref().is_some_and(|d| d.has_fatal_error())
+                && self.try_fallback_live_dash_to_hls(cx)
+            {
+                return;
+            }
+            if self.live_rejoins < 5 && self.live_eof_guard.allow(Instant::now()) {
+                self.live_rejoins += 1;
+                eprintln!("[player] Live stream hit EOF; rejoining broadcast (attempt {})", self.live_rejoins);
+                self.rejoin_live(cx);
+            } else {
+                eprintln!("[player] Live stream hit EOF repeatedly; stopping recovery");
+                self.set_paused(true, cx);
+                self.set_playback_ready(false, cx);
+                self.error = Some(translate("The live stream has ended or was interrupted.").into());
+            }
+            self.sync_idle(cx);
+            cx.notify();
+            return;
+        }
         let position = self.mpv.as_ref().and_then(|mpv| mpv.get_f64("time-pos")).unwrap_or(self.time);
-        // a live stream has no start to loop back to (youtube.com offers no Loop there)
-        let looping = self.loop_video && !live;
-        if live && self.live_rejoins < 5 {
-            // A live HLS playlist can stop refreshing mid-stream (the URL
-            // expired, a reload failed) and mpv reports the end. Ask YouTube
-            // again: still live means join it again, ended means play on.
-            self.live_rejoins += 1;
-            self.rejoin_live(cx);
-            return;
-        }
-        if !live && premature_eof(position, self.duration) {
+        let looping = self.loop_video;
+        if premature_eof(position, self.duration) {
             self.time = position;
             self.error = Some("Playback stopped before the end of the video.".into());
             self.save_progress(true);
@@ -850,7 +1236,7 @@ impl Player {
         } else {
             self.recovering_picture = true;
             eprintln!("[player] Video frames stalled while playback advanced. Reopening at {:.1}s with software decoding.", self.time);
-            self.load_current(Some(self.time), true, cx);
+            self.load_current(LoadTarget::VodTime(self.time), true, cx);
         }
         true
     }
@@ -864,13 +1250,16 @@ impl Player {
         }
         // progress save
         if !self.loading && !self.eof && (t - self.last_progress_save).abs() >= 5.0 {
-            self.save_progress(false);
+            if self.is_live() {
+                self.last_progress_save = t;
+            } else {
+                self.save_progress(false);
+                if let Some(id) = self.video.as_ref().map(|v| v.id.clone()) {
+                    cx.default_global::<crate::ui::cards::Watched>().0.insert(id, (t, self.duration));
+                }
+            }
             if let Some(report) = &self.history_report {
                 report.progress(t, !self.paused, false);
-            }
-            let id = self.video.as_ref().map(|v| v.id.clone());
-            if let Some(id) = id {
-                cx.default_global::<crate::ui::cards::Watched>().0.insert(id, (t, self.duration));
             }
         }
         // SponsorBlock
@@ -950,6 +1339,9 @@ impl Player {
     }
 
     pub(crate) fn save_progress(&mut self, force: bool) {
+        if self.is_live() {
+            return;
+        }
         if let Some(v) = &self.video {
             if self.time > 0.0 || (force && (self.playback_ready || self.last_progress_save > 0.0 || self.eof)) {
                 // the periodic save goes to a background thread; a forced one (switching
@@ -1004,10 +1396,23 @@ impl Player {
             return;
         };
         self.load_serial += 1;
+        self.expected_load_gen += 1;
+        self.reply_load_gen = 0;
+        self.active_load_gen = 0;
+        self.live_dash_restart_seen = false;
+        self.dash_probe_serial += 1;
+        self.force_live_hls = false;
+        self.live_dash_fallback_used = false;
+        self.pending_hls_live_behind = None;
         self.fallback_tried = false;
         self.live_rejoins = 0;
         self.recovering_picture = false;
         self.frame_progress = None;
+        self.live_edge_at = None;
+        self.live_dash = None;
+        self.live_dash_anchor = None;
+        self.live_dash_pending_behind = 0.0;
+        self.live_eof_guard.clear();
         let serial = self.load_serial;
         self.video = Some(video.clone());
         self.loading = true;
@@ -1037,7 +1442,7 @@ impl Player {
         self.sync_idle(cx);
         let s = store::settings_snapshot();
         let id = video.id.clone();
-        let refresh = if s.resume_playback && start.is_none() && !video.is_short {
+        let refresh = if s.resume_playback && start.is_none() && !video.is_short && !video.is_live {
             crate::ui::history::refresh_for_playback(cx)
         } else {
             None
@@ -1046,7 +1451,7 @@ impl Player {
         if s.annotations {
             self.load_annotations(cx);
         }
-        if s.sponsorblock {
+        if s.sponsorblock && !video.is_live {
             let segment_id = id.clone();
             cx.spawn(async move |this, cx| {
                 let segments = blocking(move || {
@@ -1091,6 +1496,9 @@ impl Player {
                             p.duration = info.length_secs as f64;
                         }
                         if let Some(v) = p.video.as_mut() {
+                            if info.is_live {
+                                v.is_live = true;
+                            }
                             if v.channel_id.is_none() && !info.channel_id.is_empty() {
                                 v.channel_id = Some(info.channel_id.clone());
                             }
@@ -1108,7 +1516,11 @@ impl Player {
                         p.streams = Some(info);
                         // default caption
                         let s = store::settings_snapshot();
-                        let resume = start.or_else(|| s.resume_playback.then(|| store::resume_position(&id)).flatten());
+                        let resume = if p.is_live() {
+                            start
+                        } else {
+                            start.or_else(|| s.resume_playback.then(|| store::resume_position(&id)).flatten())
+                        };
                         p.caption = if s.captions_enabled {
                             p.streams.as_ref().and_then(|i| pick_caption(i, &s.captions_lang))
                         } else {
@@ -1122,7 +1534,12 @@ impl Player {
                             .and_then(store::channel_speed)
                             .unwrap_or(s.default_speed);
                         p.speed = speed;
-                        p.load_current(resume, false, cx);
+                        let target = if p.is_live() {
+                            LoadTarget::LiveEdge
+                        } else {
+                            LoadTarget::from_vod(resume)
+                        };
+                        p.load_current(target, false, cx);
                     }
                     Err(e) => {
                         p.loading = false;
@@ -1166,15 +1583,17 @@ impl Player {
                     return;
                 }
                 match res {
-                    Ok(info) if info.is_live && info.hls_url.is_some() => {
+                    Ok(info) if info.is_live && (info.hls_url.is_some() || streams::has_live_dash(&info)) => {
                         p.streams = Some(Arc::new(info));
-                        p.load_current(None, false, cx);
+                        p.update_paused(false);
+                        p.load_current(LoadTarget::LiveEdge, false, cx);
                     }
                     _ => {
-                        // the broadcast ended: carry on as a finished video
                         p.loading = false;
                         p.live_rejoins = u32::MAX;
-                        p.on_ended(cx);
+                        p.set_paused(true, cx);
+                        p.set_playback_ready(false, cx);
+                        p.error = Some(translate("The live stream has ended or was interrupted.").into());
                     }
                 }
                 p.sync_idle(cx);
@@ -1191,7 +1610,7 @@ impl Player {
         let Some(id) = self.video.as_ref().map(|v| v.id.clone()) else { return };
         streams::invalidate(&id);
         let serial = self.load_serial;
-        let resume = (self.time > 1.0).then_some(self.time);
+        let vod_resume = (!self.is_live() && self.time > 1.0).then_some(self.time);
         cx.spawn(async move |this, cx| {
             let res = blocking(move || streams::ytdlp_streams(&id)).await;
             let _ = this.update(cx, |p, cx| {
@@ -1203,8 +1622,18 @@ impl Player {
                         if p.storyboard.is_none() {
                             p.storyboard = info.storyboard.clone();
                         }
+                        if info.is_live {
+                            if let Some(v) = p.video.as_mut() {
+                                v.is_live = true;
+                            }
+                        }
+                        let target = if info.is_live {
+                            p.reload_target()
+                        } else {
+                            LoadTarget::from_vod(vod_resume)
+                        };
                         p.streams = Some(Arc::new(info));
-                        p.load_current(resume, false, cx);
+                        p.load_current(target, false, cx);
                     }
                     Err(e) => {
                         p.loading = false;
@@ -1219,12 +1648,30 @@ impl Player {
     }
 
     /// (Re)loads current streams into mpv with current quality/audio settings.
-    fn load_current(&mut self, start: Option<f64>, keep_pause: bool, cx: &mut Context<Self>) {
+    fn load_current(&mut self, target: LoadTarget, keep_pause: bool, cx: &mut Context<Self>) {
+        self.load_current_with_head(target, keep_pause, None, cx);
+    }
+
+    fn load_current_with_head(
+        &mut self,
+        target: LoadTarget,
+        keep_pause: bool,
+        probed_head: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        let prev_dash_head = probed_head.or_else(|| self.live_dash.as_ref().map(|d| d.latest_head()));
         // mpv restores file-local options when the previous file closes.
+        self.dash_probe_serial += 1;
+        self.pending_hls_live_behind = None;
+        self.live_dash_restart_seen = false;
         self.seek_cache_target = None;
         self.seek_disk_bytes = 0;
         self.cache_ranges = None;
         self.cache_time = 0.0;
+        self.live_edge_at = None;
+        self.live_dash = None;
+        self.live_dash_anchor = None;
+        self.live_dash_pending_behind = 0.0;
         self.preloaded_until = 0.0;
         self.frame_progress = None;
         self.set_playback_ready(false, cx);
@@ -1235,23 +1682,35 @@ impl Player {
         self.hold_picture = Some(mpv.presented_frames());
         let s = store::settings_snapshot();
         let is_short = self.video.as_ref().is_some_and(|v| v.is_short) && !info.is_live;
-        let selection = streams::playback_stream(
-            &info,
-            self.quality,
-            &s.codec_pref,
-            self.audio_track.as_deref(),
-            self.audio_only,
-            self.recovering_picture,
-        );
+        let selection = if info.is_live && self.force_live_hls {
+            info.hls_url.as_deref().map(streams::PlaybackStream::Hls)
+        } else {
+            streams::playback_stream(
+                &info,
+                self.quality,
+                &s.codec_pref,
+                self.audio_track.as_deref(),
+                self.audio_only,
+                self.recovering_picture,
+            )
+        };
         let mut opening = 0.0;
+        let mut is_hls_src = false;
+        let mut is_live_dash = false;
         let src = match selection {
-            Some(streams::PlaybackStream::Hls(url)) if info.hls_only || is_short => {
+            Some(streams::PlaybackStream::Hls(url)) if info.hls_only || info.is_live || is_short => {
+                is_hls_src = true;
                 let audio = streams::hls_audio_choice(&info, self.audio_track.as_deref());
                 let source = super::proxy::playback_hls(url, self.quality, audio.as_deref(), self.recovering_picture);
+                let start_sec = match target {
+                    LoadTarget::VodTime(t) => t,
+                    _ => 0.0,
+                };
                 if !is_short && !info.is_live && source != url {
-                    super::proxy::prefetch_opening(url, self.quality, audio.as_deref(), self.recovering_picture, start.unwrap_or(0.0));
+                    super::proxy::prefetch_opening(url, self.quality, audio.as_deref(), self.recovering_picture, start_sec);
                 }
-                if is_short && !self.recovering_picture && source != url && start.unwrap_or(0.0) == 0.0 {
+                let at_start = matches!(target, LoadTarget::VodTime(t) if t == 0.0);
+                if is_short && !self.recovering_picture && source != url && at_start {
                     opening = super::shorts_preload::hls_opening_seconds(
                         url,
                         self.quality,
@@ -1262,6 +1721,7 @@ impl Player {
                 Some(source)
             }
             Some(streams::PlaybackStream::Hls(url)) => {
+                is_hls_src = true;
                 // libmpv only speaks HTTP proxies: with a SOCKS proxy, live HLS goes through the local proxy
                 if crate::store::proxy_setting().is_some_and(|p| !crate::store::mpv_http_proxy(&p)) {
                     let audio = streams::hls_audio_choice(&info, self.audio_track.as_deref());
@@ -1275,7 +1735,63 @@ impl Player {
             }
             Some(streams::PlaybackStream::Muxed(m)) => Some(m.url.clone()),
             Some(streams::PlaybackStream::Adaptive(v, a)) => {
-                streams::mpv_source(v, a, info.length_secs)
+                if info.is_live
+                    && (v.is_some_and(streams::is_live_dash_format)
+                        || a.is_some_and(streams::is_live_dash_format))
+                {
+                    let behind = match target {
+                        LoadTarget::LiveBehind(b) if b.is_finite() && b > 0.0 => b,
+                        _ => 0.0,
+                    };
+                    if let Some(handle) = streams::live_dash::open_at_cached(v, a, behind, prev_dash_head) {
+                        is_live_dash = true;
+                        self.live_dash_pending_behind = behind;
+                        let url = handle.url.clone();
+                        self.live_dash = Some(handle);
+                        Some(url)
+                    } else if probed_head.is_none() {
+                        // Head cache missed: probe off the UI thread so the window never blocks.
+                        if let Some(probe_url) = v.or(a).map(|f| f.url.clone()) {
+                            let load_serial = self.load_serial;
+                            let probe_serial = self.dash_probe_serial;
+                            self.expected_load_gen += 1;
+                            self.reply_load_gen = 0;
+                            self.active_load_gen = 0;
+                            self.loading = true;
+                            cx.spawn(async move |this, cx| {
+                                let head = blocking(move || streams::live_dash::probe_head(&probe_url)).await;
+                                let _ = this.update(cx, |p, cx| {
+                                    if p.load_serial != load_serial || p.dash_probe_serial != probe_serial {
+                                        return;
+                                    }
+                                    if let Some(h) = head {
+                                        p.load_current_with_head(target, keep_pause, Some(h), cx);
+                                    } else if p.streams.as_ref().is_some_and(|i| i.hls_url.is_some()) {
+                                        p.force_live_hls = true;
+                                        p.load_current_with_head(target, keep_pause, None, cx);
+                                    } else {
+                                        p.loading = false;
+                                        p.error = Some(translate("No playable stream found").into());
+                                        p.sync_idle(cx);
+                                        cx.notify();
+                                    }
+                                });
+                            })
+                            .detach();
+                            cx.notify();
+                            return;
+                        }
+                        None
+                    } else {
+                        info.hls_url.as_deref().map(|url| {
+                            is_hls_src = true;
+                            let audio = streams::hls_audio_choice(&info, self.audio_track.as_deref());
+                            super::proxy::playback_hls(url, self.quality, audio.as_deref(), self.recovering_picture)
+                        })
+                    }
+                } else {
+                    streams::mpv_source(v, a, info.length_secs)
+                }
             }
             None => None,
         };
@@ -1289,7 +1805,12 @@ impl Player {
         let mut opts = vec![format!("speed={}", self.speed)];
         if self.recovering_picture {
             opts.push("hwdec=no".into());
-        } else if info.hls_only && !info.is_live {
+        }
+        if info.is_live {
+            // File-local low-latency live options; mpv restores global defaults when
+            // the live stream closes so VOD caching and seeking stay unaffected.
+            opts.extend(live_loadfile_options(is_hls_src).into_iter().map(str::to_string));
+        } else if info.hls_only && !self.recovering_picture {
             // The proxy already selects one HLS rendition. Limit how much of its
             // opening segments libavformat reads before it can start or resume.
             opts.push("demuxer-lavf-analyzeduration=0.8".into());
@@ -1298,8 +1819,24 @@ impl Player {
         if !info.is_live {
             opts.push("cache-secs=40".into());
         }
-        if let Some(t) = start.filter(|t| *t > 0.0) {
-            opts.push(format!("start={t}"));
+        // Never pass `start=` to a dynamic live DASH MPD (FFmpeg's dash demuxer is
+        // non-seekable and DVR offset is encoded in `suggestedPresentationDelay`),
+        // and for live HLS apply DVR offset after the new rendition reports its own
+        // timeline edge so DASH->HLS and variant switches never reuse a stale edge.
+        if !is_live_dash {
+            match target {
+                LoadTarget::VodTime(t) if t.is_finite() && t > 0.0 => {
+                    opts.push(format!("start={t}"));
+                }
+                LoadTarget::LiveBehind(b)
+                    if is_hls_src && info.is_live && b.is_finite() && b > LIVE_RELOAD_BEHIND_THRESHOLD =>
+                {
+                    self.pending_hls_live_behind = Some(b);
+                }
+                _ => {}
+            }
+        } else {
+            self.time = 0.0;
         }
         if keep_pause && was_paused {
             opts.push("pause=yes".into());
@@ -1311,9 +1848,17 @@ impl Player {
         }
         mpv.set("vid", if self.audio_only { "no" } else { "auto" });
         self.loading = true;
-        // mpv 0.38 added an index argument; older libmpv (Ubuntu 22.04's 0.34) takes options third
+        self.expected_load_gen += 1;
+        let load_gen = self.expected_load_gen;
+        self.reply_load_gen = 0;
+        self.active_load_gen = 0;
+        // mpv 0.38 (client API 2.3) added an index argument; older libmpv takes options third
         let joined = opts.join(",");
-        let res = mpv.command(&["loadfile", &src, "replace", "-1", &joined]).or_else(|_| mpv.command(&["loadfile", &src, "replace", &joined]));
+        let res = if mpv.client_api_version() >= (2 << 16) | 3 {
+            mpv.command_with_id(load_gen, &["loadfile", &src, "replace", "-1", &joined])
+        } else {
+            mpv.command_with_id(load_gen, &["loadfile", &src, "replace", &joined])
+        };
         if let Err(e) = res {
             self.loading = false;
             self.error = Some(e.to_string());
@@ -1324,6 +1869,17 @@ impl Player {
     }
 
     pub fn buffered_ranges(&self) -> Vec<(f64, f64)> {
+        if self.live_dash.is_some() {
+            if !self.loading && self.cache_time > self.time {
+                let win = self.live_dvr_window();
+                if win > 0.0 {
+                    let pos = self.live_position();
+                    let ahead = (self.cache_time - self.time).max(0.0);
+                    return vec![(pos, (pos + ahead).min(win))];
+                }
+            }
+            return Vec::new();
+        }
         let mut ranges = Vec::new();
         if !self.loading {
             if let Some(cached) = &self.cache_ranges {
@@ -1474,19 +2030,38 @@ impl Player {
         None
     }
 
+    fn reload_target(&self) -> LoadTarget {
+        if !self.is_live() {
+            return LoadTarget::VodTime(self.time);
+        }
+        if self.live_dash.is_some() {
+            let behind = self.live_behind();
+            return if behind > LIVE_AT_EDGE_THRESHOLD {
+                LoadTarget::LiveBehind(behind)
+            } else {
+                LoadTarget::LiveEdge
+            };
+        }
+        let edge = self.live_edge();
+        match live_reload_start(true, self.time, edge) {
+            Some(t) => LoadTarget::LiveBehind((edge - t).max(0.0)),
+            None => LoadTarget::LiveEdge,
+        }
+    }
+
     pub fn set_quality(&mut self, q: u32, cx: &mut Context<Self>) {
         if q > 0 && store::settings_snapshot().remember_quality {
             store::update_settings(|s| s.default_quality = q);
         }
         self.quality = q;
-        let t = self.time;
-        self.load_current(Some(t), true, cx);
+        let target = self.reload_target();
+        self.load_current(target, true, cx);
     }
 
     pub fn set_audio_track(&mut self, lang: Option<String>, cx: &mut Context<Self>) {
         self.audio_track = lang;
-        let t = self.time;
-        self.load_current(Some(t), true, cx);
+        let target = self.reload_target();
+        self.load_current(target, true, cx);
     }
 
     pub fn set_audio_only(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -1495,8 +2070,8 @@ impl Player {
         if let Some(old) = self.frame.take() {
             cx.drop_image(old, None);
         }
-        let t = self.time;
-        self.load_current(Some(t), true, cx);
+        let target = self.reload_target();
+        self.load_current(target, true, cx);
     }
 
     pub fn available_qualities(&self) -> Vec<u32> {
@@ -1596,7 +2171,7 @@ impl Player {
     // ───── transport controls ─────
 
     pub fn toggle_pause(&mut self, cx: &mut App) {
-        if self.eof {
+        if self.eof && !self.is_live() {
             self.eof = false;
             if let Some(video) = &self.video {
                 self.history_report = crate::api::web::PlaybackReport::new(video.id.clone(), self.load_serial);
@@ -1623,7 +2198,8 @@ impl Player {
     }
 
     fn updated_position_while_paused(&self) -> Option<f64> {
-        if !self.paused || !self.playback_ready || self.loading || self.eof || self.seeking
+        if self.is_live()
+            || !self.paused || !self.playback_ready || self.loading || self.eof || self.seeking
             || (self.time - self.last_progress_save).abs() >= 0.5
         {
             return None;
@@ -1653,20 +2229,35 @@ impl Player {
 
     pub fn seek_interactive(&mut self, t: f64) {
         // Landing on a keyframe avoids fetching and decoding an extra GOP
-        // before showing the picture after a large jump through an HLS VOD.
+        // before showing the picture after a large jump through an HLS stream.
         let buffered = t >= self.time && t <= self.cache_time;
-        let remote_jump = (t - self.time).abs() >= 8.0 && !buffered
-            && self.streams.as_ref().is_some_and(|s| s.hls_only && !s.is_live);
+        let is_hls = self.is_live() || self.streams.as_ref().is_some_and(|s| s.hls_only);
+        let remote_jump = (t - self.time).abs() >= 8.0 && !buffered && is_hls;
         self.seek(t, if remote_jump { "absolute+keyframes" } else { "absolute+exact" });
     }
 
     fn seek(&mut self, t: f64, mode: &str) {
+        // Dynamic live DASH MPDs are non-seekable in FFmpeg; callers must use
+        // `seek_live_behind` / `go_live` instead of sending a broken mpv seek.
+        if self.live_dash.is_some() {
+            return;
+        }
         self.playback_timing = std::env::var_os("STREAMTUBE_PLAYBACK_TIMING").map(|_| ("seek", Instant::now()));
         self.frame_progress = None;
         self.preloaded_until = 0.0;
-        let t = clamp_seek(t, self.duration);
+        let live = self.is_live();
+        let (t, mode) = if live {
+            let edge = self.live_edge();
+            let clamped = clamp_live_seek(t, edge);
+            // Clamping near the live edge uses keyframe seek so mpv doesn't
+            // decode past the last available live frame into EOF.
+            let at_edge = edge > 0.0 && t >= (edge - LIVE_EDGE_MARGIN).max(0.0);
+            (clamped, if at_edge { "absolute+keyframes" } else { mode })
+        } else {
+            (clamp_seek(t, self.duration), mode)
+        };
         if (t < self.time || self.seek_cache_target.is_some()) && !self.loading
-            && self.seek_disk_bytes < SEEK_DISK_CACHE_LIMIT && self.streams.as_ref().is_some_and(|s| !s.is_live)
+            && self.seek_disk_bytes < SEEK_DISK_CACHE_LIMIT && !live
         {
             let ranges = self.cache_ranges.as_deref().unwrap_or_default();
             let end = ranges.iter().filter(|&&(start, _)| start > t).map(|&(_, end)| end)
@@ -1830,6 +2421,19 @@ impl Player {
         self.save_progress(true);
         self.finish_playback_history();
         self.load_serial += 1;
+        self.expected_load_gen += 1;
+        self.reply_load_gen = 0;
+        self.active_load_gen = 0;
+        self.live_dash_restart_seen = false;
+        self.dash_probe_serial += 1;
+        self.force_live_hls = false;
+        self.live_dash_fallback_used = false;
+        self.pending_hls_live_behind = None;
+        self.live_edge_at = None;
+        self.live_dash = None;
+        self.live_dash_anchor = None;
+        self.live_dash_pending_behind = 0.0;
+        self.live_eof_guard.clear();
         if let Some(m) = &self.mpv {
             let _ = m.command(&["stop"]);
         }
@@ -2379,12 +2983,88 @@ mod caption_tests {
     }
 }
 
+fn live_loadfile_options(is_hls: bool) -> Vec<&'static str> {
+    // Benchmarked against libmpv-2.dll on YouTube 5s-segment live HLS:
+    // - live_start_index=-1 stalls on segment boundaries (1-3 paused-for-cache hits / 25s);
+    // - live_start_index=-2 cuts latency from ~13-19s to ~5-9.8s with 0 stalls.
+    // `live_start_index` is an HLS-only FFmpeg option, so omit it for live DASH MPD.
+    let mut opts = Vec::with_capacity(4);
+    if is_hls {
+        opts.push("demuxer-lavf-o=live_start_index=-2");
+    }
+    opts.push("demuxer-lavf-analyzeduration=0.5");
+    opts.push("cache-pause-initial=no");
+    opts.push("demuxer-readahead-secs=10");
+    opts
+}
+
 fn clamp_seek(t: f64, duration: f64) -> f64 {
     if duration > 0.0 {
         t.clamp(0.0, (duration - 0.1).max(0.0))
     } else {
         t.max(0.0)
     }
+}
+
+fn clamp_live_seek(t: f64, live_edge: f64) -> f64 {
+    if live_edge > 0.0 {
+        t.clamp(0.0, (live_edge - LIVE_EDGE_MARGIN).max(0.0))
+    } else {
+        t.max(0.0)
+    }
+}
+
+fn live_dash_behind_at(
+    base_pts: f64,
+    current_pts: f64,
+    elapsed_wall_secs: f64,
+    base_behind_secs: f64,
+    dvr_window_secs: f64,
+) -> f64 {
+    let advanced_media = if current_pts.is_finite() {
+        (current_pts - base_pts).max(0.0)
+    } else {
+        0.0
+    };
+    let raw = (base_behind_secs + elapsed_wall_secs.max(0.0) - advanced_media).max(0.0);
+    if dvr_window_secs > 0.0 {
+        raw.min(dvr_window_secs)
+    } else {
+        raw
+    }
+}
+
+fn live_reload_start(is_live: bool, time: f64, live_edge: f64) -> Option<f64> {
+    if !is_live {
+        return Some(time);
+    }
+    if live_edge > 0.0 && time > 1.0 && (live_edge - time) > LIVE_RELOAD_BEHIND_THRESHOLD {
+        Some(clamp_live_seek(time, live_edge))
+    } else {
+        None
+    }
+}
+
+fn is_live_edge_stale(live_edge_at: Option<(f64, Instant)>, paused: bool, now: Instant) -> bool {
+    let limit = if paused {
+        Duration::from_secs(LIVE_EDGE_PAUSED_STALE_SECS)
+    } else {
+        Duration::from_secs(LIVE_EDGE_STALE_SECS)
+    };
+    match live_edge_at {
+        Some((_, at)) => now.saturating_duration_since(at) >= limit,
+        None => true,
+    }
+}
+
+fn should_reload_to_go_live(
+    edge: f64,
+    behind: f64,
+    was_eof: bool,
+    has_error: bool,
+    edge_stale: bool,
+) -> bool {
+    was_eof || has_error || edge_stale || edge <= 4.0 || behind >= LIVE_GO_LIVE_SEEK_MAX_BEHIND
 }
 
 /// Where a chapter jump from `now` lands: the next chapter's start (`dir` > 0), or
@@ -2417,7 +3097,12 @@ mod chapter_tests {
 
 #[cfg(test)]
 mod seek_tests {
-    use super::clamp_seek;
+    use super::{
+        LIVE_EDGE_PAUSED_STALE_SECS, LIVE_EDGE_STALE_SECS, LiveEofGuard, clamp_live_seek,
+        clamp_seek, is_live_edge_stale, live_loadfile_options, live_reload_start,
+        should_reload_to_go_live,
+    };
+    use std::time::{Duration, Instant};
 
     #[::core::prelude::v1::test]
     fn stays_inside_the_video_and_does_not_panic_when_it_is_very_short() {
@@ -2427,6 +3112,242 @@ mod seek_tests {
         assert_eq!(clamp_seek(5.0, 0.0), 5.0);
         assert_eq!(clamp_seek(0.05, 0.05), 0.0);
         assert_eq!(clamp_seek(0.1, 0.1), 0.0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn live_seek_clamps_two_seconds_before_live_edge() {
+        assert_eq!(clamp_live_seek(3600.0, 3600.0), 3598.0);
+        assert_eq!(clamp_live_seek(3610.0, 3600.0), 3598.0);
+        assert_eq!(clamp_live_seek(3599.5, 3600.0), 3598.0);
+        assert_eq!(clamp_live_seek(3500.0, 3600.0), 3500.0);
+        assert_eq!(clamp_live_seek(-5.0, 3600.0), 0.0);
+        assert_eq!(clamp_live_seek(1.5, 1.5), 0.0);
+        assert_eq!(clamp_live_seek(10.0, 0.0), 10.0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn live_reload_start_returns_to_live_edge_unless_rewound_far_back() {
+        // VOD always keeps its current time.
+        assert_eq!(live_reload_start(false, 42.0, 120.0), Some(42.0));
+        // Live near the edge opens fresh at live edge (None).
+        assert_eq!(live_reload_start(true, 3592.0, 3600.0), None);
+        assert_eq!(live_reload_start(true, 3570.0, 3600.0), None);
+        assert_eq!(live_reload_start(true, 10.0, 0.0), None);
+        // Live explicitly rewound far into DVR preserves the clamped DVR position.
+        assert_eq!(live_reload_start(true, 3200.0, 3600.0), Some(3200.0));
+    }
+
+    #[::core::prelude::v1::test]
+    fn go_live_reloads_when_eof_stale_far_behind_or_uninitialized() {
+        // Fresh edge, recent rewind < 120s, not EOF/error: fast seek.
+        assert!(!should_reload_to_go_live(3600.0, 45.0, false, false, false));
+        // Stale edge (e.g. cache filled while paused or rewound): must reload.
+        assert!(should_reload_to_go_live(3600.0, 45.0, false, false, true));
+        // EOF, error, short edge, or >120s behind: must reload.
+        assert!(should_reload_to_go_live(3600.0, 5.0, true, false, false));
+        assert!(should_reload_to_go_live(3600.0, 5.0, false, true, false));
+        assert!(should_reload_to_go_live(3.0, 1.0, false, false, false));
+        assert!(should_reload_to_go_live(3600.0, 120.0, false, false, false));
+    }
+
+    #[::core::prelude::v1::test]
+    fn live_edge_staleness_tightens_while_paused() {
+        let t0 = Instant::now();
+        assert!(is_live_edge_stale(None, false, t0));
+        assert!(!is_live_edge_stale(
+            Some((3600.0, t0)),
+            false,
+            t0 + Duration::from_secs(LIVE_EDGE_STALE_SECS - 1)
+        ));
+        assert!(is_live_edge_stale(
+            Some((3600.0, t0)),
+            false,
+            t0 + Duration::from_secs(LIVE_EDGE_STALE_SECS)
+        ));
+        assert!(!is_live_edge_stale(
+            Some((3600.0, t0)),
+            true,
+            t0 + Duration::from_secs(LIVE_EDGE_PAUSED_STALE_SECS - 1)
+        ));
+        assert!(is_live_edge_stale(
+            Some((3600.0, t0)),
+            true,
+            t0 + Duration::from_secs(LIVE_EDGE_PAUSED_STALE_SECS)
+        ));
+    }
+
+    #[::core::prelude::v1::test]
+    fn live_eof_guard_caps_recoveries_to_two_per_30s() {
+        let mut guard = LiveEofGuard::default();
+        let t0 = Instant::now();
+        assert!(guard.allow(t0));
+        assert!(guard.allow(t0 + Duration::from_secs(5)));
+        assert!(!guard.allow(t0 + Duration::from_secs(10)));
+        assert!(!guard.allow(t0 + Duration::from_secs(29)));
+        // Once the first attempt falls out of the 30s window, recovery is allowed again.
+        assert!(guard.allow(t0 + Duration::from_secs(31)));
+        assert!(!guard.allow(t0 + Duration::from_secs(32)));
+        guard.clear();
+        assert!(guard.allow(t0 + Duration::from_secs(32)));
+    }
+
+    #[::core::prelude::v1::test]
+    fn live_loadfile_options_configure_low_latency_hls() {
+        let hls = live_loadfile_options(true);
+        assert!(hls.contains(&"demuxer-lavf-o=live_start_index=-2"));
+        assert!(hls.contains(&"demuxer-lavf-analyzeduration=0.5"));
+        assert!(hls.contains(&"cache-pause-initial=no"));
+        assert!(hls.contains(&"demuxer-readahead-secs=10"));
+
+        let dash = live_loadfile_options(false);
+        assert!(!dash.contains(&"demuxer-lavf-o=live_start_index=-2"));
+        assert!(dash.contains(&"demuxer-lavf-analyzeduration=0.5"));
+        assert!(dash.contains(&"cache-pause-initial=no"));
+        assert!(dash.contains(&"demuxer-readahead-secs=10"));
+    }
+}
+
+#[cfg(test)]
+mod live_state_tests {
+    use super::*;
+
+    fn live_player() -> Player {
+        let mut p = Player::empty();
+        p.video = Some(VideoItem { id: "live123".into(), is_live: true, ..Default::default() });
+        p.streams = Some(Arc::new(StreamInfo { is_live: true, ..Default::default() }));
+        p.paused = false;
+        p.playback_ready = true;
+        p
+    }
+
+    #[::core::prelude::v1::test]
+    fn is_live_checks_both_video_and_streams() {
+        let mut p = Player::empty();
+        assert!(!p.is_live());
+
+        p.video = Some(VideoItem { id: "v1".into(), is_live: true, ..Default::default() });
+        assert!(p.is_live());
+
+        p.video = Some(VideoItem { id: "v1".into(), is_live: false, ..Default::default() });
+        assert!(!p.is_live());
+
+        p.streams = Some(Arc::new(StreamInfo { is_live: true, ..Default::default() }));
+        assert!(p.is_live());
+    }
+
+    #[::core::prelude::v1::test]
+    fn live_edge_behind_and_at_edge_calculations() {
+        let mut p = live_player();
+        assert_eq!(p.live_edge(), 0.0);
+        assert_eq!(p.live_behind(), 0.0);
+        assert!(p.is_at_live_edge());
+
+        p.duration = -5.0;
+        p.cache_time = f64::NAN;
+        assert_eq!(p.live_edge(), 0.0);
+
+        p.duration = 3600.0;
+        p.cache_time = 3605.0;
+        p.time = 3597.0;
+        assert_eq!(p.live_edge(), 3605.0);
+        assert_eq!(p.live_behind(), 8.0);
+        assert!(p.is_at_live_edge());
+
+        // Rewound 20s behind live edge -> no longer at live edge.
+        p.time = 3585.0;
+        assert_eq!(p.live_behind(), 20.0);
+        assert!(!p.is_at_live_edge());
+
+        // At edge timestamp, but paused or eof -> not at live edge.
+        p.time = 3600.0;
+        p.paused = true;
+        assert!(!p.is_at_live_edge());
+        p.paused = false;
+        p.eof = true;
+        assert!(!p.is_at_live_edge());
+
+        // Non-live video always reports 0.0 behind and false for is_at_live_edge.
+        let mut vod = Player::empty();
+        vod.duration = 120.0;
+        vod.time = 10.0;
+        vod.paused = false;
+        assert_eq!(vod.live_behind(), 0.0);
+        assert!(!vod.is_at_live_edge());
+    }
+
+    #[::core::prelude::v1::test]
+    fn live_seeks_clamp_before_live_edge_and_never_overshoot() {
+        let mut p = live_player();
+        p.duration = 3600.0;
+        p.cache_time = 3604.0;
+        p.time = 3595.0;
+
+        // Dragging to 100% or pressing Right arrow clamps to live_edge - 2.0.
+        p.seek_interactive(3604.0);
+        assert_eq!(p.time, 3602.0);
+        p.seek_by(10.0);
+        assert_eq!(p.time, 3602.0);
+        p.seek_to(3700.0);
+        assert_eq!(p.time, 3602.0);
+
+        // Seeking backward into DVR works normally.
+        p.seek_interactive(3000.0);
+        assert_eq!(p.time, 3000.0);
+
+        // Non-live VOD still uses duration - 0.1 clamp.
+        let mut vod = Player::empty();
+        vod.duration = 120.0;
+        vod.seek_to(120.0);
+        assert_eq!(vod.time, 119.9);
+    }
+
+    #[::core::prelude::v1::test]
+    fn live_skips_paused_resume_and_reloads_at_live_edge_unless_far_back() {
+        let mut p = live_player();
+        p.paused = true;
+        p.duration = 3600.0;
+        p.time = 3592.0;
+        p.last_progress_save = 3592.0;
+
+        assert_eq!(p.updated_position_while_paused(), None);
+        assert_eq!(p.reload_target(), LoadTarget::LiveEdge);
+
+        p.time = 3000.0;
+        assert_eq!(p.reload_target(), LoadTarget::LiveBehind(600.0));
+    }
+
+    #[::core::prelude::v1::test]
+    fn live_dash_behind_tracks_1x_playback_pause_and_2x_catchup() {
+        // Playing live at 1x: 10s initial latency stays 10s after 60s wall + 60s media
+        assert_eq!(live_dash_behind_at(0.5, 60.5, 60.0, 10.0, 3600.0), 10.0);
+        // Paused for 45s: media frozen, behind grows from 10s to 55s
+        assert_eq!(live_dash_behind_at(0.5, 0.5, 45.0, 10.0, 3600.0), 55.0);
+        // Rewound -13:00 (780s), watching at 2x for 60s: catches up by 60s -> 720s
+        assert_eq!(live_dash_behind_at(100.0, 220.0, 60.0, 780.0, 3600.0), 720.0);
+        // Clamped to DVR window length
+        assert_eq!(live_dash_behind_at(0.0, 0.0, 5000.0, 10.0, 3600.0), 3600.0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn record_live_edge_tracks_advances_and_detects_staleness() {
+        let mut p = live_player();
+        let t0 = Instant::now();
+        assert!(p.live_edge_is_stale(t0));
+
+        p.duration = 3600.0;
+        p.record_live_edge(t0);
+        assert!(!p.live_edge_is_stale(t0 + Duration::from_secs(5)));
+
+        // Tiny sub-0.5s jitter does not count as fresh playlist advance.
+        p.duration = 3600.2;
+        p.record_live_edge(t0 + Duration::from_secs(10));
+        p.paused = true;
+        assert!(p.live_edge_is_stale(t0 + Duration::from_secs(10)));
+
+        // Real 5s segment advance refreshes the timestamp.
+        p.duration = 3605.0;
+        p.record_live_edge(t0 + Duration::from_secs(10));
+        assert!(!p.live_edge_is_stale(t0 + Duration::from_secs(12)));
     }
 }
 

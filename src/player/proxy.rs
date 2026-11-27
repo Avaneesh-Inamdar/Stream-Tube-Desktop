@@ -36,11 +36,129 @@ pub(crate) fn remember_vod_playlist(url: &str, text: Arc<str>) {
     cache.push_back((url.to_owned(), text));
 }
 
+const MAX_ENTRIES: usize = 20_000;
+const KEEP_MEDIA_ENTRIES: usize = 10_000;
+const MAX_HLS_ENTRIES: usize = 1_024;
+
 struct Entry {
     url: String,
     len: Option<u64>,
     mime: String,
     added: std::time::Instant,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct StreamTable {
+    streams: HashMap<u64, Entry>,
+    /// Deduplication index: mime -> (url -> id), kept in sync with `streams`.
+    by_key: HashMap<String, HashMap<String, u64>>,
+    next: u64,
+    use_seq: u64,
+}
+
+impl StreamTable {
+    fn touch(&mut self) -> u64 {
+        self.use_seq = self.use_seq.wrapping_add(1);
+        self.use_seq
+    }
+
+    fn register(&mut self, url: &str, len: Option<u64>, mime: &str) -> u64 {
+        let used = self.touch();
+        if let Some(id) = self.by_key.get(mime).and_then(|urls| urls.get(url).copied()) {
+            if let Some(entry) = self.streams.get_mut(&id) {
+                entry.last_used = used;
+                if entry.len.is_none() {
+                    entry.len = len;
+                }
+                return id;
+            }
+        }
+        self.next += 1;
+        let id = self.next;
+        if self.streams.len() >= MAX_ENTRIES {
+            self.evict();
+        }
+        self.streams.insert(
+            id,
+            Entry {
+                url: url.to_string(),
+                len,
+                mime: mime.to_string(),
+                added: std::time::Instant::now(),
+                last_used: used,
+            },
+        );
+        self.by_key
+            .entry(mime.to_string())
+            .or_default()
+            .insert(url.to_string(), id);
+        id
+    }
+
+    fn get_url(&mut self, id: u64) -> Option<String> {
+        let used = self.touch();
+        let entry = self.streams.get_mut(&id)?;
+        entry.last_used = used;
+        Some(entry.url.clone())
+    }
+
+    fn get_stream(&mut self, id: u64) -> Option<(String, Option<u64>, String, std::time::Instant)> {
+        let used = self.touch();
+        let entry = self.streams.get_mut(&id)?;
+        entry.last_used = used;
+        Some((entry.url.clone(), entry.len, entry.mime.clone(), entry.added))
+    }
+
+    fn set_len(&mut self, id: u64, len: u64) {
+        if let Some(entry) = self.streams.get_mut(&id) {
+            entry.len = Some(len);
+        }
+    }
+
+    fn evict(&mut self) {
+        // Evict least-recently-used non-HLS entries first so active/recent HLS
+        // playlists are never displaced by live segment churn.
+        let mut media: Vec<(u64, u64)> = self
+            .streams
+            .iter()
+            .filter(|(_, e)| e.mime != HLS)
+            .map(|(&id, e)| (e.last_used, id))
+            .collect();
+        if media.len() > KEEP_MEDIA_ENTRIES {
+            let remove_count = media.len() - KEEP_MEDIA_ENTRIES;
+            media.select_nth_unstable_by_key(remove_count, |&(used, _)| used);
+            for &(_, id) in &media[..remove_count] {
+                self.remove(id);
+            }
+        }
+        let mut hls: Vec<(u64, u64)> = self
+            .streams
+            .iter()
+            .filter(|(_, e)| e.mime == HLS)
+            .map(|(&id, e)| (e.last_used, id))
+            .collect();
+        if hls.len() > MAX_HLS_ENTRIES {
+            let remove_count = hls.len() - MAX_HLS_ENTRIES;
+            hls.select_nth_unstable_by_key(remove_count, |&(used, _)| used);
+            for &(_, id) in &hls[..remove_count] {
+                self.remove(id);
+            }
+        }
+    }
+
+    fn remove(&mut self, id: u64) {
+        if let Some(entry) = self.streams.remove(&id) {
+            if let Some(urls) = self.by_key.get_mut(&entry.mime) {
+                if urls.get(&entry.url).copied() == Some(id) {
+                    urls.remove(&entry.url);
+                }
+                if urls.is_empty() {
+                    self.by_key.remove(&entry.mime);
+                }
+            }
+        }
+    }
 }
 
 struct Proxy {
@@ -48,8 +166,7 @@ struct Proxy {
     /// Any local process can reach a loopback port, so every URL carries this
     /// secret first and requests without it are refused.
     token: String,
-    streams: Mutex<HashMap<u64, Entry>>,
-    next: Mutex<u64>,
+    table: Mutex<StreamTable>,
 }
 
 fn proxy() -> Option<&'static Proxy> {
@@ -72,7 +189,7 @@ fn proxy() -> Option<&'static Proxy> {
             let mut rng = rand::rng();
             (0..24).map(|_| format!("{:02x}", rng.random::<u8>())).collect()
         };
-        Some(Proxy { port, token, streams: Mutex::new(HashMap::new()), next: Mutex::new(0) })
+        Some(Proxy { port, token, table: Mutex::new(StreamTable::default()) })
     })
     .as_ref()
 }
@@ -98,20 +215,7 @@ const HLS: &str = "#hls";
 const PASS: &str = "#pass";
 
 fn register(p: &Proxy, url: &str, len: Option<u64>, mime: &str) -> u64 {
-    let id = {
-        let mut n = p.next.lock();
-        *n += 1;
-        *n
-    };
-    let mut s = p.streams.lock();
-    // keep the table bounded: old entries belong to videos no longer playing.
-    // HLS registers one entry per segment, so the window is generous.
-    if s.len() > 20_000 {
-        let min_keep = id.saturating_sub(10_000);
-        s.retain(|k, _| *k >= min_keep);
-    }
-    s.insert(id, Entry { url: url.to_string(), len, mime: mime.to_string(), added: std::time::Instant::now() });
-    id
+    p.table.lock().register(url, len, mime)
 }
 
 /// Returns a local URL that serves `url` to mpv. Non-googlevideo URLs pass through.
@@ -615,9 +719,9 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
     if crate::perf::on() {
         eprintln!("[proxy] {method} {path} range={range:?}");
     }
-    let lookup =|rest: &str| -> Option<String> {
+    let lookup = |rest: &str| -> Option<String> {
         let id: u64 = rest.split(['?', '.']).next()?.parse().ok()?;
-        p.streams.lock().get(&id).map(|e| e.url.clone())
+        p.table.lock().get_url(id)
     };
     if let Some(rest) = path.strip_prefix("/h/") {
         let query = rest.split_once('?').map(|q| q.1).unwrap_or("");
@@ -631,7 +735,7 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
     }
     if let Some(rest) = path.strip_prefix("/c/") {
         let id = rest.strip_suffix(".vtt").and_then(|s| s.parse::<u64>().ok());
-        let url = id.and_then(|id| p.streams.lock().get(&id).map(|e| e.url.clone()));
+        let url = id.and_then(|id| p.table.lock().get_url(id));
         return match (id, url) {
             (Some(id), Some(url)) => match caption_body(id, &url) {
                 Some(body) => super::captions::write_http_response(&mut conn, &body, range, method == "HEAD"),
@@ -648,7 +752,7 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
         };
     }
     let id: Option<u64> = path.strip_prefix("/s/").and_then(|s| s.parse().ok());
-    let entry = id.and_then(|id| p.streams.lock().get(&id).map(|e| (e.url.clone(), e.len, e.mime.clone(), e.added)));
+    let entry = id.and_then(|id| p.table.lock().get_stream(id));
     let Some((url, mut len, mime, added)) = entry else {
         conn.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
         return Ok(());
@@ -657,9 +761,7 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
     if len.is_none() {
         len = cached.as_ref().map(|m| m.total).or_else(|| probe_len(&url));
         if let (Some(id), Some(l)) = (id, len) {
-            if let Some(e) = p.streams.lock().get_mut(&id) {
-                e.len = Some(l);
-            }
+            p.table.lock().set_len(id, l);
         }
     }
     let Some(total) = len else {
@@ -1032,6 +1134,97 @@ mod token_tests {
         let (token, tail) = path.split_once('/').expect("token prefix");
         assert_eq!(token.len(), 48, "48-hex-char session secret");
         assert!(tail.starts_with("p/"), "pass route: {tail}");
+    }
+}
+
+#[cfg(test)]
+mod live_hls_table_tests {
+    use super::*;
+
+    fn test_proxy() -> Proxy {
+        Proxy {
+            port: 12345,
+            token: "testtoken".into(),
+            table: Mutex::new(StreamTable::default()),
+        }
+    }
+
+    #[test]
+    fn live_playlist_reloads_deduplicate_and_never_evict_playlists() {
+        let p = test_proxy();
+        let master = "https://manifest.googlevideo.com/api/manifest/hls_variant/master.m3u8";
+        let media = "https://manifest.googlevideo.com/api/manifest/hls_playlist/live720.m3u8";
+        let master_id = register(&p, master, None, HLS);
+        let media_id = register(&p, media, None, HLS);
+
+        // Simulate 50 reloads of a 720-segment sliding DVR window (advancing 1 segment per reload).
+        let mut first_overlap_line = None;
+        for reload in 0..50usize {
+            // Simulate mpv requesting the media playlist before rewriting it.
+            assert_eq!(p.table.lock().get_url(media_id).as_deref(), Some(media));
+            let mut playlist = String::from("#EXTM3U\n#EXT-X-TARGETDURATION:5\n");
+            for seg in reload..(reload + 720) {
+                playlist.push_str("#EXTINF:5.0,\n");
+                playlist.push_str(&format!(
+                    "https://rr1.googlevideo.com/videoplayback/sq/{seg}/file/seg.ts\n"
+                ));
+            }
+            let rewritten = rewrite_playlist(&p, media, &playlist, 0);
+            if reload == 0 {
+                first_overlap_line = rewritten.lines().find(|l| l.contains("/p/")).map(str::to_owned);
+            } else if reload == 1 {
+                // Segment 1..719 were already registered, so seg 1 reuses its existing proxy URL.
+                let lines: Vec<&str> = rewritten.lines().filter(|l| l.contains("/p/")).collect();
+                assert_eq!(lines.len(), 720);
+                assert_ne!(Some(lines[0].to_string()), first_overlap_line);
+            }
+        }
+
+        let mut table = p.table.lock();
+        // 2 HLS playlists + 720 initial segments + 49 newly arrived segments = 771 entries.
+        assert_eq!(table.streams.len(), 771);
+        assert_eq!(table.get_url(master_id).as_deref(), Some(master));
+        assert_eq!(table.get_url(media_id).as_deref(), Some(media));
+    }
+
+    #[test]
+    fn unique_segment_churn_past_eviction_limit_keeps_hls_playlists_and_bounds_table() {
+        let p = test_proxy();
+        let master = "https://manifest.googlevideo.com/api/manifest/hls_variant/master.m3u8";
+        let media = "https://manifest.googlevideo.com/api/manifest/hls_playlist/live1080.m3u8";
+        let master_id = register(&p, master, None, HLS);
+        let media_id = register(&p, media, None, HLS);
+
+        // Even if every reload produces 720 brand-new unique segment URLs (50 * 720 = 36,000 > MAX_ENTRIES),
+        // cleanup must stay bounded and NEVER evict the active HLS playlist entries.
+        let mut last_seg_id = 0;
+        for reload in 0..50usize {
+            assert_eq!(p.table.lock().get_url(media_id).as_deref(), Some(media));
+            for seg in 0..720usize {
+                let url = format!("https://rr1.googlevideo.com/videoplayback/r{reload}/sq/{seg}/seg.ts");
+                last_seg_id = register(&p, &url, None, PASS);
+            }
+        }
+
+        let mut table = p.table.lock();
+        assert!(table.streams.len() <= MAX_ENTRIES, "table grew to {}", table.streams.len());
+        let indexed: usize = table.by_key.values().map(HashMap::len).sum();
+        assert_eq!(indexed, table.streams.len(), "dedup index must stay in sync with streams");
+        assert_eq!(table.get_url(master_id).as_deref(), Some(master));
+        assert_eq!(table.get_url(media_id).as_deref(), Some(media));
+        assert!(table.get_url(last_seg_id).is_some(), "most recent segment must remain resolvable");
+    }
+
+    #[test]
+    fn register_deduplicates_by_url_and_mime_and_fills_missing_length() {
+        let p = test_proxy();
+        let url = "https://rr1.googlevideo.com/videoplayback?id=1";
+        let id_pass = register(&p, url, None, PASS);
+        let id_pass_again = register(&p, url, Some(4096), PASS);
+        let id_hls = register(&p, url, None, HLS);
+        assert_eq!(id_pass, id_pass_again);
+        assert_ne!(id_pass, id_hls);
+        assert_eq!(p.table.lock().get_stream(id_pass).map(|(_, l, _, _)| l), Some(Some(4096)));
     }
 }
 

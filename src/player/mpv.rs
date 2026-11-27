@@ -109,6 +109,8 @@ impl Node {
 }
 
 const EV_SHUTDOWN: c_int = 1;
+const EV_COMMAND_REPLY: c_int = 5;
+const EV_START_FILE: c_int = 6;
 const EV_END_FILE: c_int = 7;
 const EV_FILE_LOADED: c_int = 8;
 const EV_PROPERTY_CHANGE: c_int = 22;
@@ -410,6 +412,8 @@ pub fn available() -> bool {
 
 #[derive(Clone, Debug)]
 pub enum MpvEvent {
+    CommandReply { id: u64, error: Option<String> },
+    StartFile,
     FileLoaded,
     PlaybackRestart,
     EndFile { eof: bool, error: Option<String> },
@@ -574,6 +578,13 @@ impl Mpv {
                             ev_cb(MpvEvent::Shutdown);
                             break;
                         }
+                        EV_COMMAND_REPLY if e.reply_userdata != 0 => {
+                            ev_cb(MpvEvent::CommandReply {
+                                id: e.reply_userdata,
+                                error: (e.error < 0).then(|| err_str(e.error)),
+                            });
+                        }
+                        EV_START_FILE => ev_cb(MpvEvent::StartFile),
                         EV_FILE_LOADED => ev_cb(MpvEvent::FileLoaded),
                         EV_PLAYBACK_RESTART => ev_cb(MpvEvent::PlaybackRestart),
                         EV_END_FILE => {
@@ -753,12 +764,20 @@ impl Mpv {
     }
 
     pub fn command(&self, args: &[&str]) -> Result<()> {
+        self.command_with_id(0, args)
+    }
+
+    pub fn command_with_id(&self, reply_id: u64, args: &[&str]) -> Result<()> {
         let (_, f) = lib()?;
         let cs: Vec<CString> = args.iter().map(|a| CString::new(*a).unwrap_or_default()).collect();
         let mut ptrs: Vec<*const c_char> = cs.iter().map(|c| c.as_ptr()).collect();
         ptrs.push(std::ptr::null());
-        let rc = unsafe { (f.command_async)(self.h.0, 0, ptrs.as_mut_ptr()) };
+        let rc = unsafe { (f.command_async)(self.h.0, reply_id, ptrs.as_mut_ptr()) };
         if rc < 0 { Err(anyhow!("mpv command {:?}: {}", args.first(), err_str(rc))) } else { Ok(()) }
+    }
+
+    pub fn client_api_version(&self) -> u64 {
+        lib().map(|(_, f)| unsafe { (f.client_api_version)() as u64 }).unwrap_or(0)
     }
 
     pub fn command_sync(&self, args: &[&str]) -> Result<()> {
