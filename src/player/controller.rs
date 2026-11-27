@@ -264,6 +264,10 @@ impl Player {
         let opts: Vec<(&str, &str)> = opts.into_iter().collect();
         let proxy = s.proxy.clone();
         let mut opts_owned: Vec<(String, String)> = opts.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        // Intel Iris Plus hangs inside VideoToolbox's VP9 decoder on frame-threaded
+        // YouTube VP9 streams; keep VideoToolbox for H.264/HEVC and decode VP9/AV1 on CPU
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        opts_owned.push(("hwdec-codecs".into(), "h264,hevc".into()));
         // normal videos reach mpv through the app's local stream proxy, which already
         // uses the user's proxy; mpv itself only fetches live streams directly, and can
         // only use HTTP proxies (127.0.0.1 is excluded through no_proxy, see main)
