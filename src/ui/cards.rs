@@ -659,13 +659,25 @@ pub fn compact_row_with(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn
                 .min_w_0()
                 .gap_1()
                 .child(video_title(SharedString::from(format!("crt-{}", v.id)), title).text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text))
-                .child(
+                .child({
+                    // the channel name opens the channel, like on youtube.com; the rest of the row opens the video
+                    let cid = v.channel_id.clone();
                     div()
+                        .id(SharedString::from(format!("crc-{}", v.id)))
                         .text_xs()
                         .text_color(p.text2)
                         .truncate()
-                        .child(gpui_kit::base::SelectableText::new(SharedString::from(format!("crn-{}", v.id)), v.channel_name.clone())),
-                )
+                        .when(cid.is_some(), |d| d.cursor_pointer().hover(move |s| s.text_color(p.text)))
+                        .on_click(move |_, window, cx| {
+                            let Some(id) = cid.clone() else { return };
+                            cx.stop_propagation();
+                            if has_text_selection(window, cx) {
+                                return;
+                            }
+                            navigate(Route::Channel(id), window, cx);
+                        })
+                        .child(gpui_kit::base::SelectableText::new(SharedString::from(format!("crn-{}", v.id)), v.channel_name.clone()))
+                })
                 .child(div().text_xs().text_color(p.text2).truncate().child(meta_line(v))),
         )
         .child(more_button_with(SharedString::from(format!("crm-{}", v.id)), v, extra, cx))
