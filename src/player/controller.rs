@@ -1330,7 +1330,9 @@ impl Player {
         let (Some(mpv), Some(info)) = (&self.mpv, &self.streams) else { return };
         let _ = mpv.command(&["sub-remove"]);
         if let Some(c) = self.caption.and_then(|i| info.captions.get(i)) {
-            let url = if crate::store::proxy_setting().is_some() {
+            let url = if !info.is_live {
+                crate::player::proxy::local_caption(&c.url)
+            } else if crate::store::proxy_setting().is_some() {
                 crate::player::proxy::local_pass(&c.url)
             } else {
                 c.url.clone()
