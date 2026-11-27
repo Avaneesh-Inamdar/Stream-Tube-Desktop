@@ -57,13 +57,19 @@ pub fn init_menu(main_window: AnyWindowHandle, cx: &mut App) {
         KeyBinding::new("cmd-,", Settings, None),
         KeyBinding::new("cmd-q", Quit, None),
     ]);
-    cx.set_menus([Menu::new("Stream Tube").items([
-        MenuItem::action("About", About),
-        MenuItem::separator(),
-        MenuItem::action("Settings", Settings),
-        MenuItem::separator(),
-        MenuItem::action("Quit Stream Tube", Quit),
-    ])]);
+    cx.set_menus([
+        Menu::new("Stream Tube").items([
+            MenuItem::action("About", About),
+            MenuItem::separator(),
+            MenuItem::action("Settings", Settings),
+            MenuItem::separator(),
+            MenuItem::action("Quit Stream Tube", Quit),
+        ]),
+        // AppKit fills the windows menu itself (Fill, Center, Move & Resize…). The tiling
+        // shortcuts and window managers such as Swish tile through those items, with the
+        // system's animation; without them the window only jumps to its new frame
+        Menu::new("Window").items([]),
+    ]);
 }
 
 fn open_settings(main_window: AnyWindowHandle, route: Route, cx: &mut App) {
