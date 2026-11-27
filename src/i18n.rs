@@ -29,6 +29,8 @@ pub enum AppLanguage {
     ChineseSimplified,
     #[serde(rename = "zh-TW")]
     ChineseTraditional,
+    #[serde(rename = "vi")]
+    Vietnamese,
 }
 
 impl AppLanguage {
@@ -41,6 +43,7 @@ impl AppLanguage {
         (Self::Russian, "Русский"),
         (Self::Ukrainian, "Українська"),
         (Self::Kazakh, "Қазақша"),
+        (Self::Vietnamese, "Tiếng Việt"),
         (Self::Japanese, "日本語"),
         (Self::ChineseSimplified, "简体中文"),
         (Self::ChineseTraditional, "繁體中文"),
@@ -59,6 +62,7 @@ impl AppLanguage {
             Self::Japanese => "ja",
             Self::ChineseSimplified => "zh-CN",
             Self::ChineseTraditional => "zh-TW",
+            Self::Vietnamese => "vi",
         }
     }
 
@@ -73,6 +77,7 @@ impl AppLanguage {
         static JA: Catalog = Catalog::new(include_str!("i18n/locales/ja.json"));
         static ZH_CN: Catalog = Catalog::new(include_str!("i18n/locales/zh-CN.json"));
         static ZH_TW: Catalog = Catalog::new(include_str!("i18n/locales/zh-TW.json"));
+        static VI: Catalog = Catalog::new(include_str!("i18n/locales/vi.json"));
 
         Some(match self {
             Self::English => return None,
@@ -86,6 +91,7 @@ impl AppLanguage {
             Self::Japanese => &JA,
             Self::ChineseSimplified => &ZH_CN,
             Self::ChineseTraditional => &ZH_TW,
+            Self::Vietnamese => &VI,
         })
     }
 

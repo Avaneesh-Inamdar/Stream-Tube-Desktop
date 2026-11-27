@@ -123,7 +123,7 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 - Dark, light or follow Windows
 - Seven accent colours used across the app, and the app icon changes colour to match, on the taskbar and on your desktop shortcuts too
 - Interface scaling, density, thumbnail corner style, grid columns, start page, language and region
-- English, Azerbaijani, French, German, Japanese, Kazakh, Russian, Turkish, Ukrainian, Simplified Chinese and Traditional Chinese in *Settings → General → App language*. YouTube has a separate language setting.
+- English, Azerbaijani, French, German, Japanese, Kazakh, Russian, Turkish, Ukrainian, Vietnamese, Simplified Chinese and Traditional Chinese in *Settings → General → App language*. YouTube has a separate language setting.
 - Smooth page, dialog and menu transitions, and mouse-wheel scrolling that glides instead of jumping
 - Scrollbars you can drag (shown on hover, or always), and pages scroll from the keyboard too: Page Up/Down, Home/End, the arrow keys and Space
 
