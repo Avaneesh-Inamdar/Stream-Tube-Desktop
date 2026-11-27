@@ -1908,6 +1908,7 @@ impl Render for WatchPage {
         let side_w = px(402.);
         let two_col = avail > px(1000.);
         let primary_w = if two_col { (avail - side_w - px(24.)).min(px(1280.)) } else { avail };
+        let full_height = theater && settings.theater_full_height;
         let player_h = if theater {
             (vp.width * (9. / 16.)).min(vp.height - px(56. + 120.))
         } else {
@@ -1952,20 +1953,22 @@ impl Render for WatchPage {
             .w(if theater { vp.width } else { primary_w })
             .h(player_h)
             .flex_none()
+            .when(theater, |d| d.bg(black()))
             .when(!theater, |d| d.rounded_xl().overflow_hidden())
+            .when(full_height, |d| d.w_full().h_full())
             .when_some(glow, |d, color| {
                 d.shadow(vec![BoxShadow { color, offset: point(px(0.), px(0.)), blur_radius: px(90.), spread_radius: px(12.), inset: false }])
             })
             .child(crate::ui::slot::player_slot(cx));
 
         let body = if theater {
-            div()
-                .flex()
+            return page_scroll("watch-scroll", &self.scroll)
                 .flex_col()
-                .child(div().w_full().bg(black()).flex().justify_center().child(player_box))
+                .child(player_box)
                 .child(
                     div()
                         .flex()
+                        .flex_none()
                         .gap_6()
                         .px_6()
                         .pb_24()
@@ -1973,6 +1976,7 @@ impl Render for WatchPage {
                         .child(div().w(primary_w).flex_none().child(primary_info))
                         .child(div().pt_3().child(secondary)),
                 )
+                .into_any_element();
         } else {
             div()
                 .flex()

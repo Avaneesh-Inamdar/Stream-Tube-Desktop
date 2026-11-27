@@ -731,6 +731,12 @@ impl SettingsPage {
         card(cx)
             .child(row("Theater mode", "Use the wider player layout when opening a video", switch("theater-mode", s.theater_mode, |s, v| s.theater_mode = v, cx), cx))
             .child(row(
+                "Full-height theater mode",
+                "Fit the video in the space below the top bar and tabs.",
+                switch("theater-full-height", s.theater_full_height, |s, v| s.theater_full_height = v, cx),
+                cx,
+            ))
+            .child(row(
                 "Picture-in-picture above other apps",
                 "",
                 switch("pip-always-on-top", s.pip_always_on_top, |s, v| s.pip_always_on_top = v, cx),
