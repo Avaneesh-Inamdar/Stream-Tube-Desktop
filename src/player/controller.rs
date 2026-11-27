@@ -84,6 +84,11 @@ pub struct Player {
     pub queue: Vec<VideoItem>,
     pub queue_pos: Option<usize>,
     pub(crate) autoplay_next: Option<VideoItem>,
+    /// Videos played before the current one in this session, newest last,
+    /// for "previous" when there is no queue to step back through.
+    played_before: Vec<VideoItem>,
+    /// The video "previous" is going back to, whose `play` isn't remembered.
+    going_back: Option<String>,
     queue_serial: u64,
     queue_shuffle: bool,
     queue_scroll_y: Option<(u64, Pixels)>,
@@ -146,6 +151,9 @@ pub(crate) fn set_active_player(player: Entity<Player>, cx: &mut App) {
 pub(crate) fn tab_players(cx: &App) -> Vec<Entity<Player>> {
     cx.global::<PlayerHandle>().tabs.iter().filter_map(WeakEntity::upgrade).collect()
 }
+
+/// How many videos back "previous" can go.
+const PLAYED_BEFORE_LIMIT: usize = 50;
 
 pub fn enqueue(v: VideoItem, cx: &mut App) {
     player(cx).update(cx, |p, cx| {
@@ -225,6 +233,8 @@ impl Player {
             queue: Vec::new(),
             queue_pos: None,
             autoplay_next: None,
+            played_before: Vec::new(),
+            going_back: None,
             queue_serial: 0,
             queue_shuffle: false,
             queue_scroll_y: None,
@@ -700,6 +710,27 @@ impl Player {
         .detach();
     }
 
+    /// Remembers the video being left for `next`, unless "previous" is going back.
+    fn remember_played(&mut self, next: &VideoItem) {
+        let going_back = self.going_back.take().is_some_and(|id| id == next.id);
+        let Some(current) = self.video.clone() else { return };
+        // Shorts are swiped through, not watched one after another
+        if going_back || current.id == next.id || current.is_short || next.is_short {
+            return;
+        }
+        self.played_before.retain(|v| v.id != current.id);
+        self.played_before.push(current);
+        let excess = self.played_before.len().saturating_sub(PLAYED_BEFORE_LIMIT);
+        self.played_before.drain(..excess);
+    }
+
+    /// The video "previous" goes back to; the `play` that follows isn't remembered.
+    pub(crate) fn take_played_before(&mut self) -> Option<VideoItem> {
+        let v = self.played_before.pop()?;
+        self.going_back = Some(v.id.clone());
+        Some(v)
+    }
+
     pub fn replace_queue(&mut self, queue: Vec<VideoItem>, pos: Option<usize>) {
         self.queue_serial += 1;
         self.queue = queue;
@@ -925,6 +956,7 @@ impl Player {
     }
 
     pub fn play(&mut self, video: VideoItem, start: Option<f64>, cx: &mut Context<Self>) {
+        self.remember_played(&video);
         self.autoplay_next = None;
         self.playback_timing = std::env::var_os("STREAMTUBE_PLAYBACK_TIMING").map(|_| ("open", Instant::now()));
         self.keyboard_feedback = None;
@@ -1729,6 +1761,7 @@ impl Player {
         self.streams = None;
         self.loading = false;
         self.autoplay_next = None;
+        self.played_before.clear();
         self.reset_queue();
         if let Some(old) = self.frame.take() {
             cx.drop_image(old, None);
