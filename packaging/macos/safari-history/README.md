@@ -125,3 +125,19 @@ History (resume-check)** alongside the older Safari prototypes. The test played
 | Position saved when the last window closed | 42.042 seconds |
 | Final watch-time report | `cmt=42.042`, `final=1`, HTTP `204` |
 | Opened directly from YouTube Watch History in Safari | Safari opened the video with `t=42s`. Playback resumed at `0:42` and advanced to `0:44`. |
+
+## Verified last-window close from PR #243
+
+On Apple Silicon, the opt-in build from
+[PR #243](https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop/pull/243) at
+commit `9975d9a` connected through **Stream Tube Watch History (pr243-resume-check)**.
+The test played [Sprite Fright](https://www.youtube.com/watch?v=_cMxraX_5RE) from
+the beginning and used **⌘W** to close the last Stream Tube window during playback.
+
+| Check | Observed result |
+| --- | --- |
+| Position saved when the last window closed | 43.208 seconds, confirmed in Stream Tube’s local history |
+| Final watch-time report | `cmt=43.208`, `final=1`, HTTP `204` |
+| Opened directly from YouTube Watch History in Safari | Safari opened the video with `t=43s`. Playback resumed at `0:43` and advanced to `0:46`. |
+
+The preceding periodic report was at `0:40`. Safari resumed at the final close position to the whole second.
