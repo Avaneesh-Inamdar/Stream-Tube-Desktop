@@ -1,13 +1,12 @@
 //! Picture-in-picture: the player in a small always-on-top window that stays
 //! visible over other apps.
-use super::slot::SlotFollower;
-use crate::player::controller::player;
+use crate::player::controller::{Player, player};
 use crate::player::view::PlayerView;
 use crate::ui::*;
 use gpui_kit::component::button::Button;
 
 #[derive(Default)]
-struct PipWindow(Option<AnyWindowHandle>);
+pub struct PipWindow(Option<(AnyWindowHandle, Entity<Player>)>);
 impl Global for PipWindow {}
 
 pub struct PipView {
@@ -15,13 +14,20 @@ pub struct PipView {
 }
 
 pub fn handle(cx: &App) -> Option<AnyWindowHandle> {
-    cx.try_global::<PipWindow>().and_then(|p| p.0)
+    cx.try_global::<PipWindow>().and_then(|p| p.0.as_ref().map(|(handle, _)| *handle))
+}
+
+pub(crate) fn owner(cx: &App) -> Option<Entity<Player>> {
+    cx.try_global::<PipWindow>().and_then(|p| p.0.as_ref().map(|(_, player)| player.clone()))
 }
 
 pub fn open(cx: &mut App) {
-    if let Some(h) = cx.try_global::<PipWindow>().and_then(|p| p.0) {
-        if h.update(cx, |_, window, _| window.activate_window()).is_ok() {
-            return;
+    let active = player(cx);
+    if let Some(h) = handle(cx) {
+        if owner(cx).as_ref() == Some(&active) {
+            if h.update(cx, |_, window, _| window.activate_window()).is_ok() { return; }
+        } else {
+            let _ = h.update(cx, |_, window, cx| close(window, cx));
         }
     }
     let size = size(px(480.), px(270.));
@@ -29,7 +35,10 @@ pub fn open(cx: &mut App) {
         .primary_display()
         .map(|d| {
             let b = d.bounds();
-            point(b.origin.x + b.size.width - size.width - px(24.), b.origin.y + b.size.height - size.height - px(72.))
+            point(
+                b.origin.x + b.size.width - size.width - px(24.),
+                b.origin.y + b.size.height - size.height - px(72.),
+            )
         })
         .unwrap_or(point(px(80.), px(80.)));
     let opts = WindowOptions {
@@ -41,6 +50,8 @@ pub fn open(cx: &mut App) {
         is_resizable: true,
         is_minimizable: false,
         window_min_size: Some(gpui_kit::size(px(256.), px(144.))),
+        // never the active window on macOS (see focus), which GPUI otherwise limits to ~30 fps
+        inactive_frame_interval: None,
         ..Default::default()
     };
     let res = gpui_kit::open_window(opts, cx, |_window, cx| {
@@ -49,7 +60,7 @@ pub fn open(cx: &mut App) {
             _window.set_window_title("Picture in Picture");
             crate::macos::configure_pip_window(_window);
         }
-        let pl = player(cx);
+        let pl = active.clone();
         let view = cx.new(|cx| {
             let mut v = PlayerView::new(pl, false, cx);
             v.pip = true;
@@ -58,10 +69,32 @@ pub fn open(cx: &mut App) {
         cx.new(|_| PipView { view })
     });
     match res {
-        Ok((h, _)) => cx.set_global(PipWindow(Some(h))),
+        Ok((h, _)) => {
+            cx.set_global(PipWindow(Some((h, active.clone()))));
+            active.update(cx, |p, cx| p.set_in_pip(true, cx));
+            let _ = h.update(cx, |_, window, cx| {
+                crate::idle_inhibit::set_pip_window(cx, Some(window));
+            });
+        }
         Err(e) => toast(cx, crate::ui::friendly_error(&e.to_string())),
     }
     cx.refresh_windows();
+}
+
+pub fn close(window: &mut Window, cx: &mut App) {
+    clear(cx);
+    window.remove_window();
+    cx.refresh_windows();
+}
+
+fn clear(cx: &mut App) {
+    let previous = owner(cx);
+    cx.set_global(PipWindow(None));
+    crate::idle_inhibit::set_pip_window(cx, None);
+    if let Some(previous) = previous {
+        previous.update(cx, |p, cx| p.set_in_pip(false, cx));
+    }
+    player(cx).update(cx, |p, cx| p.refresh_idle_guard(cx));
 }
 
 /// Starts moving the window under the pointer, as if its title bar was pressed.
@@ -104,19 +137,22 @@ pub(crate) fn begin_window_move(window: &Window) {
 }
 
 pub fn window_closed(id: WindowId, cx: &mut App) {
-    if handle(cx).is_some_and(|panel| panel.window_id() == id) {
-        cx.set_global(PipWindow(None));
+    if handle(cx).is_some_and(|h| h.window_id() == id) {
+        clear(cx);
         cx.refresh_windows();
     }
 }
 
-pub(super) fn main_surface(view: &Entity<PlayerView>, cx: &App) -> SlotFollower {
+/// What the main window shows where the player sits: the video, or while
+/// the PiP window plays it, a placeholder (like YouTube) so the picture
+/// isn't drawn twice.
+pub(super) fn main_surface(view: &Entity<PlayerView>, cx: &App) -> super::slot::SlotFollower {
     let content = if handle(cx).is_some() {
         placeholder().into_any_element()
     } else {
         view.clone().into_any_element()
     };
-    SlotFollower::new(cx, content)
+    super::slot::SlotFollower::new(cx, content)
 }
 
 fn placeholder() -> impl IntoElement {
@@ -130,8 +166,8 @@ fn placeholder() -> impl IntoElement {
         .justify_center()
         .gap_3()
         .child(icon("picture-in-picture").size_8())
-        .child("Playing in Picture in Picture")
-        .child(Button::new("return-from-pip").label("Return to player").on_click(|_, _, cx| {
+        .child(crate::i18n::t("Playing in picture-in-picture").to_string())
+        .child(Button::new("return-from-pip").label(crate::i18n::t("Return to player").to_string()).on_click(|_, _, cx| {
             if let Some(panel) = handle(cx) {
                 let _ = panel.update(cx, |_, window, _| window.remove_window());
             }
