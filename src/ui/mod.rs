@@ -3,6 +3,7 @@ pub mod app_icon;
 pub mod cards;
 pub(crate) mod history;
 pub mod image_cache;
+pub mod music;
 pub mod pages;
 pub mod pip;
 pub mod slot;
@@ -373,6 +374,11 @@ pub fn friendly_error(err: &str) -> String {
         .iter()
         .fold(line, |l, p| l.strip_prefix(p).unwrap_or(l));
     if line.chars().count() > 160 { format!("{}…", line.chars().take(160).collect::<String>()) } else { line.to_string() }
+}
+
+/// Scale each thumbnail's usual corner radius by the user's selected size.
+pub(crate) fn thumbnail_corner_scale() -> f32 {
+    crate::store::settings_snapshot().thumb_radius / 12.0
 }
 
 pub fn avatar(url: Option<&str>, size: Pixels, name: &str, cx: &App) -> AnyElement {

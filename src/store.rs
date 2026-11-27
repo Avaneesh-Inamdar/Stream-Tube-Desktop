@@ -10,6 +10,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub const DEFAULT_UP_NEXT_THUMBNAIL_WIDTH: u32 = 168;
+pub const UP_NEXT_THUMBNAIL_SIZES: &[(u32, &str)] = &[(128, "Small"), (DEFAULT_UP_NEXT_THUMBNAIL_WIDTH, "Medium"), (208, "Large")];
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -20,6 +23,7 @@ pub struct Settings {
     pub start_page: String,
     pub minimize_to_tray: bool,
     pub grid_columns: u32,
+    pub up_next_thumbnail_width: u32,
     // Region
     pub region: String,
     pub language: String,
@@ -32,6 +36,7 @@ pub struct Settings {
     pub proxy: String,
     // Player
     pub theater_mode: bool,
+    pub theater_full_height: bool,
     pub pip_always_on_top: bool,
     pub default_quality: u32,
     pub codec_pref: String,
@@ -170,6 +175,7 @@ impl Default for Settings {
             start_page: "home".into(),
             minimize_to_tray: false,
             grid_columns: 0,
+            up_next_thumbnail_width: DEFAULT_UP_NEXT_THUMBNAIL_WIDTH,
             region: "US".into(),
             language: "en".into(),
             original_video_titles: false,
@@ -178,6 +184,7 @@ impl Default for Settings {
             ytdlp_path: String::new(),
             proxy: String::new(),
             theater_mode: false,
+            theater_full_height: false,
             pip_always_on_top: false,
             default_quality: 1080,
             codec_pref: "vp9".into(),
@@ -342,6 +349,9 @@ fn write_settings_file(s: &Settings) -> Result<()> {
 }
 
 fn normalize_settings(s: &mut Settings) {
+    if !UP_NEXT_THUMBNAIL_SIZES.iter().any(|&(width, _)| width == s.up_next_thumbnail_width) {
+        s.up_next_thumbnail_width = DEFAULT_UP_NEXT_THUMBNAIL_WIDTH;
+    }
     const LADDER: [u32; 7] = [144, 240, 360, 480, 720, 1080, 1440];
     if s.default_quality != 2160 && s.default_quality != 4320 && !LADDER.contains(&s.default_quality) {
         s.default_quality = LADDER.iter().copied().filter(|l| *l <= s.default_quality.max(144)).max().unwrap_or(1080);
@@ -1322,13 +1332,16 @@ mod settings_tests {
     use super::*;
 
     #[test]
-    fn theater_mode_round_trips_and_defaults_to_off() {
+    fn theater_settings_round_trip_and_default_to_off() {
         let old = settings_from_value(serde_json::json!({}));
         assert!(!old.theater_mode);
+        assert!(!old.theater_full_height);
 
-        let enabled = Settings { theater_mode: true, ..old };
+        let enabled = Settings { theater_mode: true, theater_full_height: true, ..old };
         let saved = serde_json::to_value(enabled).unwrap();
-        assert!(settings_from_value(saved).theater_mode);
+        let restored = settings_from_value(saved);
+        assert!(restored.theater_mode);
+        assert!(restored.theater_full_height);
     }
 
     #[test]

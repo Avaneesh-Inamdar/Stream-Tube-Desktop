@@ -212,6 +212,10 @@ fn speed_label(s: f64) -> String {
     if (s - 1.0).abs() < 0.001 { translate("Normal").into() } else { format!("{s}") }
 }
 
+pub(crate) fn mini_player_radius() -> Rems {
+    rems(0.75 * crate::ui::thumbnail_corner_scale())
+}
+
 impl Render for PlayerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::add(&crate::perf::VIEW_RENDERS, 1);
@@ -232,7 +236,15 @@ impl Render for PlayerView {
         let ui = *cx.global::<UiState>();
         let scale = window.scale_factor();
         let view = cx.entity().downgrade();
-        let aspect = aspect::Mode::parse(&store::settings_snapshot().aspect_mode);
+        let settings = store::settings_snapshot();
+        let aspect = aspect::Mode::parse(&settings.aspect_mode);
+        let full_height = settings.theater_mode
+            && settings.theater_full_height
+            && !ui.fullscreen
+            && !ui.shorts
+            && !mini
+            && !self.pip;
+        let aspect = if full_height { aspect.without_zoom() } else { aspect };
         let auto_trim = pl.auto_crop.trim;
         let short_cover = video.as_ref().filter(|_| ui.shorts && !mini && !self.pip && !audio_only && (pl.loading || frame.is_none()) && error.is_none());
         let picture = frame.clone().filter(|_| !audio_only && short_cover.is_none());
@@ -241,8 +253,9 @@ impl Render for PlayerView {
         // A card's overflow_hidden clips to a rectangle in GPUI, so the player rounds its
         // own corners: all four on the watch page, the top two in the mini player (its
         // title sits below), none when it fills the window.
-        let round_all = !mini && !self.pip && !ui.fullscreen && !ui.windowed && !store::settings_snapshot().theater_mode;
-        let radius = px(12.);
+        let round_all = !mini && !self.pip && !ui.fullscreen && !ui.windowed && !settings.theater_mode;
+        // The mini player's video sits inside the card's one-pixel border.
+        let radius = if mini { (mini_player_radius().to_pixels(window.rem_size()) - px(1.)).max(px(0.)) } else { px(12.) };
         let corners = if round_all {
             Corners::all(radius)
         } else if mini {
@@ -253,7 +266,7 @@ impl Render for PlayerView {
         let surface = div()
             .absolute()
             .inset_0()
-            .when(mini, |d| d.rounded_t_xl())
+            .when(mini, |d| d.rounded_t(radius))
             .when(round_all, |d| d.rounded_xl())
             .bg(black())
             .child(
@@ -280,9 +293,17 @@ impl Render for PlayerView {
                             let dims = f.size(0);
                             let fsize = (i32::from(dims.width) as f32, i32::from(dims.height) as f32);
                             let (region, fit) = aspect::resolve(aspect, fsize, (vsize.0 as f32, vsize.1 as f32), auto_trim);
-                            let (x, y, w, h) = aspect::layout((f32::from(bounds.size.width), f32::from(bounds.size.height)), fsize, region, fit);
+                            let layout = aspect::layout((f32::from(bounds.size.width), f32::from(bounds.size.height)), fsize, region, fit);
+                            let (x, y, w, h) = layout;
                             let image = Bounds::new(bounds.origin + point(px(x), px(y)), size(px(w), px(h)));
-                            let _ = window.paint_image(bounds, image, corners, f, 0, false);
+                            let clip = if full_height {
+                                let (x, y, w, h) = region.in_frame(layout);
+                                let visible = Bounds::new(bounds.origin + point(px(x), px(y)), size(px(w), px(h)));
+                                bounds.intersect(&visible)
+                            } else {
+                                bounds
+                            };
+                            let _ = window.paint_image(clip, image, corners, f, 0, false);
                         }
                         window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
@@ -333,7 +354,7 @@ impl Render for PlayerView {
             .relative()
             .size_full()
             .overflow_hidden()
-            .when(mini, |d| d.rounded_t_xl())
+            .when(mini, |d| d.rounded_t(radius))
             .when(round_all, |d| d.rounded_xl())
             .bg(black())
             .on_hover(cx.listener(|this, h: &bool, _, cx| {
@@ -489,7 +510,7 @@ impl Render for PlayerView {
         );
 
         if !mini && !audio_only {
-            if let Some(layer) = self.render_annotations(time, vsize, cx) {
+            if let Some(layer) = self.render_annotations(time, vsize, aspect, full_height, cx) {
                 root = root.child(layer);
             }
         }
@@ -539,6 +560,7 @@ impl Render for PlayerView {
                     .justify_center()
                     .gap_3()
                     .p_6()
+                    .when(mini, |d| d.rounded_t(radius))
                     .bg(hsla(0., 0., 0., 0.85))
                     .child(icon("circle-alert").size_10().text_color(white()))
                     .child(div().text_color(white()).text_center().max_w(px(560.)).text_sm().child(playback_error_message(&e)))
@@ -600,7 +622,7 @@ impl Render for PlayerView {
         }
 
         if mini {
-            return root.child(self.render_mini_controls(show, paused, time, duration, cx)).into_any_element();
+            return root.child(self.render_mini_controls(show, paused, time, duration, radius, cx)).into_any_element();
         }
 
         if let Some(video) = video.filter(|v| ui.shorts && !self.pip && v.is_short) {
@@ -776,7 +798,14 @@ impl PlayerView {
     }
 
     /// Archived annotations over the video picture (letterboxing left out).
-    fn render_annotations(&mut self, time: f64, vsize: (f64, f64), cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_annotations(
+        &mut self,
+        time: f64,
+        vsize: (f64, f64),
+        mode: aspect::Mode,
+        full_height: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         use crate::api::annotations::{Action, Kind};
         if !store::settings_snapshot().annotations {
             return None;
@@ -794,11 +823,9 @@ impl PlayerView {
             let dims = pl.frame.as_ref().map(|f| f.size(0));
             (dims.map(|d| (i32::from(d.width) as f32, i32::from(d.height) as f32)).unwrap_or(video), pl.auto_crop.trim)
         };
-        let mode = aspect::Mode::parse(&store::settings_snapshot().aspect_mode);
         let (region, fit) = aspect::resolve(mode, fsize, video, trim);
-        let (ix, iy, iw, ih) = aspect::layout((aw, ah), fsize, region, fit);
-        let pic = aspect::picture_region(fsize, video);
-        let (ox, oy, pw, ph) = (ix + pic.x * iw, iy + pic.y * ih, pic.w * iw, pic.h * ih);
+        let layout = aspect::layout((aw, ah), fsize, region, fit);
+        let (ox, oy, pw, ph) = aspect::picture_region(fsize, video).in_frame(layout);
         let hovered = self.hover_annotation.clone();
         let rgba = |c: u32, a: f32| {
             let mut c = rgb(c);
@@ -812,13 +839,23 @@ impl PlayerView {
         if pw <= 0.0 || ph <= 0.0 {
             return Some(layer.into_any_element());
         }
+        let (clip_x, clip_y, clip_w, clip_h) = if full_height {
+            region.in_frame(layout)
+        } else {
+            (0.0, 0.0, aw, ah)
+        };
+        let mut annotations = div()
+            .absolute()
+            .when(full_height, |d| d.left(px(clip_x)).top(px(clip_y)).w(px(clip_w)).h(px(clip_h)))
+            .when(!full_height, |d| d.inset_0())
+            .overflow_hidden();
         for (i, a) in list.iter().enumerate() {
             let shown = a.visible_at(time) || a.rollover_of.as_ref().is_some_and(|p| hovered.as_deref() == Some(p.as_str()));
             if !shown {
                 continue;
             }
-            let x = ox + a.x / 100.0 * pw;
-            let y = oy + a.y / 100.0 * ph;
+            let x = ox - clip_x + a.x / 100.0 * pw;
+            let y = oy - clip_y + a.y / 100.0 * ph;
             let w = (a.w / 100.0 * pw).max(1.0);
             let h = (a.h / 100.0 * ph).max(1.0);
             let font = (a.text_size / 100.0 * ph).max(8.0);
@@ -890,9 +927,9 @@ impl PlayerView {
                         this.poke(cx);
                     }));
             }
-            layer = layer.child(el);
+            annotations = annotations.child(el);
         }
-        Some(layer.into_any_element())
+        Some(layer.child(annotations).into_any_element())
     }
 }
 
@@ -999,7 +1036,7 @@ fn navigate_to_current(this: &mut PlayerView, window: &mut Window, cx: &mut Cont
 }
 
 impl PlayerView {
-    fn render_mini_controls(&self, show: bool, paused: bool, time: f64, duration: f64, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_mini_controls(&self, show: bool, paused: bool, time: f64, duration: f64, radius: Pixels, cx: &mut Context<Self>) -> impl IntoElement {
         let frac = if duration > 0.0 { (time / duration) as f32 } else { 0.0 };
         let pp = self.player.clone();
         let pp2 = self.player.clone();
@@ -1007,6 +1044,7 @@ impl PlayerView {
         div()
             .absolute()
             .inset_0()
+            .rounded_t(radius)
             .when(show, |d| {
                 d.bg(hsla(0., 0., 0., 0.4))
                     .child(
@@ -1486,6 +1524,13 @@ impl PlayerView {
                     this.player.update(cx, |p, cx| p.screenshot(cx));
                     this.poke(cx);
                 })))
+            })
+            .when(!ui.fullscreen && !self.pip && !narrow, |d| {
+                // YouTube Music's layout: the cover art, the queue and a player bar
+                d.child(ctl_btn("c-music", "music").on_click(|_, _, cx| {
+                    let on = crate::ui::music::on(cx);
+                    crate::ui::music::set(!on, cx);
+                }))
             })
             .child(ctl_btn("c-settings", "settings").on_click(cx.listener(|this, _, _, cx| {
                 // a mouse-down here already closed an open menu (outside click); don't reopen it

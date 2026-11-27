@@ -59,6 +59,7 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 - The picture-in-picture button opens the draggable in-app miniplayer or a floating window above other apps. Choose the mode in *Settings → Player*. Theater mode and fullscreen are also available, and the app remembers your theater setting.
 - Keeps playing when minimized, or pauses and resumes when you come back. On Windows, active video playback keeps the display awake.
 - Windows media controls can pause playback, resume it and move through the video queue.
+- Music: signed in, *Explore → Music* shows YouTube's music picks for your account, and each song plays on as its mix. Music mode, offered when a mix starts or from the player's note button, works like YouTube Music: a player bar along the bottom of every page and a *Now playing* view with the cover art or the video beside what plays next.
 - On Windows, *Settings → General → Minimize to tray* keeps Stream Tube in the notification area when you minimize or close the window. Use the tray icon to reopen or quit the app.
 - Start *Cast over LAN* in Settings and open the temporary link on a phone on the same trusted network. If the desktop has more than one local address, choose the one on your phone's network. Paste a YouTube video link to play it on the desktop.
 - Turn on *Independent tab playback* and restart Stream Tube to play up to three tabs at once. Each tab keeps its own queue. Background tabs play audio, and a tab with a floating picture-in-picture window keeps showing video there.

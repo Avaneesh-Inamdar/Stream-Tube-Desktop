@@ -309,6 +309,23 @@ pub fn play_next(window: &mut Window, cx: &mut App) {
     }
 }
 
+/// The previous queue item, else the video watched before this one, else the
+/// start of this one.
+pub fn play_previous(window: &mut Window, cx: &mut App) {
+    let p = player(cx);
+    if let Some(i) = p.read(cx).queue_pos.filter(|i| *i > 0) {
+        p.update(cx, |p, cx| p.play_queue_index(i - 1, cx));
+        return;
+    }
+    match p.update(cx, |p, _| p.take_played_before()) {
+        Some(v) => navigate(Route::Watch { id: v.id, playlist: None, start: None }, window, cx),
+        None => p.update(cx, |p, cx| {
+            p.seek_to(0.0);
+            cx.notify();
+        }),
+    }
+}
+
 // ───────────────────────── menus & dialogs ─────────────────────────
 
 #[derive(Clone)]
@@ -434,6 +451,12 @@ pub fn sign_out(cx: &mut App) {
 
 pub fn open_save_dialog(v: VideoItem, window: &mut Window, cx: &mut App) {
     open_dialog(Dialog::SaveToPlaylist(v), window, cx);
+}
+
+/// The signed-in account's Favorites playlist id, once its playlists have loaded.
+pub fn account_favorites_id(cx: &App) -> Option<String> {
+    let app = cx.try_global::<AppHandle>()?.0.upgrade()?;
+    app.read(cx).yt_playlists.as_deref().and_then(account_favorites).map(|p| p.id.clone())
 }
 
 fn account_favorites(playlists: &[PlaylistItem]) -> Option<&PlaylistItem> {
@@ -637,7 +660,14 @@ impl Render for Shell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::display::mark_drawn();
         let a = self.app.read(cx);
-        let has_slot = matches!(a.route, Route::Watch { .. } | Route::Shorts(_));
+        let music = super::music::state(cx);
+        // music mode's "Now playing" shows the cover art unless the video is asked
+        // for (fullscreen always shows the video)
+        let has_slot = match a.route {
+            Route::Watch { .. } => !music.on || music.video || cx.global::<UiState>().fullscreen,
+            Route::Shorts(_) => true,
+            _ => false,
+        };
         let clip = cx.global::<crate::ui::slot::PageClip>().0.clone();
         let main = has_slot.then(|| crate::ui::pip::main_surface(&a.main_view, cx).clip(clip.clone()));
         // only over a thumbnail drawn on this page (the slot is cleared when a
@@ -647,7 +677,8 @@ impl Render for Shell {
             crate::ui::slot::SlotFollower::with_slot(slot, AnyView::from(a.preview_view.clone())).clip(clip.clone())
         });
         // the same conditions as `AppView::render_mini_player` (fullscreen is a watch page)
-        let mini = (!has_slot && player(cx).read(cx).video.is_some()).then(|| {
+        // in music mode the bar along the bottom takes the mini player's place
+        let mini = (!has_slot && !music.on && player(cx).read(cx).video.is_some()).then(|| {
             let slot = cx.global::<crate::ui::slot::MiniSlot>().0.clone();
             crate::ui::slot::SlotFollower::with_slot(slot, a.mini_view.clone())
         });
@@ -682,6 +713,8 @@ pub struct AppView {
     suggestion_serial: u64,
     sel_suggestion: Option<usize>,
     mini_view: Entity<PlayerView>,
+    /// The player bar in music mode
+    music_bar: Entity<super::music::MusicBar>,
     /// Mini player placement: distance from the window's right and bottom edges, and width
     mini_geom: (f32, f32, f32),
     mini_drag: Option<MiniDrag>,
@@ -852,6 +885,9 @@ impl AppView {
             true
         });
         let mini_view = cx.new(|cx| PlayerView::new(p.clone(), true, cx));
+        super::music::init(cx);
+        let music_bar = cx.new(super::music::MusicBar::new);
+        subs.push(cx.observe_global::<super::music::MusicMode>(|_, cx| cx.notify()));
         let main_view = cx.new(|cx| PlayerView::new(p.clone(), false, cx));
         let preview_view = cx.new(crate::player::preview::PreviewView::new);
         let images = crate::ui::image_cache::init(cx);
@@ -940,6 +976,7 @@ impl AppView {
             suggestion_serial: 0,
             sel_suggestion: None,
             mini_view,
+            music_bar,
             mini_geom: load_mini_geom(),
             mini_drag: None,
             mini_dragged: false,
@@ -2016,6 +2053,7 @@ impl AppView {
         }
         use crate::downloads::{self, JobStatus};
         let p = pal(cx);
+        let radius = rems(0.375 * thumbnail_corner_scale());
         let mut jobs = cx.try_global::<downloads::Downloads>().map(|d| d.jobs.lock().clone()).unwrap_or_default();
         jobs.reverse();
         let small_btn = |id: SharedString, ic: &'static str, tip: &'static str| {
@@ -2082,10 +2120,10 @@ impl AppView {
                         .flex_none()
                         .w(px(72.))
                         .h(px(40.))
-                        .rounded_md()
+                        .rounded(radius)
                         .overflow_hidden()
                         .bg(p.chip)
-                        .child(img(j.video.thumbnail.clone()).size_full().rounded_md().object_fit(ObjectFit::Cover)),
+                        .child(img(j.video.thumbnail.clone()).size_full().aspect_ratio(72. / 40.).rounded(radius).object_fit(ObjectFit::Cover)),
                 )
                 .child(
                     div()
@@ -2461,12 +2499,6 @@ impl AppView {
                     pl.seek_interactive(dur * n / 10.0);
                     true
                 }
-                ("p", true) => {
-                    if let Some(i) = pl.queue_pos.filter(|i| *i > 0) {
-                        pl.play_queue_index(i - 1, cx);
-                    }
-                    true
-                }
                 ("a", false) => {
                     let a = !pl.audio_only;
                     pl.set_audio_only(a, cx);
@@ -2508,6 +2540,7 @@ impl AppView {
                 }
             }
             ("n", true) => play_next(window, cx),
+            ("p", true) => play_previous(window, cx),
             _ => {}
         }
     }
@@ -3009,7 +3042,7 @@ impl AppView {
     }
 
     fn render_mini_player(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if crate::ui::pip::owner(cx).as_ref() == Some(&player(cx)) {
+        if crate::ui::pip::owner(cx).as_ref() == Some(&player(cx)) || super::music::on(cx) {
             return None;
         }
         let p = pal(cx);
@@ -3036,7 +3069,7 @@ impl AppView {
                 .right(px(right))
                 .bottom(px(bottom))
                 .w(px(w))
-                .rounded_xl()
+                .rounded(crate::player::view::mini_player_radius())
                 .overflow_hidden()
                 .bg(p.surface2)
                 .shadow_2xl()
@@ -3776,6 +3809,10 @@ impl Render for AppView {
                     .children(sidebar)
                     .child(page_area.flex_1().min_w_0().h_full()),
             );
+            // Shorts keep their own player
+            if super::music::on(cx) && !is_shorts {
+                root = root.child(self.music_bar.clone());
+            }
             {
                 // a smaller window keeps the mini player on screen
                 let vp = window.viewport_size();
@@ -4008,7 +4045,7 @@ pub fn refresh_all_pages(cx: &mut App) {
     let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) else { return };
     let ids: Vec<EntityId> = {
         let a = app.read(cx);
-        std::iter::once(a.page.entity_id())
+        [a.page.entity_id(), a.mini_view.entity_id()].into_iter()
             .chain(a.history.iter().map(|(_, v)| v.entity_id()))
             .chain(a.forward.iter().map(|(_, v)| v.entity_id()))
             .collect()

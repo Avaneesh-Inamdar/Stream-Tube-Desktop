@@ -12,6 +12,10 @@ mod links;
 mod locale;
 #[cfg(windows)]
 mod media_controls;
+#[cfg(target_os = "linux")]
+mod media_session;
+#[cfg(target_os = "linux")]
+mod mpris;
 mod perf;
 mod player;
 mod recommend;
@@ -146,6 +150,8 @@ fn main() {
                 ui::apply_theme(Some(window), cx);
                 #[cfg(windows)]
                 media_controls::init(window, cx);
+                #[cfg(target_os = "linux")]
+                mpris::init(cx);
                 let app = cx.new(|cx| ui::app::AppView::new(window, cx));
                 cx.new(|_| ui::app::Shell::new(app))
             })
