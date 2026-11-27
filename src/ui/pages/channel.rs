@@ -14,6 +14,8 @@ pub struct ChannelPage {
     tab: usize,
     tab_items: Load<Vec<Item>>,
     continuation: Option<String>,
+    /// order chips of the shown tab (Latest / Popular / Oldest)
+    sorts: Vec<SortChip>,
     loading_more: bool,
     scroll: ScrollHandle,
     search: Entity<InputState>,
@@ -51,6 +53,7 @@ impl ChannelPage {
             tab: 0,
             tab_items: Load::Loading,
             continuation: None,
+            sorts: Vec::new(),
             loading_more: false,
             scroll: ScrollHandle::new(),
             search,
@@ -80,6 +83,7 @@ impl ChannelPage {
                         this.tab = tabs.iter().position(|t| t.kind == "videos").unwrap_or(0);
                         this.tab_items = Load::Ready(cp.page.items);
                         this.continuation = cp.page.continuation;
+                        this.sorts = cp.sorts;
                         if store::is_subscribed(&cp.info.id) {
                             store::subscribe(&cp.info.id, &cp.info.name, cp.info.avatar.as_deref());
                         }
@@ -100,6 +104,7 @@ impl ChannelPage {
         self.searching = None;
         self.tab_items = Load::Loading;
         self.continuation = None;
+        self.sorts.clear();
         self.serial += 1;
         let serial = self.serial;
         let id = self.id.clone();
@@ -113,6 +118,7 @@ impl ChannelPage {
                     Ok(cp) => {
                         this.tab_items = Load::Ready(cp.page.items);
                         this.continuation = cp.page.continuation;
+                        this.sorts = cp.sorts;
                     }
                     Err(e) => this.tab_items = Load::Error(e.to_string()),
                 }
@@ -150,28 +156,57 @@ impl ChannelPage {
         cx.notify();
     }
 
+    /// Reloads the shown tab in the order of the chip at `idx`.
+    fn select_sort(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(tok) = self.sorts.get(idx).map(|c| c.token.clone()) else { return };
+        for (i, c) in self.sorts.iter_mut().enumerate() {
+            c.selected = i == idx;
+        }
+        self.tab_items = Load::Loading;
+        self.continuation = None;
+        self.loading_more = false;
+        self.serial += 1;
+        let serial = self.serial;
+        let info = self.data.ready().map(|d| d.info.clone());
+        cx.spawn(async move |this, cx| {
+            let res = blocking(move || innertube::browse_continue(&tok)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.serial != serial {
+                    return;
+                }
+                match res {
+                    Ok(mut p) => {
+                        fill_channel(&mut p.items, info.as_ref());
+                        this.tab_items = Load::Ready(p.items);
+                        this.continuation = p.continuation;
+                    }
+                    Err(e) => this.tab_items = Load::Error(e.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn load_more(&mut self, cx: &mut Context<Self>) {
         let Some(tok) = self.continuation.clone() else {
             self.loading_more = false;
             return;
         };
         let info = self.data.ready().map(|d| d.info.clone());
+        let serial = self.serial;
         cx.spawn(async move |this, cx| {
             let res = blocking(move || innertube::browse_continue(&tok)).await;
             let _ = this.update(cx, |this, cx| {
                 this.loading_more = false;
+                // the tab, order or search changed meanwhile
+                if this.serial != serial {
+                    return;
+                }
                 match res {
                     Ok(mut p) => {
-                        if let Some(info) = &info {
-                            for it in p.items.iter_mut() {
-                                if let Item::Video(v) = it {
-                                    if v.channel_name.is_empty() {
-                                        v.channel_name = info.name.clone();
-                                    }
-                                    v.channel_id.get_or_insert(info.id.clone());
-                                }
-                            }
-                        }
+                        fill_channel(&mut p.items, info.as_ref());
                         if let Some(items) = this.tab_items.ready_mut() {
                             items.extend(p.items);
                         }
@@ -183,6 +218,19 @@ impl ChannelPage {
             });
         })
         .detach();
+    }
+}
+
+/// Continuation pages leave out the channel on their videos.
+fn fill_channel(items: &mut [Item], info: Option<&ChannelItem>) {
+    let Some(info) = info else { return };
+    for it in items.iter_mut() {
+        if let Item::Video(v) = it {
+            if v.channel_name.is_empty() {
+                v.channel_name = info.name.clone();
+            }
+            v.channel_id.get_or_insert(info.id.clone());
+        }
     }
 }
 
@@ -339,6 +387,14 @@ impl Render for ChannelPage {
                 .child(icon("search").size_4().text_color(p.text2))
                 .child(Input::new(&self.search).appearance(false).cleanable(true)),
         );
+        let sorts = (self.searching.is_none() && self.sorts.len() > 1).then(|| {
+            let mut row = div().flex().items_center().gap_3();
+            for (i, c) in self.sorts.iter().enumerate() {
+                // YouTube titles the chips in the content language already
+                row = row.child(chip(SharedString::from(format!("ch-sort-{i}")), c.title.clone(), c.selected, cx).on_click(cx.listener(move |this, _, _, cx| this.select_sort(i, cx))));
+            }
+            row
+        });
         let tab_kind = d.tabs.get(self.tab).map(|t| t.kind.clone()).unwrap_or_default();
         let body: AnyElement = match &self.tab_items {
             Load::Loading => spinner(cx).into_any_element(),
@@ -374,7 +430,7 @@ impl Render for ChannelPage {
                     .px_6()
                     .pt_4()
                     .pb_24()
-                    .child(div().w(width).flex().flex_col().gap_4().child(header).child(tabs).child(body)),
+                    .child(div().w(width).flex().flex_col().gap_4().child(header).child(tabs).children(sorts).child(body)),
             )
             .into_any_element()
     }

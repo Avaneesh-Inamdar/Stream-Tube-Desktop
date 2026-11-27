@@ -167,12 +167,24 @@ pub struct ChannelTab {
     pub selected: bool,
 }
 
+/// One of the order chips above a channel tab's grid ("Latest", "Popular",
+/// "Oldest"), titled in the content language.
+#[derive(Clone, Debug, Default)]
+pub struct SortChip {
+    pub title: String,
+    /// browse continuation that returns the tab in this order
+    pub token: String,
+    pub selected: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ChannelPage {
     pub info: ChannelItem,
     pub banner: Option<String>,
     pub tabs: Vec<ChannelTab>,
     pub page: Page,
+    /// order chips of the selected tab; empty when YouTube offers none
+    pub sorts: Vec<SortChip>,
 }
 
 #[derive(Clone, Debug, Default)]

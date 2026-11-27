@@ -869,6 +869,7 @@ pub fn channel(channel_id: &str, tab_params: Option<&str>) -> Result<ChannelPage
     }
     let mut tabs = Vec::new();
     let mut page = Page::default();
+    let mut sorts = Vec::new();
     if let Some(arr) = r.pointer("/contents/twoColumnBrowseResultsRenderer/tabs").and_then(Value::as_array) {
         for t in arr {
             let tr = t.get("tabRenderer").or_else(|| t.get("expandableTabRenderer"));
@@ -879,6 +880,7 @@ pub fn channel(channel_id: &str, tab_params: Option<&str>) -> Result<ChannelPage
             if selected {
                 if let Some(content) = tr.get("content") {
                     page = collect_items(content);
+                    sorts = sort_chips(content);
                 }
             }
             if !title.is_empty() {
@@ -901,7 +903,32 @@ pub fn channel(channel_id: &str, tab_params: Option<&str>) -> Result<ChannelPage
             }
         }
     }
-    Ok(ChannelPage { info, banner, tabs, page })
+    Ok(ChannelPage { info, banner, tabs, page, sorts })
+}
+
+/// The order chips ("Latest", "Popular", "Oldest") above a channel tab's grid.
+/// `collect_items` skips the grid's header, so they're read here.
+fn sort_chips(content: &Value) -> Vec<SortChip> {
+    let Some(header) = content.pointer("/richGridRenderer/header") else { return Vec::new() };
+    let token = |cmd: Option<&Value>| cmd.and_then(|c| c.pointer("/continuationCommand/token")).and_then(Value::as_str).map(str::to_string);
+    let mut out = Vec::new();
+    if let Some(chips) = header.pointer("/chipBarViewModel/chips").and_then(Value::as_array) {
+        for c in chips.iter().filter_map(|c| c.get("chipViewModel")) {
+            if let (Some(title), Some(token)) = (s(c, "/text"), token(c.pointer("/tapCommand/innertubeCommand"))) {
+                let selected = c.get("selected").and_then(Value::as_bool).unwrap_or(false);
+                out.push(SortChip { title, token, selected });
+            }
+        }
+    } else if let Some(chips) = header.pointer("/feedFilterChipBarRenderer/contents").and_then(Value::as_array) {
+        // the older form of the same chips
+        for c in chips.iter().filter_map(|c| c.get("chipCloudChipRenderer")) {
+            if let (Some(title), Some(token)) = (opt_text(c.get("text")), token(c.get("navigationEndpoint"))) {
+                let selected = c.get("isSelected").and_then(Value::as_bool).unwrap_or(false);
+                out.push(SortChip { title, token, selected });
+            }
+        }
+    }
+    out
 }
 
 /// A channel tab's kind from its URL ("/@name/videos" -> "videos"). Titles follow
@@ -2079,6 +2106,20 @@ mod long_playlist_tests {
 #[cfg(test)]
 mod channel_tab_tests {
     use super::{Item, collect_items, json};
+
+    #[test]
+    fn channel_sort_chips_are_read_from_the_grid_header() {
+        let chip = |text: &str, token: &str, selected: bool| json!({ "chipViewModel": {
+            "text": text, "selected": selected,
+            "tapCommand": { "innertubeCommand": { "continuationCommand": { "token": token } } }
+        } });
+        let sorts = super::sort_chips(&json!({ "richGridRenderer": { "header": { "chipBarViewModel": { "chips": [
+            chip("Новые", "t-new", true), chip("Популярные", "t-pop", false), chip("Старые", "t-old", false)
+        ] } } } }));
+        let got: Vec<_> = sorts.iter().map(|c| (c.title.as_str(), c.token.as_str(), c.selected)).collect();
+        assert_eq!(got, [("Новые", "t-new", true), ("Популярные", "t-pop", false), ("Старые", "t-old", false)]);
+        assert!(super::sort_chips(&json!({ "richGridRenderer": { "contents": [] } })).is_empty());
+    }
 
     #[test]
     fn channel_show_cards_keep_the_playlist_id_and_episode_count() {
