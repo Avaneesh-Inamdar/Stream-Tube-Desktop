@@ -270,6 +270,7 @@ impl HomePage {
                 from_cache = true;
             }
         }
+        let shown_at = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
             let res = blocking(move || -> anyhow::Result<(Vec<Item>, Option<String>)> {
                 if chip == 0 && crate::api::web::connected() {
@@ -385,12 +386,15 @@ impl HomePage {
                         if chip == 0 && !items.is_empty() {
                             save_home(&items);
                         }
-                        // the cached feed stays if the user is already scrolling through it
+                        // the cached feed stays if the user is already scrolling through it,
+                        // or has been looking at it for a while: a slow fetch must not swap the
+                        // videos under the pointer (the new feed is saved for the next start)
                         let scrolled = this.scroll.scroll_px_offset_for_scrollbar().y < px(-40.);
-                        if !(from_cache && scrolled) {
+                        let settled = shown_at.elapsed() > std::time::Duration::from_secs(8);
+                        if !(from_cache && (scrolled || settled)) {
                             this.items = Load::Ready(Arc::new(items));
+                            this.continuation = cont;
                         }
-                        this.continuation = cont;
                     }
                     Err(_) if from_cache => {}
                     Err(e) => this.items = Load::Error(e.to_string()),

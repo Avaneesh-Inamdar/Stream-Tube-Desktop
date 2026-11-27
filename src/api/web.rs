@@ -114,8 +114,26 @@ pub fn write_cookies_file() -> Option<PathBuf> {
         opts.mode(0o600);
     }
     use std::io::Write;
-    opts.open(&path).ok()?.write_all(text.as_bytes()).ok()?;
+    if opts.open(&path).ok()?.write_all(text.as_bytes()).is_err() {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
     Some(path)
+}
+
+/// Deletes cookie files a crashed run left behind (they hold the sign-in).
+pub fn sweep_cookie_files() {
+    let Ok(dir) = std::fs::read_dir(crate::store::data_dir()) else { return };
+    for e in dir.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        let Some(rest) = name.strip_prefix("yt-dlp-cookies-").filter(|_| name.ends_with(".txt")) else { continue };
+        // a file of another window that is still running stays
+        let pid = rest.split('-').next().and_then(|p| p.parse::<u32>().ok());
+        if pid.is_none_or(|p| p == std::process::id() || !crate::links::process_alive(p)) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 fn cookie_header(session: &Session) -> String {

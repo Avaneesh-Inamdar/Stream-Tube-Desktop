@@ -736,6 +736,9 @@ pub struct AppView {
     yt_playlists: Option<Vec<PlaylistItem>>,
     yt_playlist_session: Option<std::sync::Arc<()>>,
     favorite_membership: Option<FavoriteMembership>,
+    /// account playlists a video was saved to or removed from in the Save dialog,
+    /// by (playlist, video): (saved, request pending)
+    yt_saved: std::collections::HashMap<(String, String), (bool, bool)>,
     dialog_input: Entity<InputState>,
     focus: FocusHandle,
     pending_watch_sync: Option<String>,
@@ -991,6 +994,7 @@ impl AppView {
             yt_playlists: None,
             yt_playlist_session: None,
             favorite_membership: None,
+            yt_saved: Default::default(),
             dialog_input,
             focus,
             pending_watch_sync: None,
@@ -1486,6 +1490,10 @@ impl AppView {
         crate::ui::slot::clear_slot(cx);
         if cx.global::<UiState>().fullscreen && !matches!(route, Route::Watch { .. } | Route::Shorts(_)) {
             exit_fullscreen(window, cx);
+        }
+        // youtube.com empties the search box when you go back to Home
+        if route == Route::Home && !self.search.read(cx).value().is_empty() {
+            self.search.update(cx, |s, cx| s.set_value("", window, cx));
         }
         let page = build_page(&route, window, cx);
         let old_route = std::mem::replace(&mut self.route, route);
@@ -2340,6 +2348,11 @@ impl AppView {
                 cx.notify();
                 return;
             }
+            // the player's gear menu, like youtube.com: Esc closes it and stays on the video
+            if self.main_view.update(cx, |v, cx| v.close_menu(cx)) || self.mini_view.update(cx, |v, cx| v.close_menu(cx)) {
+                cx.notify();
+                return;
+            }
             if search_focused {
                 self.show_suggestions = false;
                 window.focus(&self.focus, cx);
@@ -3081,6 +3094,9 @@ impl AppView {
                 .shadow_2xl()
                 .border_1()
                 .border_color(p.border)
+                // the cards under the mini player must not get its clicks and hovers
+                // (a click on the video opened the video beneath it instead)
+                .occlude()
                 // the video itself is drawn over this slot by `Shell`
                 .child(div().w_full().h(px(h)).child(crate::ui::slot::slot_canvas(cx.global::<crate::ui::slot::MiniSlot>().0.clone())))
                 .child(
@@ -3430,7 +3446,17 @@ impl AppView {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).pb_2().child(t("Save video to…")))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .pb_2()
+                            .child(div().flex_1().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(t("Save video to…")))
+                            .child(icon_button("dlg-save-close", "x", cx).on_click(cx.listener(|this, _, _, cx| {
+                                this.dialog = None;
+                                cx.notify();
+                            }))),
+                    )
                     .children(pls.into_iter().map(|pl| {
                         let contains = store::playlist_contains(pl.id, &v.id);
                         let v2 = v.clone();
@@ -3467,6 +3493,8 @@ impl AppView {
                                 .filter(|pl| pl.id != "LL" && favorite.is_none_or(|favorite| pl.id != favorite.id))
                                 .map(|pl| {
                                     let (pid, name, vid) = (pl.id.clone(), pl.title.clone(), v.id.clone());
+                                    let state = self.yt_saved.get(&(pid.clone(), vid.clone())).copied();
+                                    let (saved, pending) = state.unwrap_or((false, false));
                                     div()
                                         .id(SharedString::from(format!("dlg-yt-{}", pl.id)))
                                         .flex()
@@ -3477,16 +3505,40 @@ impl AppView {
                                         .rounded_md()
                                         .cursor_pointer()
                                         .hover(move |s| s.bg(p.hover))
-                                        .child(icon("list-plus").text_color(p.text))
+                                        .child(icon(if pending { "loader" } else if saved { "square-check" } else { "square" }).text_color(p.text))
                                         .child(div().flex_1().text_sm().text_color(p.text).truncate().child(pl.title.clone()))
                                         .child(icon("list-video").size_4().text_color(p.text3))
-                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if pending {
+                                                return;
+                                            }
+                                            // a second click removes it again, like youtube.com's checkboxes (#268)
+                                            let save = !saved;
+                                            let key = (pid.clone(), vid.clone());
+                                            this.yt_saved.insert(key.clone(), (saved, true));
+                                            cx.notify();
                                             let (pid, name, vid) = (pid.clone(), name.clone(), vid.clone());
-                                            cx.spawn(async move |_, cx| {
-                                                let res = blocking(move || crate::api::auth::add_to_playlist(&pid, &vid)).await;
-                                                cx.update(|cx| match res {
-                                                    Ok(()) => toast(cx, tf!("Saved to playlist “{0}”", name)),
-                                                    Err(_) => toast(cx, t("Couldn't save to that YouTube playlist")),
+                                            cx.spawn(async move |this, cx| {
+                                                let res = blocking(move || {
+                                                    if save {
+                                                        crate::api::auth::add_to_playlist(&pid, &vid)
+                                                    } else {
+                                                        crate::api::auth::remove_many_from_playlist(&pid, &[vid])
+                                                    }
+                                                })
+                                                .await;
+                                                let _ = this.update(cx, |this, cx| {
+                                                    match res {
+                                                        Ok(()) => {
+                                                            this.yt_saved.insert(key, (save, false));
+                                                            toast(cx, if save { tf!("Saved to playlist “{0}”", name) } else { tf!("Removed from {0}", name) });
+                                                        }
+                                                        Err(_) => {
+                                                            this.yt_saved.insert(key, (saved, false));
+                                                            toast(cx, t("Couldn't save to that YouTube playlist"));
+                                                        }
+                                                    }
+                                                    cx.notify();
                                                 });
                                             })
                                             .detach();
@@ -3829,7 +3881,7 @@ impl Render for AppView {
             root = root.children(self.render_drawer(cx).map(deferred));
         }
         root = root.children(self.render_dl_panel(cx));
-        root = root.children(self.render_menu(cx)).children(self.render_dialog(cx)).child(deferred(self.render_toasts(cx)));
+        root = root.children(self.render_menu(cx)).children(self.render_dialog(cx)).child(deferred(self.render_toasts(cx)).with_priority(5));
         root
     }
 }

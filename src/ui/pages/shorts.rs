@@ -726,7 +726,7 @@ impl Render for ShortsPage {
                 .text_base()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(color)
-                .line_clamp(if below { 2 } else { 4 })
+                .text_ellipsis().line_clamp(if below { 2 } else { 4 })
         };
         let video_column = |video: Div| {
             div().w(w).min_w_0().flex().flex_col().child(video).when(below, |d| {
@@ -925,7 +925,16 @@ impl Render for ShortsPage {
                     .h(h)
                     .gap_4()
                     .pb_4()
-                    .child(action("sh-like", "thumbs-up", votes.as_ref().map(|v| compact_number(v.likes)).unwrap_or_else(|| t("Like").into()), cx))
+                    .child(action(
+                        "sh-like",
+                        "thumbs-up",
+                        votes
+                            .as_ref()
+                            .map(|v| compact_number(v.likes))
+                            .or_else(|| self.meta.get(&v.id).and_then(|w| w.likes_text.clone()).filter(|s| s.chars().any(|c| c.is_ascii_digit())))
+                            .unwrap_or_else(|| t("Like").into()),
+                        cx,
+                    ))
                     .when_some(dislike_btn, |d, btn| d.child(btn))
                     .child({
                         let n = self.meta.get(&v.id).and_then(|w| w.comment_count_text.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| t("Comments").into());
