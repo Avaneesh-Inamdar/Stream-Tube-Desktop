@@ -9,6 +9,15 @@ use crate::player::view::PlayerView;
 use crate::store;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 
+actions!(streamtube, [Reload]);
+
+/// Reloads the page: Cmd+R on macOS, Ctrl+R elsewhere, as in a browser (F5 goes through
+/// `on_key`, as do keyboard layouts the binding doesn't match, such as Cyrillic ones).
+pub fn bind_keys(cx: &mut App) {
+    let reload = if cfg!(target_os = "macos") { "cmd-r" } else { "ctrl-r" };
+    cx.bind_keys([KeyBinding::new(reload, Reload, Some("StreamTube"))]);
+}
+
 // ───────────────────────── routes ─────────────────────────
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2091,8 +2100,20 @@ impl AppView {
     pub fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.set_global(OpenMenu(None));
         if let Route::Watch { id, playlist, .. } = self.route.clone() {
-            let t = player(cx).read(cx).time;
-            self.route = Route::Watch { id, playlist, start: Some(t) };
+            // the video too, as a browser reloads the whole page: its streams are fetched
+            // again and it carries on where it was (like the player's Retry)
+            let reloaded = player(cx).update(cx, |p, cx| {
+                let video = p.video.clone().filter(|v| v.id == id)?;
+                let t = p.time;
+                p.play(video, Some(t), cx);
+                Some(())
+            });
+            if reloaded.is_none() {
+                let t = player(cx).read(cx).time;
+                self.route = Route::Watch { id, playlist, start: Some(t) };
+            } else {
+                self.route = Route::Watch { id, playlist, start: None };
+            }
         }
         self.page = build_page(&self.route, window, cx);
         cx.notify();
@@ -3863,6 +3884,12 @@ impl Render for AppView {
             .id("app-root")
             .track_focus(&self.focus)
             .key_context("StreamTube")
+            .on_action(cx.listener(|this, _: &Reload, window, cx| {
+                // the dialog's own text field keeps the shortcut
+                if !this.dialog_input.read(cx).focus_handle(cx).is_focused(window) {
+                    this.refresh(window, cx);
+                }
+            }))
             .size_full()
             .relative()
             .flex()

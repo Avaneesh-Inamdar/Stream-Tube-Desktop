@@ -65,6 +65,7 @@ pub fn init_menu(main_window: AnyWindowHandle, cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("Quit Stream Tube", Quit),
         ]),
+        Menu::new("View").items([MenuItem::action("Reload Page", crate::ui::app::Reload)]),
         // AppKit fills the windows menu itself (Fill, Center, Move & Resize…). The tiling
         // shortcuts and window managers such as Swish tile through those items, with the
         // system's animation; without them the window only jumps to its new frame

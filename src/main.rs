@@ -199,6 +199,7 @@ fn main() {
         ui::apply_theme(None, cx);
         player::controller::init(cx);
         perf::mark("player init");
+        ui::app::bind_keys(cx);
         let requested_bounds = saved_window_bounds(cx);
         let opts = WindowOptions {
             // Without this the Wayland/X11 window has no identity, so docks and
