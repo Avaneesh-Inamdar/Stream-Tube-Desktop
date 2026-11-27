@@ -25,7 +25,7 @@
 
 I wanted YouTube on my desktop without keeping a browser tab open, and without the
 ads, autoplaying junk and sponsor reads. The existing options were either Electron
-apps that eat a gigabyte of RAM or web frontends that break every other week.
+apps or web frontends that break every other week.
 Stream Tube is a single native app: the UI is drawn on the GPU with
 [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), and video
 goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
@@ -129,24 +129,6 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 
 **Keeps itself up to date**
 - Checks for new releases at startup and installs them in one click, and can update yt-dlp for you. Every download is checked against its SHA-256 before it is used
-
-## Performance
-
-Stream Tube versus youtube.com in Microsoft Edge (clean profile, no extensions) on
-the same Windows 11 PC, playing the same video. Numbers are the working set of
-every process involved, after browsing a few pages.
-
-| | youtube.com in Edge | Stream Tube 0.4.0-alpha |
-|---|---|---|
-| Processes | 11–12 | 1 |
-| RAM, idle on Home | 1,073 MB | **~405 MB** |
-| RAM, playing a video | 1,203 MB | **~565 MB** |
-
-Stream Tube uses less than half the RAM of the browser, and it stays flat as you
-browse: thumbnails are kept at the size they're drawn and the ones you've scrolled
-past are freed. While playing, part of the memory is a read-ahead buffer that keeps
-seeking instant. Turn on *Settings → Player → Hardware decoding* to decode video on
-the GPU like the browser does. Results depend on the video, resolution and hardware.
 
 ## Screenshots
 

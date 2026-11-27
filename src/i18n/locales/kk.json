@@ -1,4 +1,8 @@
 {
+  "File name": "Файл атауы",
+  "Use {title}, {channel} and {id}. Leave empty for the default": "{title}, {channel} және {id} пайдаланыңыз. Әдепкі атау үшін бос қалдырыңыз",
+  "If Google says the browser or app may not be secure, use a cookies.txt file exported from a browser where you're signed in.": "Google браузер немесе қолданба қауіпсіз болмауы мүмкін деп хабарласа, аккаунтқа кірген браузерден экспортталған cookies.txt файлын пайдаланыңыз.",
+  "Nothing to import in this file": "Бұл файлда импорттайтын ештеңе жоқ",
   "Write a reply": "Жауап жазыңыз",
   "Write a comment": "Пікір жазыңыз",
   "Reply posted": "Жауап жарияланды",

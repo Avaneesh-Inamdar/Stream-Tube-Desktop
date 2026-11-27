@@ -93,6 +93,8 @@ pub struct Settings {
     /// The user picked (or accepted) the download folder; until then the first download asks.
     pub download_dir_chosen: bool,
     pub download_format: String,
+    /// File name for downloads, with {title}, {channel} and {id}; empty is "{title} [{id}]"
+    pub download_name: String,
     pub external_player: String,
     // appearance / player customization
     pub ui_scale: f32,
@@ -240,6 +242,7 @@ impl Default for Settings {
                 .unwrap_or_default(),
             download_dir_chosen: false,
             download_format: "1080".into(),
+            download_name: String::new(),
             external_player: String::new(),
             ui_scale: 1.0,
             density: "default".into(),

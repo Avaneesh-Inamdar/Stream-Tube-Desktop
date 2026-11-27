@@ -70,6 +70,7 @@ impl SettingsPage {
             ("proxy", s.proxy.clone(), "e.g. socks5://127.0.0.1:9050 or http://host:port", |s, v| s.proxy = v),
             ("external", s.external_player.clone(), "Automatic", |s, v| s.external_player = v),
             ("download_dir", s.download_dir.clone(), "Download folder", |s, v| s.download_dir = v),
+            ("download_name", s.download_name.clone(), "{title} [{id}]", |s, v| s.download_name = v),
             ("captions_lang", s.captions_lang.clone(), "en", |s, v| s.captions_lang = v),
             ("sb_min", format!("{}", s.sb_min_duration), "0", |s, v| s.sb_min_duration = v.parse().unwrap_or(0.0)),
             ("sb_user_id", s.sb_user_id.clone(), "Paste your private user ID", |s, v| s.sb_user_id = v),
@@ -1160,6 +1161,7 @@ impl SettingsPage {
         let s = store::settings_snapshot();
         card(cx)
             .child(row("Download folder", "", text_field(&self.input("download_dir"), 360., cx), cx))
+            .child(row("File name", "Use {title}, {channel} and {id}. Leave empty for the default", text_field(&self.input("download_name"), 360., cx), cx))
             .child(row(
                 "Default format",
                 "",

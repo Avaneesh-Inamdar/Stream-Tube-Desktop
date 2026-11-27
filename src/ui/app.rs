@@ -67,7 +67,7 @@ const COLLAPSED_SIDEBAR_WIDTH: f32 = 88.0;
 pub struct AppHandle(pub WeakEntity<AppView>);
 impl Global for AppHandle {}
 
-fn shortcut_key(key: &str) -> &str {
+pub(crate) fn shortcut_key(key: &str) -> &str {
     // Match the US key positions when the platform reports Russian characters.
     match key {
         "ф" | "Ф" => "a",
@@ -1266,6 +1266,12 @@ impl AppView {
                                 .text_xs()
                                 .text_color(p.text3)
                                 .child(t("Videos you watch in Stream Tube then show in your YouTube history, and your phone and TV resume them where you stopped. The window uses its own empty profile, which is deleted afterwards.")),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(p.text3)
+                                .child(t("If Google says the browser or app may not be secure, use a cookies.txt file exported from a browser where you're signed in.")),
                         ),
                 )
                 .child(

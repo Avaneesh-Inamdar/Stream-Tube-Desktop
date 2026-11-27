@@ -6152,6 +6152,8 @@ dependencies = [
  "sha1",
  "sha2 0.11.1",
  "smallvec",
+ "unicode-linebreak",
+ "unicode-segmentation",
  "ureq",
  "url",
  "wayland-client",
