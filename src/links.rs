@@ -149,7 +149,7 @@ pub fn listen(tx: futures::channel::mpsc::UnboundedSender<String>) -> std::io::R
                 continue;
             }
             // only our own launches speak this, and know the secret
-            let Some(arg) = line.trim_end_matches(['\r', '\n']).strip_prefix("STREAMTUBE ").and_then(|rest| check_token(rest, &token)) else { continue };
+            let Some(arg) = parse_request(&line, &token) else { continue };
             let _ = (&stream).write_all(b"ok\n");
             if tx.unbounded_send(arg.to_string()).is_err() {
                 break;
@@ -157,6 +157,11 @@ pub fn listen(tx: futures::channel::mpsc::UnboundedSender<String>) -> std::io::R
         }
     });
     Ok(())
+}
+
+fn parse_request<'a>(line: &'a str, token: &str) -> Option<&'a str> {
+    let payload = line.trim_end_matches(['\r', '\n']).strip_prefix("STREAMTUBE ")?;
+    check_token(payload, token)
 }
 
 /// A random secret for the loopback link port.
@@ -185,6 +190,13 @@ mod tests {
         assert_eq!(super::check_token("https://youtu.be/abc", &token), None);
         assert_eq!(super::check_token(&format!("{} https://youtu.be/abc", "0".repeat(64)), &token), None);
         assert_ne!(super::new_token(), token);
+    }
+
+    #[test]
+    fn launch_without_a_url_is_forwarded_to_the_running_instance() {
+        let token = super::new_token();
+        assert_eq!(super::parse_request(&format!("STREAMTUBE {token} \n"), &token), Some(""));
+        assert_eq!(super::parse_request(&format!("STREAMTUBE {token}\n"), &token), None);
     }
 
     #[test]

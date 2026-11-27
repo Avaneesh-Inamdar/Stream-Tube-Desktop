@@ -1,7 +1,9 @@
 //! Download manager (yt-dlp when available, native fallback) and external player launching.
+pub(crate) mod transcript;
+
 use crate::api::streams::{self, hide_window};
 use crate::i18n::{t as translate, tf};
-use crate::api::types::VideoItem;
+use crate::api::types::{CaptionTrack, VideoItem};
 use crate::store;
 use crate::ui::toast;
 use gpui_kit::*;
@@ -39,6 +41,8 @@ pub struct Downloads {
 }
 
 impl Global for Downloads {}
+
+pub const TRANSCRIPTS: &[(&str, &str)] = &[("txt", "Transcript (.txt)"), ("srt", "Subtitles (.srt)")];
 
 pub const FORMATS: &[(&str, &str)] = &[
     ("1080", "1080p (recommended)"),
@@ -81,6 +85,10 @@ pub fn start_many(videos: Vec<VideoItem>, cx: &mut App) {
 }
 
 pub fn start(video: VideoItem, format: Option<String>, cx: &mut App) {
+    start_with_track(video, format, None, cx);
+}
+
+pub(crate) fn start_with_track(video: VideoItem, format: Option<String>, track: Option<CaptionTrack>, cx: &mut App) {
     // First download: ask where to save (once), like a browser does.
     if !store::settings_snapshot().download_dir_chosen {
         let rx = cx.prompt_for_paths(PathPromptOptions {
@@ -97,7 +105,7 @@ pub fn start(video: VideoItem, format: Option<String>, cx: &mut App) {
                         s.download_dir = dir.to_string_lossy().into_owned();
                         s.download_dir_chosen = true;
                     });
-                    start(video, format, cx);
+                    start_with_track(video, format, track, cx);
                 }
                 None => toast(cx, translate("Download cancelled")),
             });
@@ -107,7 +115,8 @@ pub fn start(video: VideoItem, format: Option<String>, cx: &mut App) {
     }
     let fmt = format.unwrap_or_else(|| store::settings_snapshot().download_format.clone());
     // without yt-dlp only 360p (one combined stream) or audio can be saved
-    if fmt != "audio" && fmt != "single" && streams::ytdlp_path().is_none() {
+    let transcript = TRANSCRIPTS.iter().any(|(format, _)| *format == fmt);
+    if !transcript && fmt != "audio" && fmt != "single" && streams::ytdlp_path().is_none() {
         if YTDLP_FETCHING.load(Ordering::SeqCst) {
             PENDING.lock().push((video, Some(fmt)));
             return;
@@ -130,7 +139,7 @@ pub fn start(video: VideoItem, format: Option<String>, cx: &mut App) {
         return;
     }
     // separate video + audio streams need FFmpeg to be joined into one file
-    if fmt != "audio" && fmt != "single" && streams::ytdlp_path().is_some() && ffmpeg_path().is_none() {
+    if !transcript && fmt != "audio" && fmt != "single" && streams::ytdlp_path().is_some() && ffmpeg_path().is_none() {
         if FFMPEG_FETCHING.load(Ordering::SeqCst) {
             // queued behind the FFmpeg download
             PENDING.lock().push((video, Some(fmt)));
@@ -165,6 +174,16 @@ pub fn start(video: VideoItem, format: Option<String>, cx: &mut App) {
     let jid = job.id;
     let cancel = job.cancel.clone();
     let jobs2 = jobs.clone();
+    let (saved, completion) = futures::channel::oneshot::channel();
+    if let Some(track) = &track {
+        let name = transcript::display_name(track).to_owned();
+        let srt = job.format == "srt";
+        cx.spawn(async move |cx| {
+            if completion.await.is_ok() {
+                let _ = cx.update(|cx| toast(cx, if srt { tf!("Subtitles saved · {0}", name) } else { tf!("Transcript saved · {0}", name) }));
+            }
+        }).detach();
+    }
     std::thread::spawn(move || {
         let update = |f: &dyn Fn(&mut Job)| {
             if let Some(j) = jobs2.lock().iter_mut().find(|j| j.id == jid) {
@@ -184,7 +203,7 @@ pub fn start(video: VideoItem, format: Option<String>, cx: &mut App) {
             std::thread::sleep(std::time::Duration::from_millis(400));
         }
         update(&|j| j.status = JobStatus::Running);
-        let res = run_job(&job, &cancel, &|p, detail| {
+        let res = run_job(&job, track.as_ref(), &cancel, &|p, detail| {
             update(&|j| {
                 j.progress = p;
                 j.detail = detail.to_string();
@@ -192,10 +211,13 @@ pub fn start(video: VideoItem, format: Option<String>, cx: &mut App) {
         })
         .map(|path| resolve_output(&path, &job.video.id).unwrap_or(path));
         match res {
-            Ok(path) => update(&|j| {
-                j.status = JobStatus::Done(path.clone());
-                j.progress = 1.0;
-            }),
+            Ok(path) => {
+                update(&|j| {
+                    j.status = JobStatus::Done(path.clone());
+                    j.progress = 1.0;
+                });
+                let _ = saved.send(());
+            }
             Err(e) if cancel.load(Ordering::SeqCst) => {
                 let _ = e;
                 update(&|j| j.status = JobStatus::Cancelled)
@@ -245,10 +267,13 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
-fn run_job(job: &Job, cancel: &AtomicBool, progress: &dyn Fn(f32, &str)) -> anyhow::Result<String> {
+fn run_job(job: &Job, track: Option<&CaptionTrack>, cancel: &AtomicBool, progress: &dyn Fn(f32, &str)) -> anyhow::Result<String> {
     let s = store::settings_snapshot();
     let dir = std::path::PathBuf::from(if s.download_dir.is_empty() { ".".into() } else { s.download_dir.clone() });
     std::fs::create_dir_all(&dir)?;
+    if TRANSCRIPTS.iter().any(|(format, _)| *format == job.format) {
+        return transcript::export(job, &dir, track, cancel);
+    }
     let url = format!("https://www.youtube.com/watch?v={}", job.video.id);
     if let Some(bin) = streams::ytdlp_path() {
         let fmt = match job.format.as_str() {
@@ -597,6 +622,9 @@ pub fn resolve_output(path: &str, video_id: &str) -> Option<String> {
     if p.is_file() {
         return Some(path.to_string());
     }
+    if matches!(p.extension().and_then(|e| e.to_str()), Some("txt" | "srt")) {
+        return None; // A video with the same ID is not a missing transcript.
+    }
     let dir = if p.is_dir() { p.to_path_buf() } else { p.parent()?.to_path_buf() };
     let tag = format!("[{video_id}]");
     std::fs::read_dir(&dir)
@@ -604,7 +632,7 @@ pub fn resolve_output(path: &str, video_id: &str) -> Option<String> {
         .filter_map(Result::ok)
         .filter(|e| {
             let n = e.file_name().to_string_lossy().into_owned();
-            n.contains(&tag) && !n.ends_with(".part") && !n.ends_with(".ytdl") && !n.ends_with(".tmp")
+            n.contains(&tag) && !n.ends_with(".txt") && !n.ends_with(".srt") && !n.ends_with(".part") && !n.ends_with(".ytdl") && !n.ends_with(".tmp")
         })
         .filter_map(|e| Some((e.metadata().ok()?.len(), e.path())))
         .max_by_key(|(len, _)| *len)
