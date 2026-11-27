@@ -154,6 +154,47 @@ pub fn local_pass(url: &str) -> String {
     format!("{}/p/{id}", p.base())
 }
 
+/// Serves normalized VOD captions, falling back to the original track.
+pub(super) fn local_caption(url: &str) -> String {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return url.to_string();
+    }
+    let Some(p) = proxy() else { return url.to_string() };
+    let id = register(p, url, None, "text/vtt");
+    format!("{}/c/{id}.vtt", p.base())
+}
+
+// mpv can probe and reopen the same caption track; keep its ranges consistent.
+fn caption_body(id: u64, url: &str) -> Option<Arc<[u8]>> {
+    type CaptionCache = VecDeque<(u64, Arc<[u8]>)>;
+    static CACHE: Mutex<CaptionCache> = Mutex::new(VecDeque::new());
+    const MAX_CACHE: usize = 32 * 1024 * 1024;
+    if let Some(body) = CACHE.lock().iter().find(|(key, _)| *key == id).map(|(_, body)| body.clone()) {
+        return Some(body);
+    }
+    let raw = crate::api::http::get_bytes(url, &[]).ok()?;
+    let bytes = std::str::from_utf8(&raw)
+        .ok()
+        .and_then(super::captions::render_webvtt)
+        .map(String::into_bytes)
+        .unwrap_or(raw);
+    let body: Arc<[u8]> = bytes.into();
+    if body.len() <= MAX_CACHE {
+        let mut cache = CACHE.lock();
+        // Another probe may have cached the track during the fetch.
+        if let Some(old) = cache.iter().find(|(key, _)| *key == id).map(|(_, body)| body.clone()) {
+            return Some(old);
+        }
+        let mut size = cache.iter().map(|(_, b)| b.len()).sum::<usize>() + body.len();
+        while cache.len() >= 16 || size > MAX_CACHE {
+            let Some((_, old)) = cache.pop_front() else { break };
+            size -= old.len();
+        }
+        cache.push_back((id, body.clone()));
+    }
+    Some(body)
+}
+
 pub(super) fn hls_attr(line: &str, key: &str) -> Option<String> {
     // match KEY= at an attribute boundary (so AUDIO= doesn't hit "VIDEO-RANGE=..."-like names)
     let mut search = line;
@@ -568,6 +609,18 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
         return match lookup(rest) {
             Some(url) => serve_playlist(&mut conn, p, &url, max, audio.as_deref(), param("avc") == Some("1")),
             None => conn.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+        };
+    }
+    if let Some(rest) = path.strip_prefix("/c/") {
+        let id = rest.strip_suffix(".vtt").and_then(|s| s.parse::<u64>().ok());
+        let url = id.and_then(|id| p.streams.lock().get(&id).map(|e| e.url.clone()));
+        return match (id, url) {
+            (Some(id), Some(url)) => match caption_body(id, &url) {
+                Some(body) => super::captions::write_http_response(&mut conn, &body, range, method == "HEAD"),
+                // A failed normalization fetch should not disable captions.
+                None => serve_pass(&mut conn, &url, range, method == "HEAD"),
+            },
+            _ => conn.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
         };
     }
     if let Some(rest) = path.strip_prefix("/p/") {

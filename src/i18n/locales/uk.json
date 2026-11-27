@@ -1,4 +1,8 @@
 {
+  "File name": "Ім'я файлу",
+  "Use {title}, {channel} and {id}. Leave empty for the default": "Використовуйте {title}, {channel} і {id}. Залиште порожнім, щоб використати ім'я за замовчуванням",
+  "If Google says the browser or app may not be secure, use a cookies.txt file exported from a browser where you're signed in.": "Якщо Google повідомляє, що браузер або застосунок можуть бути небезпечними, скористайтеся файлом cookies.txt, експортованим із браузера, у якому ви ввійшли в акаунт.",
+  "Nothing to import in this file": "У цьому файлі нічого імпортувати",
   "Write a reply": "Напишіть відповідь",
   "Write a comment": "Напишіть коментар",
   "Reply posted": "Відповідь опубліковано",

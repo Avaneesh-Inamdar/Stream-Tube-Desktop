@@ -1,4 +1,8 @@
 {
+  "File name": "Nom du fichier",
+  "Use {title}, {channel} and {id}. Leave empty for the default": "Utilisez {title}, {channel} et {id}. Laissez vide pour le nom par défaut",
+  "If Google says the browser or app may not be secure, use a cookies.txt file exported from a browser where you're signed in.": "Si Google indique que le navigateur ou l'application n'est peut-être pas sécurisé, utilisez un fichier cookies.txt exporté depuis un navigateur où vous êtes connecté.",
+  "Nothing to import in this file": "Rien à importer dans ce fichier",
   "Write a reply": "Écrire une réponse",
   "Write a comment": "Écrire un commentaire",
   "Reply posted": "Réponse publiée",
