@@ -62,3 +62,7 @@ embed-resource = "3"
 # needs visual glyph ordering. See vendor/gpui-pre-windows/PATCHES.md.
 [patch.crates-io]
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+# xim-ctext 0.3 with a decoder that handles non-UTF-8 compound text such as
+# Cyrillic, which made typing in some Linux input methods crash the app (#248).
+# See vendor/xim-ctext/Cargo.toml.
+xim-ctext = { path = "vendor/xim-ctext" }
