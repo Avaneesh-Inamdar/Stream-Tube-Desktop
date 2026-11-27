@@ -1,4 +1,8 @@
 {
+  "File name": "Fayl adı",
+  "Use {title}, {channel} and {id}. Leave empty for the default": "{title}, {channel} və {id} istifadə edin. Standart ad üçün boş saxlayın",
+  "If Google says the browser or app may not be secure, use a cookies.txt file exported from a browser where you're signed in.": "Google brauzerin və ya tətbiqin təhlükəsiz olmaya biləcəyini desə, hesabınıza daxil olduğunuz brauzerdən ixrac edilmiş cookies.txt faylından istifadə edin.",
+  "Nothing to import in this file": "Bu faylda idxal ediləcək heç nə yoxdur",
   "Write a reply": "Cavab yazın",
   "Write a comment": "Şərh yazın",
   "Reply posted": "Cavab dərc edildi",
