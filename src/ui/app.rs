@@ -436,6 +436,12 @@ pub fn open_save_dialog(v: VideoItem, window: &mut Window, cx: &mut App) {
     open_dialog(Dialog::SaveToPlaylist(v), window, cx);
 }
 
+/// The signed-in account's Favorites playlist id, once its playlists have loaded.
+pub fn account_favorites_id(cx: &App) -> Option<String> {
+    let app = cx.try_global::<AppHandle>()?.0.upgrade()?;
+    app.read(cx).yt_playlists.as_deref().and_then(account_favorites).map(|p| p.id.clone())
+}
+
 fn account_favorites(playlists: &[PlaylistItem]) -> Option<&PlaylistItem> {
     playlists.iter().find(|p| p.id.starts_with("FL")).or_else(|| {
         playlists.iter().find(|p| !p.id.is_empty() && !matches!(p.id.as_str(), "LL" | "WL") && p.title.trim().eq_ignore_ascii_case("Favorites"))

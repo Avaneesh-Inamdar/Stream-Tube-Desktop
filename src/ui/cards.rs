@@ -176,6 +176,10 @@ pub fn download_menu_items(video: &VideoItem, anchor: Point<Pixels>) -> Vec<Menu
 }
 
 pub fn video_menu_items(v: &VideoItem) -> Vec<MenuItem> {
+    video_menu_items_with(v, true)
+}
+
+fn video_menu_items_with(v: &VideoItem, save_to_watch_later: bool) -> Vec<MenuItem> {
     let mut items = Vec::new();
     {
         let route = if v.is_short { Route::Shorts(Some(v.id.clone())) } else { watch_route(v) };
@@ -189,26 +193,28 @@ pub fn video_menu_items(v: &VideoItem) -> Vec<MenuItem> {
         toast(cx, t("Added to queue"));
     }));
     let v2 = v.clone();
-    items.push(MenuItem::new("clock", t("Save to Watch later"), move |_, cx| {
-        let local = store::playlists().into_iter().find(|p| p.protected && p.name == "Watch later");
-        if let Some(wl) = &local {
-            store::playlist_add(wl.id, &v2);
-        }
-        if let Some(session) = crate::api::auth::session_identity() {
-            let id = v2.id.clone();
-            let saved_locally = local.is_some();
-            cx.spawn(async move |cx| {
-                let result = blocking(move || crate::api::auth::set_account_playlist_saved(&session, "WL", &id, true)).await;
-                let _ = cx.update(|cx| match result {
-                    Ok(()) => toast(cx, t("Saved to Watch later")),
-                    Err(_) if saved_locally => toast(cx, t("Saved locally. Couldn't save to YouTube Watch later")),
-                    Err(_) => toast(cx, t("Couldn't save to that YouTube playlist")),
-                });
-            }).detach();
-        } else if local.is_some() {
-            toast(cx, t("Saved to Watch later"));
-        }
-    }));
+    if save_to_watch_later {
+        items.push(MenuItem::new("clock", t("Save to Watch later"), move |_, cx| {
+            let local = store::playlists().into_iter().find(|p| p.protected && p.name == "Watch later");
+            if let Some(wl) = &local {
+                store::playlist_add(wl.id, &v2);
+            }
+            if let Some(session) = crate::api::auth::session_identity() {
+                let id = v2.id.clone();
+                let saved_locally = local.is_some();
+                cx.spawn(async move |cx| {
+                    let result = blocking(move || crate::api::auth::set_account_playlist_saved(&session, "WL", &id, true)).await;
+                    let _ = cx.update(|cx| match result {
+                        Ok(()) => toast(cx, t("Saved to Watch later")),
+                        Err(_) if saved_locally => toast(cx, t("Saved locally. Couldn't save to YouTube Watch later")),
+                        Err(_) => toast(cx, t("Couldn't save to that YouTube playlist")),
+                    });
+                }).detach();
+            } else if local.is_some() {
+                toast(cx, t("Saved to Watch later"));
+            }
+        }));
+    }
     let v3 = v.clone();
     items.push(MenuItem::new("bookmark", t("Save to playlist…"), move |window, cx| {
         crate::ui::app::open_save_dialog(v3.clone(), window, cx);
@@ -280,19 +286,34 @@ fn is_watched_in_history(id: &str) -> bool {
 }
 
 fn more_button(id: SharedString, v: &VideoItem, cx: &App) -> Stateful<Div> {
-    more_button_with(id, v, Vec::new(), cx)
+    more_button_with(id, v, MenuExtra::default(), cx)
 }
 
-/// The video's menu; `extra` items go in after "Save to playlist…".
-fn menu_with(v: &VideoItem, extra: &[MenuItem]) -> Vec<MenuItem> {
-    let mut items = video_menu_items(v);
-    let at = items.len().min(4);
-    items.splice(at..at, extra.iter().cloned());
+/// Extra items for a card's menu.
+#[derive(Clone, Default)]
+pub struct MenuExtra {
+    pub items: Vec<MenuItem>,
+    /// the card is in Watch later: the items take the place of "Save to Watch later"
+    pub replaces_watch_later: bool,
+}
+
+impl From<Vec<MenuItem>> for MenuExtra {
+    fn from(items: Vec<MenuItem>) -> Self {
+        Self { items, replaces_watch_later: false }
+    }
+}
+
+/// The video's menu; `extra` items go in after "Save to playlist…", or where
+/// "Save to Watch later" would be.
+fn menu_with(v: &VideoItem, extra: &MenuExtra) -> Vec<MenuItem> {
+    let mut items = video_menu_items_with(v, !extra.replaces_watch_later);
+    let at = items.len().min(if extra.replaces_watch_later { 2 } else { 4 });
+    items.splice(at..at, extra.items.iter().cloned());
     items
 }
 
 /// A right click on a card opens the same menu as its three-dots button.
-fn right_click_menu(v: &VideoItem, extra: Vec<MenuItem>) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+fn right_click_menu(v: &VideoItem, extra: MenuExtra) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
     let v = v.clone();
     move |ev, window, cx| {
         cx.stop_propagation();
@@ -327,7 +348,7 @@ fn hover_backdrop(cx: &App) -> impl IntoElement {
 
 /// The three-dots button, shown while the pointer is over its card; `extra` items go
 /// into the menu after "Save to playlist…".
-fn more_button_with(id: SharedString, v: &VideoItem, extra: Vec<MenuItem>, cx: &App) -> Stateful<Div> {
+fn more_button_with(id: SharedString, v: &VideoItem, extra: MenuExtra, cx: &App) -> Stateful<Div> {
     let p = pal(cx);
     let v = v.clone();
     div()
@@ -417,7 +438,7 @@ pub fn video_card(v: &VideoItem, width: Pixels, show_channel: bool, cx: &mut App
         .cursor_pointer()
         .group("card")
         .on_aux_click(middle_click_tab(route.clone()))
-        .on_mouse_down(MouseButton::Right, right_click_menu(v, Vec::new()))
+        .on_mouse_down(MouseButton::Right, right_click_menu(v, MenuExtra::default()))
         .on_click(move |_, window, cx| {
             if has_text_selection(window, cx) {
                 return;
@@ -505,7 +526,7 @@ pub fn shorts_card(v: &VideoItem, width: Pixels, cx: &mut App) -> AnyElement {
         .cursor_pointer()
         .group("card")
         .on_aux_click(middle_click_tab(route.clone()))
-        .on_mouse_down(MouseButton::Right, right_click_menu(v, Vec::new()))
+        .on_mouse_down(MouseButton::Right, right_click_menu(v, MenuExtra::default()))
         .on_click(move |_, window, cx| {
             if has_text_selection(window, cx) {
                 return;
@@ -550,7 +571,7 @@ pub fn video_row(v: &VideoItem, thumb_w: Pixels, cx: &mut App) -> AnyElement {
         .cursor_pointer()
         .group("card")
         .on_aux_click(middle_click_tab(route.clone()))
-        .on_mouse_down(MouseButton::Right, right_click_menu(v, Vec::new()))
+        .on_mouse_down(MouseButton::Right, right_click_menu(v, MenuExtra::default()))
         .on_click(move |_, window, cx| {
             if has_text_selection(window, cx) {
                 return;
@@ -614,11 +635,12 @@ pub fn video_row(v: &VideoItem, thumb_w: Pixels, cx: &mut App) -> AnyElement {
 
 /// Compact row used for related videos / queues.
 pub fn compact_row(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn(&mut Window, &mut App)>>, cx: &mut App) -> AnyElement {
-    compact_row_with(v, active, on_click, Vec::new(), cx)
+    compact_row_with(v, active, on_click, MenuExtra::default(), cx)
 }
 
 /// `compact_row` with extra items in the video's menu.
-pub fn compact_row_with(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn(&mut Window, &mut App)>>, extra: Vec<MenuItem>, cx: &mut App) -> AnyElement {
+pub fn compact_row_with(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn(&mut Window, &mut App)>>, extra: impl Into<MenuExtra>, cx: &mut App) -> AnyElement {
+    let extra = extra.into();
     let p = pal(cx);
     let (title, thumb) = branded(v, cx);
     let thumb = if thumb == v.thumbnail {
