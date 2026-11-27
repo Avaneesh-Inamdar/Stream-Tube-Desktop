@@ -9,6 +9,10 @@ use std::sync::Arc;
 
 /// Marks continuations of the signed-in home feed (they need the TV client).
 const ACCOUNT: &str = "acct:";
+/// Continuation of the account's music picks.
+const MUSIC: &str = "music:";
+/// The chip of the "Music" explore page.
+const MUSIC_CHIP: usize = 1;
 /// Marks continuations of the home feed loaded with the browser sign-in.
 const WEB: &str = "web:";
 
@@ -351,6 +355,14 @@ impl HomePage {
                     }
                     Ok((freshen(out), None))
                 } else {
+                    if chip == MUSIC_CHIP && crate::api::auth::signed_in() {
+                        // the account's own music picks, each opening as a mix
+                        if let Ok(p) = crate::api::auth::music() {
+                            if !p.items.is_empty() {
+                                return Ok((p.items, p.continuation.map(|c| format!("{MUSIC}{c}"))));
+                            }
+                        }
+                    }
                     let p = innertube::explore(EXPLORE[chip - 1].1)?;
                     Ok((p.items, p.continuation))
                 }
@@ -394,6 +406,12 @@ impl HomePage {
                 if let Some(t) = tok.strip_prefix(WEB) {
                     return crate::api::web::browse_continue(t).map(|mut p| {
                         p.continuation = p.continuation.map(|c| format!("{WEB}{c}"));
+                        p
+                    });
+                }
+                if let Some(t) = tok.strip_prefix(MUSIC) {
+                    return crate::api::auth::music_continue(t).map(|mut p| {
+                        p.continuation = p.continuation.map(|c| format!("{MUSIC}{c}"));
                         p
                     });
                 }

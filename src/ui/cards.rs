@@ -373,8 +373,11 @@ fn more_button_with(id: SharedString, v: &VideoItem, extra: MenuExtra, cx: &App)
 
 fn watch_route(v: &VideoItem) -> Route {
     match &v.playlist_id {
-        // a show's own list ("OL…") plays the latest episode with the episodes queued
-        Some(list) if list.starts_with("OL") => Route::Watch { id: v.id.clone(), playlist: Some(list.clone()), start: None },
+        // a show's own list ("OL…") plays the latest episode with the episodes queued,
+        // a YouTube Mix ("RD…") the song with the radio queued after it
+        Some(list) if list.starts_with("OL") || list.starts_with("RD") => {
+            Route::Watch { id: v.id.clone(), playlist: Some(list.clone()), start: None }
+        }
         // any other show opens its page, a list of episodes, like on YouTube
         Some(list) => Route::Playlist(list.clone()),
         None => Route::Watch { id: v.id.clone(), playlist: None, start: None },
