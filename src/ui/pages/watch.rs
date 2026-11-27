@@ -1611,6 +1611,8 @@ impl WatchPage {
             return div().into_any_element();
         }
         let autoplay = s.autoplay_next;
+        let width = s.up_next_thumbnail_width;
+        let thumb_size = size(px(width as f32), px((width * 9 / 16) as f32));
         let mut col = div().flex().flex_col().gap_2().child(
             div()
                 .flex()
@@ -1648,7 +1650,7 @@ impl WatchPage {
             match it {
                 Item::Video(v) if store::is_filtered(v, &s) => {}
                 Item::Video(v) if v.is_short => shorts.push(v.clone()),
-                Item::Video(v) => col = col.child(compact_row(v, false, None, cx)),
+                Item::Video(v) => col = col.child(compact_row(v, thumb_size, false, None, Vec::new(), cx)),
                 Item::Playlist(pl) => {
                     let id = pl.id.clone();
                     col = col.child(
@@ -1659,12 +1661,13 @@ impl WatchPage {
                             .p_1()
                             .cursor_pointer()
                             .on_click(move |_, window, cx| navigate(Route::Playlist(id.clone()), window, cx))
-                            .child(playlist_thumb(pl.thumbnail.clone(), pl.video_count_text.clone(), px(168.), px(94.), cx))
+                            .child(playlist_thumb(pl.thumbnail.clone(), pl.video_count_text.clone(), thumb_size.width, thumb_size.height, cx).flex_none())
                             .child(
                                 div()
                                     .flex()
                                     .flex_col()
                                     .flex_1()
+                                    .min_w_0()
                                     .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).line_clamp(2).child(pl.title.clone()))
                                     .when_some(pl.channel_name.clone(), |d, c| d.child(div().text_xs().text_color(p.text2).child(c))),
                             ),

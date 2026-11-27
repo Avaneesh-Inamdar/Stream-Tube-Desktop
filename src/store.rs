@@ -10,6 +10,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub const DEFAULT_UP_NEXT_THUMBNAIL_WIDTH: u32 = 168;
+pub const UP_NEXT_THUMBNAIL_SIZES: &[(u32, &str)] = &[(128, "Small"), (DEFAULT_UP_NEXT_THUMBNAIL_WIDTH, "Medium"), (208, "Large")];
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -20,6 +23,7 @@ pub struct Settings {
     pub start_page: String,
     pub minimize_to_tray: bool,
     pub grid_columns: u32,
+    pub up_next_thumbnail_width: u32,
     // Region
     pub region: String,
     pub language: String,
@@ -170,6 +174,7 @@ impl Default for Settings {
             start_page: "home".into(),
             minimize_to_tray: false,
             grid_columns: 0,
+            up_next_thumbnail_width: DEFAULT_UP_NEXT_THUMBNAIL_WIDTH,
             region: "US".into(),
             language: "en".into(),
             original_video_titles: false,
@@ -342,6 +347,9 @@ fn write_settings_file(s: &Settings) -> Result<()> {
 }
 
 fn normalize_settings(s: &mut Settings) {
+    if !UP_NEXT_THUMBNAIL_SIZES.iter().any(|&(width, _)| width == s.up_next_thumbnail_width) {
+        s.up_next_thumbnail_width = DEFAULT_UP_NEXT_THUMBNAIL_WIDTH;
+    }
     const LADDER: [u32; 7] = [144, 240, 360, 480, 720, 1080, 1440];
     if s.default_quality != 2160 && s.default_quality != 4320 && !LADDER.contains(&s.default_quality) {
         s.default_quality = LADDER.iter().copied().filter(|l| *l <= s.default_quality.max(144)).max().unwrap_or(1080);
