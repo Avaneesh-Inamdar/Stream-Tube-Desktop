@@ -1907,7 +1907,10 @@ impl Render for WatchPage {
         let avail = vp.width - px(48.);
         let side_w = px(402.);
         let two_col = avail > px(1000.);
-        let primary_w = if two_col { (avail - side_w - px(24.)).min(px(1280.)) } else { avail };
+        // the main column grows with the window, as long as the player still fits
+        // below the top bar with the start of the title showing (#230)
+        let max_primary = ((vp.height - px(56. + 120.)) * (16. / 9.)).max(px(1280.));
+        let primary_w = if two_col { (avail - side_w - px(24.)).min(max_primary) } else { avail };
         let full_height = theater && settings.theater_full_height;
         let player_h = if theater {
             (vp.width * (9. / 16.)).min(vp.height - px(56. + 120.))
