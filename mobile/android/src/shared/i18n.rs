@@ -22,6 +22,7 @@ pub enum Language {
     Japanese,
     ChineseSimplified,
     ChineseTraditional,
+    Vietnamese,
 }
 
 impl Language {
@@ -38,6 +39,7 @@ impl Language {
         Self::Japanese,
         Self::ChineseSimplified,
         Self::ChineseTraditional,
+        Self::Vietnamese,
     ];
 
     pub fn code(self) -> &'static str {
@@ -54,6 +56,7 @@ impl Language {
             Self::Japanese => "ja",
             Self::ChineseSimplified => "zh-CN",
             Self::ChineseTraditional => "zh-TW",
+            Self::Vietnamese => "vi",
         }
     }
 
@@ -71,6 +74,7 @@ impl Language {
             Self::Japanese => "日本語",
             Self::ChineseSimplified => "简体中文",
             Self::ChineseTraditional => "繁體中文",
+            Self::Vietnamese => "Tiếng Việt",
         }
     }
 
@@ -134,6 +138,7 @@ mod tests {
         );
         assert_eq!(Language::from_locale("zh_CN"), Language::ChineseSimplified);
         assert_eq!(Language::from_locale("es-ES"), Language::English);
+        assert_eq!(Language::from_locale("vi-VN"), Language::Vietnamese);
         assert_eq!(
             Language::System.effective(Language::Kazakh),
             Language::Kazakh
