@@ -333,17 +333,28 @@ pub struct MenuItem {
     pub icon: &'static str,
     pub label: SharedString,
     pub action: Arc<dyn Fn(&mut Window, &mut App)>,
+    /// an on/off item: the player menu shows a checkbox at the end of the row
+    pub checked: Option<bool>,
+    /// the player menu draws a divider line above this item
+    pub divider: bool,
 }
 
 impl MenuItem {
     pub fn new(icon: &'static str, label: impl Into<SharedString>, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
-        Self { icon, label: label.into(), action: Arc::new(f) }
+        Self { icon, label: label.into(), action: Arc::new(f), checked: None, divider: false }
+    }
+
+    pub fn checked(mut self, on: bool) -> Self {
+        self.checked = Some(on);
+        self
     }
 }
 
 #[derive(Clone)]
 pub enum MenuContent {
     Items(Vec<MenuItem>),
+    /// the video's right-click menu, drawn like youtube.com's player menu
+    Player(Vec<MenuItem>),
     View(AnyView),
 }
 
@@ -353,6 +364,12 @@ impl Global for OpenMenu {}
 
 pub fn open_menu(pos: Point<Pixels>, items: Vec<MenuItem>, _window: &mut Window, cx: &mut App) {
     cx.set_global(OpenMenu(Some((pos, MenuContent::Items(items)))));
+    cx.refresh_windows();
+}
+
+/// Opens the video's right-click menu, styled like youtube.com's player menu.
+pub fn open_player_menu(pos: Point<Pixels>, items: Vec<MenuItem>, _window: &mut Window, cx: &mut App) {
+    cx.set_global(OpenMenu(Some((pos, MenuContent::Player(items)))));
     cx.refresh_windows();
 }
 
@@ -1163,9 +1180,11 @@ impl AppView {
                         let _ = blocking(auth::sync_search_history).await;
                         let res = blocking(auth::sync_subscriptions).await;
                         let _ = this.update(cx, |t, cx| {
-                            if let Ok(n) = res {
-                                if n > 0 {
-                                    toast(cx, tf!("Added {0} subscriptions from your account", n));
+                            if let Ok((added, removed)) = res {
+                                if added > 0 {
+                                    toast(cx, tf!("Added {0} subscriptions from your account", added));
+                                }
+                                if added > 0 || removed > 0 {
                                     t.reload_page = true;
                                     cx.notify();
                                 }
@@ -1503,8 +1522,9 @@ impl AppView {
                             let res = blocking(crate::api::auth::sync_subscriptions).await;
                             let _ = cx.update(|cx| {
                                 match res {
-                                    Ok(0) => toast(cx, t("Subscriptions are up to date")),
-                                    Ok(n) => toast(cx, tf!("Added {0} subscriptions", n)),
+                                    Ok((0, 0)) => toast(cx, t("Subscriptions are up to date")),
+                                    Ok((added, 0)) => toast(cx, tf!("Added {0} subscriptions", added)),
+                                    Ok((added, removed)) => toast(cx, tf!("Added {0} subscriptions, removed {1} from the previous account", added, removed)),
                                     Err(e) => toast(cx, crate::ui::friendly_error(&e.to_string())),
                                 }
                                 cx.refresh_windows();
@@ -3244,8 +3264,12 @@ impl AppView {
     fn render_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = pal(cx);
         let (pos, content) = cx.global::<OpenMenu>().0.clone()?;
+        if let MenuContent::Player(items) = content {
+            return Some(player_menu(pos, items));
+        }
         let body = match content {
             MenuContent::View(view) => view.into_any_element(),
+            MenuContent::Player(_) => unreachable!(),
             MenuContent::Items(items) => div()
                 .children(items.into_iter().enumerate().map(|(i, it)| {
                     let act = it.action.clone();
@@ -4233,4 +4257,77 @@ fn load_mini_geom() -> (f32, f32, f32) {
         })
         .map(|(r, b, w)| (r.max(8.0), b.max(8.0), w.clamp(MINI_MIN_W, MINI_MAX_W)))
         .unwrap_or((16.0, 16.0, 400.0))
+}
+
+/// youtube.com's player menu: dark and translucent, rounded, 40 px rows with a
+/// 24 px icon, and a switch-like checkbox at the end of on/off rows.
+fn player_menu(pos: Point<Pixels>, items: Vec<MenuItem>) -> AnyElement {
+    let text = hsla(0., 0., 0.933, 1.);
+    let rows = items.into_iter().enumerate().map(move |(i, it)| {
+        let act = it.action.clone();
+        div()
+            .when(it.divider, |d| d.child(div().mx_0().my_1().h(px(1.)).bg(hsla(0., 0., 1., 0.2))))
+            .child(
+                div()
+                    .id(SharedString::from(format!("pm-{i}")))
+                    .flex()
+                    .items_center()
+                    .h(px(40.))
+                    .pr(px(15.))
+                    .cursor_pointer()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(text)
+                    .hover(|s| s.bg(hsla(0., 0., 1., 0.1)))
+                    .child(div().w(px(44.)).flex_none().flex().justify_center().child(icon(it.icon).size(px(20.)).text_color(text)))
+                    .child(div().flex_1().pr_4().child(it.label.clone()))
+                    .when_some(it.checked, |d, on| d.child(menu_checkbox(on)))
+                    .on_click(move |_, window, cx| {
+                        cx.set_global(OpenMenu(None));
+                        act(window, cx);
+                        cx.refresh_windows();
+                    }),
+            )
+    });
+    deferred(
+        anchored().position(pos).snap_to_window_with_margin(px(8.)).child(
+            div()
+                .id("ctx-menu")
+                .occlude()
+                .w(px(270.))
+                .py_2()
+                .rounded(px(12.))
+                // youtube.com blurs what's behind its 60% black; without a blur, a darker fill keeps it readable
+                .bg(hsla(0., 0., 0.08, 0.9))
+                .on_mouse_down_out(|_, _, cx| {
+                    cx.set_global(OpenMenu(None));
+                    cx.refresh_windows();
+                })
+                .children(rows),
+        ),
+    )
+    .with_priority(3)
+    .into_any_element()
+}
+
+/// youtube.com's on/off checkbox in its menus: a small pill with a knob.
+fn menu_checkbox(on: bool) -> impl IntoElement {
+    div()
+        .flex_none()
+        .w(px(34.))
+        .h(px(14.))
+        .rounded_full()
+        .bg(if on { hsla(0., 0., 1., 0.45) } else { hsla(0., 0., 1., 0.3) })
+        .relative()
+        .child(
+            div()
+                .absolute()
+                .top(px(-3.))
+                .when(on, |d| d.right(px(-2.)))
+                .when(!on, |d| d.left(px(-2.)))
+                .size(px(18.))
+                .rounded_full()
+                .bg(if on { hsla(0., 0., 1., 1.) } else { hsla(0., 0., 0.75, 1.) })
+                .shadow_sm(),
+        )
 }

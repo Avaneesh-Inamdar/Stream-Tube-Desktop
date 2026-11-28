@@ -72,9 +72,6 @@ fn resolve(video_id: &str) -> Result<StreamInfo> {
     with_sign_in_fallback(video_id, res)
 }
 
-/// How long Auto waits for the signed-in TV client before playing through visionOS.
-const TV_SIGNED_IN_BUDGET: std::time::Duration = std::time::Duration::from_secs(4);
-
 fn resolve_anonymous(video_id: &str) -> Result<StreamInfo> {
     let mode = crate::store::settings_snapshot().stream_backend.clone();
     match mode.as_str() {
@@ -93,36 +90,12 @@ fn resolve_anonymous(video_id: &str) -> Result<StreamInfo> {
         _ => {
             // The visionOS client hands out an HLS manifest that needs neither a
             // PO token nor JS challenge solving: fast, and works signed out.
-            // Signed in, the TV client plays as the account: no bot check, and
-            // the view reaches the account. Anonymous, it is one more fallback.
+            // Signed in, the TV client plays as the account (no bot check, and
+            // age-restricted videos play), but YouTube refuses its stream URLs
+            // for the first few seconds after handing them out, so it steps in
+            // only when visionOS fails. The view reaches the account either way.
+            // Anonymous, it is one more fallback further down.
             let signed_in = crate::api::auth::signed_in();
-            let mut tv_err = None;
-            if signed_in {
-                // The TV client solves YouTube's JS challenge first, which takes
-                // 20 s and more on some machines (#289). Past a few seconds,
-                // visionOS plays instead; the TV request finishes in the
-                // background and leaves the player script cached for next time.
-                let (tx, rx) = std::sync::mpsc::channel();
-                let id = video_id.to_string();
-                let _ = std::thread::Builder::new().name("streams-tv".into()).spawn(move || {
-                    let _ = tx.send(tv(&id));
-                });
-                match rx.recv_timeout(TV_SIGNED_IN_BUDGET) {
-                    Ok(Ok(info)) => return Ok(info),
-                    Ok(Err(e)) => {
-                        if crate::perf::on() {
-                            eprintln!("[streams] tv failed: {e}");
-                        }
-                        tv_err = Some(e);
-                    }
-                    Err(_) => {
-                        if crate::perf::on() {
-                            eprintln!("[streams] tv slower than {TV_SIGNED_IN_BUDGET:?}, trying visionOS");
-                        }
-                        tv_err = Some(anyhow!("TV (signed in): no answer within {} s", TV_SIGNED_IN_BUDGET.as_secs()));
-                    }
-                }
-            }
             let t = std::time::Instant::now();
             let vision = visionos(video_id);
             if crate::perf::on() {
@@ -131,13 +104,21 @@ fn resolve_anonymous(video_id: &str) -> Result<StreamInfo> {
                     Err(e) => eprintln!("[streams] visionos failed in {:?}: {e}", t.elapsed()),
                 }
             }
-            let vision_err = match vision {
+            let mut vision_err = match vision {
                 Ok(info) => return Ok(info),
-                Err(e) => match tv_err {
-                    Some(t) => anyhow!("{t}\n{e}"),
-                    None => e,
-                },
+                Err(e) => e,
             };
+            if signed_in {
+                match tv(video_id) {
+                    Ok(info) => return Ok(info),
+                    Err(e) => {
+                        if crate::perf::on() {
+                            eprintln!("[streams] tv failed: {e}");
+                        }
+                        vision_err = anyhow!("{vision_err}\n{e}");
+                    }
+                }
+            }
             // videos made for kids (YouTube Kids) are refused to visionOS and
             // Android VR, but the iOS client serves the same kind of HLS manifest
             let vision_err = match ios(video_id) {

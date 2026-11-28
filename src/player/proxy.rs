@@ -12,6 +12,8 @@ use std::sync::{Arc, OnceLock};
 
 const FIRST_CHUNK: u64 = 1 << 20; // small first chunk: fast start and seeks
 const CHUNK: u64 = 8 << 20;
+/// How long a freshly handed-out stream URL may answer 403 before it counts as refused.
+const FRESH_URL_WAIT: std::time::Duration = std::time::Duration::from_secs(6);
 
 // Key by the complete signed URL. Keep only immutable VOD playlists here.
 type PlaylistCache = VecDeque<(String, Arc<str>)>;
@@ -38,6 +40,7 @@ struct Entry {
     url: String,
     len: Option<u64>,
     mime: String,
+    added: std::time::Instant,
 }
 
 struct Proxy {
@@ -107,7 +110,7 @@ fn register(p: &Proxy, url: &str, len: Option<u64>, mime: &str) -> u64 {
         let min_keep = id.saturating_sub(10_000);
         s.retain(|k, _| *k >= min_keep);
     }
-    s.insert(id, Entry { url: url.to_string(), len, mime: mime.to_string() });
+    s.insert(id, Entry { url: url.to_string(), len, mime: mime.to_string(), added: std::time::Instant::now() });
     id
 }
 
@@ -376,6 +379,9 @@ pub(super) fn playlist_url(base: &str, uri: &str) -> Option<String> {
 fn serve_playlist(conn: &mut TcpStream, p: &Proxy, url: &str, max_height: u32, audio: Option<&str>, prefer_avc: bool) -> std::io::Result<()> {
     let mut text = PLAYLISTS.lock().iter().find(|(key, _)| key == url).map(|(_, text)| text.clone());
     if text.is_none() {
+        text = take_opening(url).and_then(|(body, _)| std::str::from_utf8(&body).ok().map(Arc::from));
+    }
+    if text.is_none() {
         text = super::shorts_preload::cached(url)
             .and_then(|media| std::str::from_utf8(&media.bytes).ok().map(Arc::from));
     }
@@ -416,6 +422,18 @@ fn serve_playlist(conn: &mut TcpStream, p: &Proxy, url: &str, max_height: u32, a
 
 /// Plain pass-through (HLS segments): forwards the request and streams the reply.
 fn serve_pass(conn: &mut TcpStream, url: &str, range: Option<(u64, Option<u64>)>, head_only: bool) -> std::io::Result<()> {
+    if matches!(range, None | Some((0, None))) && !head_only {
+        if let Some((body, mime)) = take_opening(url) {
+            write!(conn, "HTTP/1.1 200 OK
+Content-Type: {mime}
+Content-Length: {}
+Connection: close
+
+", body.len())?;
+            conn.write_all(&body)?;
+            return conn.flush();
+        }
+    }
     if let Some(media) = super::shorts_preload::cached(url) {
         let total = media.total;
         let (start, end) = range.unwrap_or((0, None));
@@ -630,8 +648,8 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
         };
     }
     let id: Option<u64> = path.strip_prefix("/s/").and_then(|s| s.parse().ok());
-    let entry = id.and_then(|id| p.streams.lock().get(&id).map(|e| (e.url.clone(), e.len, e.mime.clone())));
-    let Some((url, mut len, mime)) = entry else {
+    let entry = id.and_then(|id| p.streams.lock().get(&id).map(|e| (e.url.clone(), e.len, e.mime.clone(), e.added)));
+    let Some((url, mut len, mime, added)) = entry else {
         conn.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
         return Ok(());
     };
@@ -696,6 +714,7 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
                     Err(e) => eprintln!("[proxy] {pos}-{chunk_end} -> error {e}"),
                 }
             }
+            let status = resp.as_ref().ok().map(|r| r.status().as_u16());
             match resp {
                 Ok(r) if r.status().as_u16() == 206 || r.status().as_u16() == 200 => {
                     // Overlap the next request's setup with forwarding this body.
@@ -731,6 +750,12 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
                     }
                     break;
                 }
+                // YouTube refuses some clients' stream URLs (the signed-in TV
+                // client's) for the first seconds after handing them out: keep
+                // asking at a short interval rather than backing off
+                _ if status == Some(403) && added.elapsed() < FRESH_URL_WAIT => {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
                 _ if attempt < 3 => {
                     attempt += 1;
                     std::thread::sleep(std::time::Duration::from_millis(300 * attempt));
@@ -747,6 +772,243 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
         }
     }
     conn.flush()
+}
+
+// ---- opening prefetch ----------------------------------------------------
+// mpv opens an HLS video one request at a time: the rendition playlists, then
+// the first segments of each rendition, each a fresh round trip to YouTube.
+// For the video being opened, the proxy fetches those in parallel as soon as
+// playback starts, and mpv's requests wait for (or take) the copies.
+
+/// A prefetched response body and its content type.
+type Body = (Arc<[u8]>, Arc<str>);
+
+enum Slot {
+    Pending,
+    Ready(Body),
+    Failed,
+}
+
+#[derive(Default)]
+struct Opening {
+    /// bumps with every new video so late downloads of the previous one are dropped
+    generation: u64,
+    slots: HashMap<String, Slot>,
+    bytes: usize,
+}
+
+static OPENING: Mutex<Option<Opening>> = Mutex::new(None);
+static OPENING_READY: parking_lot::Condvar = parking_lot::Condvar::new();
+const OPENING_SEGMENTS: usize = 3;
+const OPENING_LIMIT: usize = 32 << 20;
+
+/// Starts fetching what mpv will ask for first when it opens `master_url`.
+pub(super) fn prefetch_opening(master_url: &str, max_height: u32, audio: Option<&str>, prefer_avc: bool, start: f64) {
+    let generation = {
+        let mut o = OPENING.lock();
+        let o = o.get_or_insert_with(Opening::default);
+        o.generation += 1;
+        o.slots.clear();
+        o.bytes = 0;
+        o.generation
+    };
+    OPENING_READY.notify_all();
+    // copies mpv never asked for (it seeked away, or the video was left) don't stay in memory
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        let mut o = OPENING.lock();
+        if let Some(o) = o.as_mut().filter(|o| o.generation == generation) {
+            o.slots.retain(|_, slot| matches!(slot, Slot::Pending));
+            o.bytes = 0;
+        }
+    });
+    let master_url = master_url.to_owned();
+    let audio = audio.map(str::to_owned);
+    std::thread::spawn(move || {
+        let master = PLAYLISTS.lock().iter().find(|(key, _)| *key == master_url).map(|(_, t)| t.clone()).or_else(|| fetch_text(&master_url));
+        let Some(master) = master else { return };
+        let Some(selected) = select_master(&master, max_height, audio.as_deref(), prefer_avc) else { return };
+        for uri in rendition_uris(&selected) {
+            let Some(url) = playlist_url(&master_url, &uri) else { continue };
+            if !claim(generation, &url) {
+                continue;
+            }
+            std::thread::spawn(move || {
+                let text = fetch_text(&url);
+                finish(generation, &url, text.as_ref().map(|t| (Arc::<[u8]>::from(t.as_bytes()), Arc::from("application/vnd.apple.mpegurl"))));
+                let Some(text) = text else { return };
+                // byte-range playlists share one file: leave those to mpv
+                if text.contains("#EXT-X-BYTERANGE") || !text.lines().any(|l| l.trim() == "#EXT-X-ENDLIST") {
+                    return;
+                }
+                for media in opening_media(&text, start).into_iter().filter_map(|u| playlist_url(&url, &u)) {
+                    if !claim(generation, &media) {
+                        continue;
+                    }
+                    std::thread::spawn(move || {
+                        let body = fetch_bytes(&media);
+                        finish(generation, &media, body);
+                    });
+                }
+            });
+        }
+    });
+}
+
+/// The init section and the segments mpv plays first from `start` seconds, in
+/// order. Opening a stream reads its first segment to learn the format, also
+/// when playback then starts further in, so that one is always included.
+fn opening_media(text: &str, start: f64) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut segments = 0;
+    let mut first = true;
+    let mut at = 0.0;
+    let mut duration = 0.0;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with("#EXT-X-MAP:") {
+            out.extend(hls_attr(line, "URI"));
+        } else if let Some(d) = line.strip_prefix("#EXTINF:") {
+            duration = d.split(',').next().and_then(|d| d.trim().parse::<f64>().ok()).unwrap_or(0.0);
+        } else if !line.is_empty() && !line.starts_with('#') {
+            let end = at + duration;
+            at = end;
+            if end <= start {
+                if std::mem::take(&mut first) {
+                    out.push(line.to_owned());
+                }
+                continue;
+            }
+            first = false;
+            out.push(line.to_owned());
+            segments += 1;
+            if segments == OPENING_SEGMENTS {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn rendition_uris(selected: &str) -> Vec<String> {
+    selected
+        .lines()
+        .filter_map(|line| {
+            if line.starts_with("#EXT-X-MEDIA:") {
+                hls_attr(line, "URI")
+            } else if !line.is_empty() && !line.starts_with('#') {
+                Some(line.trim().to_owned())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn claim(generation: u64, url: &str) -> bool {
+    let mut o = OPENING.lock();
+    let Some(o) = o.as_mut().filter(|o| o.generation == generation && o.bytes < OPENING_LIMIT) else { return false };
+    if o.slots.contains_key(url) {
+        return false;
+    }
+    o.slots.insert(url.to_owned(), Slot::Pending);
+    true
+}
+
+fn finish(generation: u64, url: &str, body: Option<Body>) {
+    let mut o = OPENING.lock();
+    if let Some(o) = o.as_mut().filter(|o| o.generation == generation) {
+        let slot = match body {
+            Some(b) if o.bytes + b.0.len() <= OPENING_LIMIT => {
+                o.bytes += b.0.len();
+                Slot::Ready(b)
+            }
+            _ => Slot::Failed,
+        };
+        o.slots.insert(url.to_owned(), slot);
+    }
+    drop(o);
+    OPENING_READY.notify_all();
+}
+
+/// The prefetched body of `url`, waiting while its download is still running.
+/// Each copy is handed out once: later requests (seeks back) go upstream.
+fn take_opening(url: &str) -> Option<Body> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+    let mut o = OPENING.lock();
+    loop {
+        let state = o.as_mut()?;
+        match state.slots.get(url)? {
+            Slot::Pending => {}
+            Slot::Failed => return None,
+            Slot::Ready(_) => {
+                let Some(Slot::Ready(body)) = state.slots.remove(url) else { return None };
+                state.bytes = state.bytes.saturating_sub(body.0.len());
+                if crate::perf::on() {
+                    eprintln!("[proxy] opening prefetch served {} bytes", body.0.len());
+                }
+                return Some(body);
+            }
+        }
+        if OPENING_READY.wait_until(&mut o, deadline).timed_out() {
+            return None;
+        }
+    }
+}
+
+fn fetch_text(url: &str) -> Option<Arc<str>> {
+    let (body, _) = fetch_bytes(url)?;
+    let text: Arc<str> = std::str::from_utf8(&body).ok()?.into();
+    if text.lines().any(|l| l.trim() == "#EXT-X-ENDLIST") {
+        remember_vod_playlist(url, text.clone());
+    }
+    Some(text)
+}
+
+fn fetch_bytes(url: &str) -> Option<Body> {
+    for attempt in 0..3u64 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(300 * attempt));
+        }
+        let Ok(mut r) = agent().get(url).header("User-Agent", crate::api::http::BROWSER_UA).call() else { continue };
+        if r.status().as_u16() >= 400 {
+            continue;
+        }
+        let mime: Arc<str> = r.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream").into();
+        if let Ok(body) = r.body_mut().with_config().limit(32 << 20).read_to_vec() {
+            return Some((body.into(), mime));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod opening_tests {
+    use super::opening_media;
+
+    const PLAYLIST: &str = "#EXTM3U
+#EXT-X-MAP:URI=\"init.mp4\"
+#EXTINF:5.0,
+s0.ts
+#EXTINF:5.0,
+s1.ts
+#EXTINF:5.0,
+s2.ts
+#EXTINF:5.0,
+s3.ts
+#EXTINF:5.0,
+s4.ts
+#EXT-X-ENDLIST
+";
+
+    #[test]
+    fn from_the_start_takes_the_init_and_first_segments() {
+        assert_eq!(opening_media(PLAYLIST, 0.0), ["init.mp4", "s0.ts", "s1.ts", "s2.ts"]);
+    }
+
+    #[test]
+    fn resuming_takes_the_first_segment_and_the_ones_at_the_position() {
+        assert_eq!(opening_media(PLAYLIST, 12.0), ["init.mp4", "s0.ts", "s2.ts", "s3.ts", "s4.ts"]);
+    }
 }
 
 #[cfg(test)]

@@ -318,11 +318,20 @@ impl Render for PlayerView {
                 canvas(
                     move |bounds, _, _| {
                         if let Some(m) = &mpv {
-                            // Render at the video's own resolution (capped at 1080p): mpv then
-                            // only converts colors, and the GPU scales the image for display.
+                            // Render at the video's own resolution (capped at 1080p), or
+                            // smaller when the player shows it smaller: every frame is
+                            // converted, copied and uploaded, so pixels nobody sees cost
+                            // CPU, memory and GPU time. The GPU scales the image for display.
                             let (vw, vh) = (vsize.0 as f32, vsize.1 as f32);
                             if vw > 0.0 && vh > 0.0 {
-                                let k = (1920.0 / vw).min(1080.0 / vh).min(1.0);
+                                let cap = (1920.0 / vw).min(1080.0 / vh).min(1.0);
+                                let aw = f32::from(bounds.size.width) * scale;
+                                let ah = f32::from(bounds.size.height) * scale;
+                                // enough to cover the player; cropping modes enlarge a part of the frame
+                                let crops = matches!(aspect, aspect::Mode::Auto | aspect::Mode::Ratio(_));
+                                let need = (aw / (vw * cap)).max(ah / (vh * cap)) * if crops { 1.35 } else { 1.0 };
+                                // in eighths, so resizing the window doesn't change the size every frame
+                                let k = cap * ((need * 8.0).ceil() / 8.0).clamp(0.25, 1.0);
                                 m.set_render_size((vw * k) as u32, (vh * k) as u32);
                             } else {
                                 let aw = f32::from(bounds.size.width) * scale;
@@ -522,8 +531,8 @@ impl Render for PlayerView {
                         }
                         cx.stop_propagation();
                         this.menu = None;
-                        let items = context_items(&this.player, cx);
-                        crate::ui::app::open_menu(ev.position, items, window, cx);
+                        let items = context_items(&this.player, this.pip, cx);
+                        crate::ui::app::open_player_menu(ev.position, items, window, cx);
                     }),
                 )
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -931,9 +940,12 @@ impl PlayerView {
 /// How far behind the end of a live stream's window still counts as live.
 const LIVE_EDGE_SLACK: f64 = 20.0;
 
-fn context_items(player: &Entity<Player>, cx: &App) -> Vec<crate::ui::app::MenuItem> {
+/// The video's right-click menu: youtube.com's items in youtube.com's order,
+/// then the app's own actions below a divider.
+fn context_items(player: &Entity<Player>, pip: bool, cx: &App) -> Vec<crate::ui::app::MenuItem> {
     use crate::ui::app::MenuItem;
     let pl = player.read(cx);
+    let ui = *cx.global::<UiState>();
     let id = pl.video.as_ref().map(|v| v.id.clone()).unwrap_or_default();
     let title = pl.video.as_ref().map(|v| {
         if store::settings_snapshot().dearrow_titles {
@@ -945,65 +957,119 @@ fn context_items(player: &Entity<Player>, cx: &App) -> Vec<crate::ui::app::MenuI
     let t = pl.time.max(0.0) as u64;
     let looping = pl.loop_video;
     let stats = pl.show_stats;
+    let live = pl.streams.as_ref().is_some_and(|s| s.is_live) || pl.video.as_ref().is_some_and(|v| v.is_live);
     let can_step = pl.video.is_some() && !pl.loading && !pl.audio_only;
-    let (p1, p2, p3, p4, p5) = (player.clone(), player.clone(), player.clone(), player.clone(), player.clone());
-    let fill = cx.global::<UiState>().windowed;
-    let (id1, id2) = (id.clone(), id);
-    let mut items = vec![
-        MenuItem::new("repeat", translate(if looping { "Loop: on" } else { "Loop: off" }), move |_, cx| {
-            p1.update(cx, |p, cx| {
-                p.set_loop(!looping);
+    let fill = ui.windowed;
+    let debug = {
+        let mut lines = vec![format!("Stream Tube {}", crate::updater::current_version())];
+        lines.extend(pl.stats().into_iter().map(|(k, v)| format!("{k}: {v}")));
+        lines.join("\n")
+    };
+    let mut items = Vec::new();
+    // youtube.com has no Loop for live streams
+    if !live {
+        let player = player.clone();
+        items.push(
+            MenuItem::new("repeat", translate("Loop"), move |_, cx| {
+                player.update(cx, |p, cx| {
+                    p.set_loop(!looping);
+                    cx.notify()
+                })
+            })
+            .checked(looping),
+        );
+    }
+    // the control bar's Miniplayer button
+    if !pip && !ui.shorts {
+        items.push(MenuItem::new("picture-in-picture-2", translate("Miniplayer"), |window, cx| {
+            if store::settings_snapshot().pip_always_on_top {
+                crate::ui::app::exit_fullscreen(window, cx);
+                crate::ui::pip::open(cx);
+            } else {
+                crate::ui::app::go_back_keep_playing(window, cx);
+            }
+        }));
+    }
+    if !id.is_empty() {
+        let id1 = id.clone();
+        items.push(MenuItem::new("link", translate("Copy video URL"), move |_, cx| {
+            crate::ui::copy_to_clipboard(format!("https://youtu.be/{id1}"), cx);
+        }));
+        // a live stream has no fixed position to link to
+        if !live {
+            let id2 = id.clone();
+            items.push(MenuItem::new("link", translate("Copy video URL at current time"), move |_, cx| {
+                crate::ui::copy_to_clipboard(format!("https://youtu.be/{id2}?t={t}"), cx);
+            }));
+        }
+        let id3 = id.clone();
+        items.push(MenuItem::new("code", translate("Copy embed code"), move |_, cx| {
+            crate::ui::copy_text_to_clipboard(
+                format!(
+                    "<iframe width=\"560\" height=\"315\" src=\"https://www.youtube.com/embed/{id3}\" title=\"YouTube video player\" frameborder=\"0\" allow=\"accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share\" referrerpolicy=\"strict-origin-when-cross-origin\" allowfullscreen></iframe>"
+                ),
+                cx,
+            );
+        }));
+    }
+    items.push(MenuItem::new("bug", translate("Copy debug info"), move |_, cx| {
+        crate::ui::copy_text_to_clipboard(debug.clone(), cx);
+    }));
+    {
+        // fetch the streams again and carry on from the same moment
+        let player = player.clone();
+        items.push(MenuItem::new("circle-question-mark", translate("Troubleshoot playback issue"), move |_, cx| {
+            player.update(cx, |p, cx| {
+                if let Some(v) = p.video.clone() {
+                    crate::api::streams::invalidate(&v.id);
+                    let time = (!live && p.time > 1.0).then_some(p.time);
+                    p.play(v, time, cx);
+                    crate::ui::toast(cx, translate("Reloading the video"));
+                }
+            })
+        }));
+    }
+    {
+        let player = player.clone();
+        items.push(MenuItem::new("info", translate("Stats for nerds"), move |_, cx| {
+            player.update(cx, |p, cx| {
+                p.show_stats = !stats;
                 cx.notify()
             })
-        }),
-    ];
-    items.extend([
-        MenuItem::new("link", translate("Copy video URL"), move |_, cx| {
-            crate::ui::copy_to_clipboard(format!("https://youtu.be/{id1}"), cx);
-            crate::ui::toast(cx, translate("Link copied"));
-        }),
-        MenuItem::new("clock", translate("Copy video URL at current time"), move |_, cx| {
-            crate::ui::copy_to_clipboard(format!("https://youtu.be/{id2}?t={t}"), cx);
-            crate::ui::toast(cx, translate("Link copied"));
-        }),
-    ]);
+        }).checked(stats));
+    }
+    // the app's own actions
+    let first_extra = items.len();
+    {
+        let player = player.clone();
+        items.push(MenuItem::new("camera", translate("Screenshot"), move |_, cx| player.update(cx, |p, cx| p.screenshot(cx))));
+    }
     if !title.is_empty() {
         items.push(MenuItem::new("copy", translate("Copy title"), move |_, cx| {
             crate::ui::copy_text_to_clipboard(title.clone(), cx);
         }));
     }
-    items.extend([
-        // youtube.com ends its menu with this; the app's own actions follow
-        MenuItem::new("activity", translate(if stats { "Hide stats for nerds" } else { "Stats for nerds" }), move |_, cx| {
-            p3.update(cx, |p, cx| {
-                p.show_stats = !stats;
-                cx.notify()
-            })
-        }),
-        MenuItem::new("camera", translate("Screenshot"), move |_, cx| p2.update(cx, |p, cx| p.screenshot(cx))),
-        MenuItem::new("music", translate("Music mode"), |_, cx| {
-            let on = crate::ui::music::on(cx);
-            crate::ui::music::set(!on, cx);
-        }),
-        MenuItem::new(if fill { "shrink" } else { "expand" }, translate(if fill { "Exit full window" } else { "Fill the window" }), |window, cx| {
+    let music = crate::ui::music::on(cx);
+    items.push(MenuItem::new("music", translate("Music mode"), move |_, cx| crate::ui::music::set(!music, cx)).checked(music));
+    if !pip {
+        items.push(MenuItem::new(if fill { "shrink" } else { "expand" }, translate(if fill { "Exit full window" } else { "Fill the window" }), |window, cx| {
             crate::ui::app::toggle_windowed_fullscreen(window, cx);
-        }),
-        MenuItem::new("external-link", translate("Open in external player"), move |_, cx| {
+        }));
+    }
+    {
+        let player = player.clone();
+        items.push(MenuItem::new("external-link", translate("Open in external player"), move |_, cx| {
             let (id, time) = {
-                let p = p5.read(cx);
+                let p = player.read(cx);
                 (p.video.as_ref().map(|v| v.id.clone()), p.time)
             };
             if let Some(id) = id {
-                p5.update(cx, |p, cx| p.set_paused(true, cx));
+                player.update(cx, |p, cx| p.set_paused(true, cx));
                 crate::downloads::open_external_at(&id, time, cx);
             }
-        }),
-        MenuItem::new("pause", translate("Play / pause"), move |_, cx| p4.update(cx, |p, cx| {
-            p.toggle_pause(cx);
-            cx.notify()
-        })),
-    ]);
-    if can_step {
+        }));
+    }
+    if can_step && !live {
         for (forward, icon, label, key) in [
             (false, "chevron-left", translate("Previous frame"), ','),
             (true, "chevron-right", translate("Next frame"), '.'),
@@ -1019,6 +1085,9 @@ fn context_items(player: &Entity<Player>, cx: &App) -> Vec<crate::ui::app::MenuI
                 });
             }));
         }
+    }
+    if let Some(first) = items.get_mut(first_extra) {
+        first.divider = true;
     }
     items
 }
