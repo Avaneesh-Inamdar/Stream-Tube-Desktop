@@ -469,7 +469,7 @@ impl WatchPage {
                                 v.duration_secs = dur.or(Some(p.duration as u64));
                                 v.duration_text = v.duration_secs.filter(|d| *d > 0).map(crate::api::json::format_duration);
                                 if p.channel_id.is_none() {
-                                    p.channel_id = v.channel_id.clone();
+                                    p.set_channel_id(v.channel_id.clone());
                                 }
                                 p.video = Some(v.clone());
                                 store::history_add(&v);
