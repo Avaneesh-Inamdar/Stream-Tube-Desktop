@@ -418,7 +418,7 @@ pub fn relative_from_ts(ts: i64) -> String {
     use crate::i18n::{self, AppLanguage};
 
     let d = (now() - ts).max(0);
-    let (n, messages, ru, uk) = if d < 60 {
+    let (n, messages, ru, uk, ar) = if d < 60 {
         return i18n::t("just now").into();
     } else if d < 3600 {
         (
@@ -426,6 +426,7 @@ pub fn relative_from_ts(ts: i64) -> String {
             ["{0} minute ago", "{0} minutes ago"],
             ["минуту", "минуты", "минут"],
             ["хвилину", "хвилини", "хвилин"],
+            ["دقيقة واحدة", "دقيقتين", "دقائق", "دقيقة"],
         )
     } else if d < 86400 {
         (
@@ -433,6 +434,7 @@ pub fn relative_from_ts(ts: i64) -> String {
             ["{0} hour ago", "{0} hours ago"],
             ["час", "часа", "часов"],
             ["годину", "години", "годин"],
+            ["ساعة واحدة", "ساعتين", "ساعات", "ساعة"],
         )
     } else if d < 7 * 86400 {
         (
@@ -440,6 +442,7 @@ pub fn relative_from_ts(ts: i64) -> String {
             ["{0} day ago", "{0} days ago"],
             ["день", "дня", "дней"],
             ["день", "дні", "днів"],
+            ["يوم واحد", "يومين", "أيام", "يوماً"],
         )
     } else if d < 30 * 86400 {
         (
@@ -447,6 +450,7 @@ pub fn relative_from_ts(ts: i64) -> String {
             ["{0} week ago", "{0} weeks ago"],
             ["неделю", "недели", "недель"],
             ["тиждень", "тижні", "тижнів"],
+            ["أسبوع واحد", "أسبوعين", "أسابيع", "أسبوعاً"],
         )
     } else if d < 365 * 86400 {
         (
@@ -454,6 +458,7 @@ pub fn relative_from_ts(ts: i64) -> String {
             ["{0} month ago", "{0} months ago"],
             ["месяц", "месяца", "месяцев"],
             ["місяць", "місяці", "місяців"],
+            ["شهر واحد", "شهرين", "أشهر", "شهراً"],
         )
     } else {
         (
@@ -461,8 +466,18 @@ pub fn relative_from_ts(ts: i64) -> String {
             ["{0} year ago", "{0} years ago"],
             ["год", "года", "лет"],
             ["рік", "роки", "років"],
+            ["سنة واحدة", "سنتين", "سنوات", "سنة"],
         )
     };
+
+    if i18n::language() == AppLanguage::Arabic {
+        return match n {
+            1 => format!("قبل {}", ar[0]),
+            2 => format!("قبل {}", ar[1]),
+            3..=10 => format!("قبل {n} {}", ar[2]),
+            _ => format!("قبل {n} {}", ar[3]),
+        };
+    }
 
     let (forms, suffix) = match i18n::language() {
         AppLanguage::Russian => (ru, "назад"),

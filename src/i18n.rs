@@ -29,11 +29,14 @@ pub enum AppLanguage {
     ChineseSimplified,
     #[serde(rename = "zh-TW")]
     ChineseTraditional,
+    #[serde(rename = "ar")]
+    Arabic,
 }
 
 impl AppLanguage {
     pub const OPTIONS: &[(Self, &str)] = &[
         (Self::English, "English"),
+        (Self::Arabic, "العربية"),
         (Self::Azerbaijani, "Azərbaycanca"),
         (Self::German, "Deutsch"),
         (Self::French, "Français"),
@@ -49,6 +52,7 @@ impl AppLanguage {
     pub fn code(self) -> &'static str {
         match self {
             Self::English => "en",
+            Self::Arabic => "ar",
             Self::Russian => "ru",
             Self::French => "fr",
             Self::Azerbaijani => "az",
@@ -63,6 +67,7 @@ impl AppLanguage {
     }
 
     fn catalog(self) -> Option<&'static Catalog> {
+        static AR: Catalog = Catalog::new(include_str!("i18n/locales/ar.json"));
         static RU: Catalog = Catalog::new(include_str!("i18n/locales/ru.json"));
         static FR: Catalog = Catalog::new(include_str!("i18n/locales/fr.json"));
         static AZ: Catalog = Catalog::new(include_str!("i18n/locales/az.json"));
@@ -76,6 +81,7 @@ impl AppLanguage {
 
         Some(match self {
             Self::English => return None,
+            Self::Arabic => &AR,
             Self::Russian => &RU,
             Self::French => &FR,
             Self::Azerbaijani => &AZ,
@@ -253,5 +259,19 @@ mod tests {
             format_template("{0}%", &[&format_args!("{:.1}", 1.24)]),
             "1.2%"
         );
+    }
+
+    #[test]
+    fn arabic_interface_round_trips_and_translates() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"app_language":"ar","language":"en"}"#).unwrap();
+        assert_eq!(settings.app_language, AppLanguage::Arabic);
+        assert_eq!(
+            serde_json::to_value(settings).unwrap()["app_language"],
+            "ar"
+        );
+        assert_eq!(AppLanguage::Arabic.translate("Settings"), "الإعدادات");
+        assert_eq!(AppLanguage::Arabic.translate("Home"), "الصفحة الرئيسية");
+        assert_eq!(AppLanguage::Arabic.translate("Subscribe"), "اشتراك");
     }
 }
