@@ -522,6 +522,10 @@ impl DirectWriteState {
                     f32::INFINITY,
                     f32::INFINITY,
                 )?;
+                if first_strong_rtl(text) {
+                    layout.SetReadingDirection(DWRITE_READING_DIRECTION_RIGHT_TO_LEFT)?;
+                    layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING)?;
+                }
                 let current_text = &text[utf8_offset..(utf8_offset + first_run.len)];
                 utf8_offset += first_run.len;
                 let current_text_utf16_length = current_text.encode_utf16().count() as u32;
@@ -572,14 +576,13 @@ impl DirectWriteState {
                 break_ligatures = !break_ligatures;
             }
 
-            let mut runs = Vec::new();
+            let mut placed_runs: Vec<(f32, f32, ShapedRun)> = Vec::new();
             let mut renderer_context = RendererContext {
                 text_system: self,
                 components,
                 index_converter: StringIndexConverter::new(text),
-                runs: &mut runs,
+                runs: &mut placed_runs,
                 layout: &text_layout,
-                width: 0.0,
             };
             text_layout.Draw(
                 Some((&raw mut renderer_context).cast::<c_void>().cast_const()),
@@ -587,7 +590,29 @@ impl DirectWriteState {
                 0.0,
                 0.0,
             )?;
-            let width = px(renderer_context.width);
+            let min_x = placed_runs
+                .iter()
+                .map(|(left, _, _)| *left)
+                .fold(f32::INFINITY, f32::min);
+            let min_x = if min_x.is_finite() { min_x } else { 0.0 };
+            let max_x = placed_runs
+                .iter()
+                .map(|(_, right, _)| *right)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let max_x = if max_x.is_finite() { max_x } else { 0.0 };
+            placed_runs.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let runs = placed_runs
+                .into_iter()
+                .map(|(_, _, mut run)| {
+                    if min_x != 0.0 {
+                        for glyph in &mut run.glyphs {
+                            glyph.position.x -= px(min_x);
+                        }
+                    }
+                    run
+                })
+                .collect();
+            let width = px((max_x - min_x).max(0.0));
 
             Ok(LineLayout {
                 font_size,
@@ -1189,9 +1214,8 @@ struct RendererContext<'t, 'a, 'b> {
     text_system: &'t mut DirectWriteState,
     components: &'a DirectWriteComponents,
     index_converter: StringIndexConverter<'a>,
-    runs: &'b mut Vec<ShapedRun>,
+    runs: &'b mut Vec<(f32, f32, ShapedRun)>,
     layout: &'b IDWriteTextLayout,
-    width: f32,
 }
 
 #[derive(Debug)]
@@ -1290,7 +1314,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
     fn DrawGlyphRun(
         &self,
         clientdrawingcontext: *const ::core::ffi::c_void,
-        _baselineoriginx: f32,
+        baselineoriginx: f32,
         _baselineoriginy: f32,
         _measuringmode: DWRITE_MEASURING_MODE,
         glyphrun: *const DWRITE_GLYPH_RUN,
@@ -1355,6 +1379,8 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
             // Tabs have layout advances but no glyph advances. Keep invisible
             // glyphs so LineLayout can map their byte indices to caret positions.
             let mut glyphs = Vec::new();
+            let mut left_x = f32::INFINITY;
+            let mut right_x = f32::NEG_INFINITY;
             for (offset, &character) in text.iter().enumerate() {
                 if character != u16::from(b'\t') {
                     continue;
@@ -1385,10 +1411,13 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                     index: context.index_converter.utf8_ix,
                     is_emoji: false,
                 });
-                context.width += metrics.width;
+                left_x = left_x.min(metrics.left);
+                right_x = right_x.max(metrics.left + metrics.width);
             }
             if !glyphs.is_empty() {
-                context.runs.push(ShapedRun { font_id, glyphs });
+                context
+                    .runs
+                    .push((left_x, right_x, ShapedRun { font_id, glyphs }));
             }
         } else {
             let color_font = unsafe { font_face.IsColorFont().as_bool() };
@@ -1440,7 +1469,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                 ascender_offset: f32,
             }
             let rtl = glyphrun.bidiLevel % 2 == 1;
-            let run_start_x = context.width;
+            let mut run_width = 0.0f32;
             let mut temp_glyphs = Vec::with_capacity(glyph_count);
             for (cluster_utf16_len, cluster_glyph_count) in cluster_analyzer {
                 context.index_converter.advance_to_utf16_ix(utf16_idx);
@@ -1454,21 +1483,30 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                     let is_emoji =
                         color_font && is_color_glyph(font_face, id, &context.components.factory);
                     let this_glyph_idx = glyph_idx + cluster_glyph_idx;
+                    let advance = glyph_advances[this_glyph_idx];
                     temp_glyphs.push(TempGlyph {
                         id,
                         index: context.index_converter.utf8_ix,
                         is_emoji,
-                        advance: glyph_advances[this_glyph_idx],
+                        advance,
                         advance_offset: glyph_offsets[this_glyph_idx].advanceOffset,
                         ascender_offset: glyph_offsets[this_glyph_idx].ascenderOffset,
                     });
-                    context.width += glyph_advances[this_glyph_idx];
+                    run_width += advance;
                 }
                 glyph_idx += cluster_glyph_count;
             }
             if rtl {
                 temp_glyphs.reverse();
             }
+            // DirectWrite delivers runs in logical order with each run's visual
+            // baseline origin: LTR starts at `baselineoriginx` and advances right,
+            // RTL ends at `baselineoriginx` and spans `[baselineoriginx - width, baselineoriginx]`.
+            let run_start_x = if rtl {
+                baselineoriginx - run_width
+            } else {
+                baselineoriginx
+            };
             let mut x = run_start_x;
             let glyphs = temp_glyphs
                 .into_iter()
@@ -1486,7 +1524,9 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                     shaped
                 })
                 .collect();
-            context.runs.push(ShapedRun { font_id, glyphs });
+            context
+                .runs
+                .push((run_start_x, run_start_x + run_width, ShapedRun { font_id, glyphs }));
         }
         Ok(())
     }
@@ -1838,6 +1878,21 @@ fn is_line_separator(character: char) -> bool {
     matches!(character, '\u{2028}' | '\u{2029}')
 }
 
+fn first_strong_rtl(text: &str) -> bool {
+    for c in text.chars() {
+        if matches!(
+            c,
+            '\u{0590}'..='\u{08FF}' | '\u{FB1D}'..='\u{FDFF}' | '\u{FE70}'..='\u{FEFF}'
+        ) {
+            return true;
+        }
+        if c.is_alphabetic() {
+            return false;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::DirectWriteTextSystem;
@@ -1883,6 +1938,31 @@ mod tests {
         indices.dedup();
         assert_eq!(indices, text.char_indices().map(|(i, _)| i).collect::<Vec<_>>(), "{g:?}");
         assert!(x_of(&g, 0) > x_of(&g, 5) && x_of(&g, 5) > x_of(&g, 8), "{g:?}");
+
+        // Real Arabic relative timestamp: "قبل 5 أيام" reads RTL with "قبل" rightmost, "5" middle, "أيام" leftmost.
+        let text = "قبل 5 أيام";
+        let q_ix = 0;
+        let five_ix = text.find('5').unwrap();
+        let a_ix = text.find('أ').unwrap();
+        let g = glyphs(&layout_of(text));
+        assert!(
+            x_of(&g, q_ix) > x_of(&g, five_ix) && x_of(&g, five_ix) > x_of(&g, a_ix),
+            "{g:?}"
+        );
+
+        // Leading number + Arabic views + comma + Arabic relative time ("9 ألف, قبل 9 ساعات").
+        let text = "9 ألف, قبل 9 ساعات";
+        let n1_ix = 0;
+        let alf_ix = text.find('أ').unwrap();
+        let qabl_ix = text.find('ق').unwrap();
+        let saat_ix = text.find('س').unwrap();
+        let g = glyphs(&layout_of(text));
+        assert!(
+            x_of(&g, n1_ix) > x_of(&g, alf_ix)
+                && x_of(&g, alf_ix) > x_of(&g, qabl_ix)
+                && x_of(&g, qabl_ix) > x_of(&g, saat_ix),
+            "{g:?}"
+        );
         Ok(())
     }
 
