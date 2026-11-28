@@ -426,7 +426,7 @@ impl WatchPage {
     fn load(&mut self, cx: &mut Context<Self>) {
         let id = self.id.clone();
         let pid = self.playlist_id.clone().filter(|p| !p.starts_with("local:"));
-        self.counted_rating = store::rating(&self.id);
+        self.counted_rating = visible_rating(&self.id);
         if store::settings_snapshot().ryd {
             let rating_id = id.clone();
             cx.spawn(async move |this, cx| {
@@ -697,7 +697,7 @@ impl WatchPage {
         let p = pal(cx);
         let s = store::settings_snapshot();
         let subscribed = store::is_subscribed(&w.channel.id);
-        let rating = store::rating(&w.id);
+        let rating = visible_rating(&w.id);
         // the fetched counts already hold the vote made before they were fetched;
         // move them by whatever changed since, shown exactly so a vote is visible
         let shift = |n: u64, was: bool, now: bool| (n + now as u64).saturating_sub(was as u64);
@@ -2013,23 +2013,42 @@ fn vote_count(n: u64) -> String {
     out
 }
 
-/// Likes / dislikes a video locally and on the signed-in account.
+/// Returns the user's visible rating for a video (`0` when signed out, since liking requires a YouTube account).
+pub(crate) fn visible_rating(id: &str) -> i8 {
+    effective_rating(store::rating(id), crate::api::auth::signed_in())
+}
+
+fn effective_rating(stored: i8, signed_in: bool) -> i8 {
+    if signed_in { stored } else { 0 }
+}
+
+/// Likes / dislikes a video on the signed-in YouTube account.
+/// Requires signing in to YouTube; when signed out, prompts to sign in without saving a local vote.
 pub(crate) fn set_rating(id: &str, r: i8, cx: &mut App) {
-    store::set_rating(id, r);
-    if crate::api::auth::signed_in() {
-        let id = id.to_string();
-        let kind = match r {
-            1 => "like",
-            -1 => "dislike",
-            _ => "removelike",
-        };
-        cx.spawn(async move |cx| {
-            if blocking(move || crate::api::auth::like(&id, kind)).await.is_err() {
-                let _ = cx.update(|cx| toast(cx, translate("Couldn't update the rating on your YouTube account")));
-            }
-        })
-        .detach();
+    if !crate::api::auth::signed_in() {
+        crate::ui::toast_with_action(
+            cx,
+            translate("Sign in to YouTube"),
+            Some((
+                translate("Sign in").into(),
+                std::sync::Arc::new(|window, cx| crate::ui::app::open_sign_in(window, cx)),
+            )),
+        );
+        return;
     }
+    store::set_rating(id, r);
+    let id = id.to_string();
+    let kind = match r {
+        1 => "like",
+        -1 => "dislike",
+        _ => "removelike",
+    };
+    cx.spawn(async move |cx| {
+        if blocking(move || crate::api::auth::like(&id, kind)).await.is_err() {
+            let _ = cx.update(|cx| toast(cx, translate("Couldn't update the rating on your YouTube account")));
+        }
+    })
+    .detach();
     cx.refresh_windows();
 }
 
@@ -2207,5 +2226,13 @@ mod queue_merge_tests {
         assert_eq!(queue_scroll_action(Some(50), Some(50), true, false), QueueScrollAction::None);
         // Changing position (e.g. shuffle) scrolls to the new position.
         assert_eq!(queue_scroll_action(Some(12), Some(50), true, false), QueueScrollAction::ScrollTo(11));
+    }
+
+    #[::core::prelude::v1::test]
+    fn signed_out_hides_and_ignores_ratings() {
+        assert_eq!(super::effective_rating(1, false), 0);
+        assert_eq!(super::effective_rating(-1, false), 0);
+        assert_eq!(super::effective_rating(1, true), 1);
+        assert_eq!(super::effective_rating(-1, true), -1);
     }
 }
