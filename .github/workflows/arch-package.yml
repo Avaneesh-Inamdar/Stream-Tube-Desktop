@@ -1,0 +1,93 @@
+name: Arch Linux package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'vendor/**'
+      - 'assets/**'
+      - 'packaging/linux/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - '.github/workflows/arch-package.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  arch-package:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel git rust clang cmake pkgconf \
+            fontconfig freetype2 wayland libxkbcommon libxkbcommon-x11 libx11 libxcb \
+            vulkan-headers vulkan-icd-loader openssl zstd mpv desktop-file-utils
+
+      - uses: actions/checkout@v4
+
+      - name: Generate PKGBUILD
+        shell: bash
+        run: |
+          cat > PKGBUILD <<'PKGEOF'
+          pkgname=streamtube
+          pkgver=1.0.1
+          pkgrel=1
+          pkgdesc='Native YouTube desktop client with SponsorBlock, DeArrow and Return YouTube Dislike'
+          arch=('x86_64')
+          url='https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop'
+          license=('MIT')
+          depends=('mpv' 'fontconfig' 'freetype2' 'libxkbcommon' 'libxkbcommon-x11' 'libx11' 'libxcb' 'wayland' 'vulkan-icd-loader' 'openssl' 'zstd' 'desktop-file-utils')
+          optdepends=('yt-dlp: downloads' 'ffmpeg: video/audio processing')
+          makedepends=('rust' 'clang' 'cmake' 'pkgconf' 'git')
+          # Bundled C libraries must be linkable by Rust's linker.
+          options=('!lto')
+          source=()
+          sha256sums=()
+
+          build() {
+            cd "$srcdir/streamtube"
+            cargo build --release --locked
+          }
+
+          package() {
+            cd "$srcdir/streamtube"
+            install -Dm755 target/release/streamtube "$pkgdir/usr/bin/streamtube"
+            install -Dm644 packaging/linux/streamtube.desktop "$pkgdir/usr/share/applications/streamtube.desktop"
+            install -Dm644 assets/logo.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/streamtube.png"
+            install -Dm644 assets/logo.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/streamtube.svg"
+            install -Dm644 packaging/linux/io.github.avaneesh_inamdar.StreamTube.metainfo.xml "$pkgdir/usr/share/metainfo/io.github.avaneesh_inamdar.StreamTube.metainfo.xml"
+            install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+          }
+          PKGEOF
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          test -n "$version"
+          sed -i "s/^pkgver=.*/pkgver=${version//-/_}/" PKGBUILD
+          useradd -m -s /bin/bash builder
+          install -d -o builder -g builder /home/builder/arch-package/src/streamtube
+          git -c safe.directory="$GITHUB_WORKSPACE" archive HEAD | tar -x -C /home/builder/arch-package/src/streamtube
+          cp PKGBUILD /home/builder/arch-package/
+          chown -R builder:builder /home/builder/arch-package
+
+      - name: Build Arch package
+        shell: bash
+        run: |
+          cd /home/builder/arch-package
+          runuser -u builder -- env HOME=/home/builder PKGEXT=.pkg.tar.zst makepkg --noconfirm --clean --force
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p dist
+          cp /home/builder/arch-package/*.pkg.tar.zst dist/
+          pacman -Qip dist/*.pkg.tar.zst
+          pacman -Qlp dist/*.pkg.tar.zst
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: streamtube-arch-x86_64
+          path: dist/*.pkg.tar.zst
+          if-no-files-found: error
