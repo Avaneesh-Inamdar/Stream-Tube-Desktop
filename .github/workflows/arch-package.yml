@@ -50,12 +50,12 @@ jobs:
           sha256sums=()
 
           build() {
-            cd "$startdir"
+            cd "$srcdir/streamtube"
             cargo build --release --locked
           }
 
           package() {
-            cd "$startdir"
+            cd "$srcdir/streamtube"
             install -Dm755 target/release/streamtube "$pkgdir/usr/bin/streamtube"
             install -Dm644 packaging/linux/streamtube.desktop "$pkgdir/usr/share/applications/streamtube.desktop"
             install -Dm644 assets/logo.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/streamtube.png"
@@ -68,14 +68,19 @@ jobs:
           test -n "$version"
           sed -i "s/^pkgver=.*/pkgver=${version//-/_}/" PKGBUILD
           useradd -m -s /bin/bash builder
-          chown -R builder:builder "$GITHUB_WORKSPACE"
+          install -d -o builder -g builder /home/builder/arch-package/src/streamtube
+          git archive HEAD | tar -x -C /home/builder/arch-package/src/streamtube
+          cp PKGBUILD /home/builder/arch-package/
+          chown -R builder:builder /home/builder/arch-package
 
       - name: Build Arch package
         shell: bash
         run: |
+          cd /home/builder/arch-package
           runuser -u builder -- env HOME=/home/builder PKGEXT=.pkg.tar.zst makepkg --noconfirm --clean --force
+          cd "$GITHUB_WORKSPACE"
           mkdir -p dist
-          cp ./*.pkg.tar.zst dist/
+          cp /home/builder/arch-package/*.pkg.tar.zst dist/
           pacman -Qip dist/*.pkg.tar.zst
           pacman -Qlp dist/*.pkg.tar.zst
 
