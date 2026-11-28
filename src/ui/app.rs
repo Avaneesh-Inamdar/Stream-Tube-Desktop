@@ -3893,6 +3893,11 @@ impl Render for AppView {
                 MouseButton::Navigate(NavigationDirection::Forward),
                 cx.listener(|this, _, window, cx| this.forward(window, cx)),
             );
+        root.text_style().font_fallbacks = Some(gpui_kit::FontFallbacks::from_fonts(
+            ["Noto Kufi Arabic", "Noto Sans Arabic", "Noto Naskh Arabic", "Cairo", "Tajawal", "Amiri", "Rubik", "DejaVu Sans"]
+                .map(String::from)
+                .to_vec(),
+        ));
         if !is_shorts {
             crate::player::shorts_preload::clear();
         }

@@ -68,3 +68,5 @@ gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 # Cyrillic, which made typing in some Linux input methods crash the app (#248).
 # See vendor/xim-ctext/Cargo.toml.
 xim-ctext = { path = "vendor/xim-ctext" }
+gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
+gpui-pre = { path = "vendor/gpui-pre" }
