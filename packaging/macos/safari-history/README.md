@@ -18,11 +18,12 @@ documented developer approval before it will load the extension.
 [Running a Safari web extension](https://developer.apple.com/documentation/safariservices/running-your-safari-web-extension)
 
 1. Open the prototype, then enable **Stream Tube Watch History** in Safari.
-2. In Stream Tube, select **Settings → General → YouTube watch history → Connect**.
+2. In Stream Tube, select **Connect** next to **YouTube watch history and
+   comment reactions** under **Settings → General**.
    Choose **Use Safari** if the dialog also shows a Chromium browser.
 3. In the YouTube tab, sign in and open **Stream Tube Watch History** from
    the Safari toolbar. Grant access to YouTube when Safari asks, then reopen the
-   extension if needed and choose **Connect this YouTube session**.
+   extension if needed and choose **Connect YouTube**.
 4. Return to Stream Tube and check that Settings shows **Connected as**. Play a
    video in the native player with watch history enabled. Let it play for at
    least 30 seconds, then close the player and note the position.
@@ -32,8 +33,21 @@ documented developer approval before it will load the extension.
 The extension requests access to `www.youtube.com`. After you choose to connect,
 it sends the YouTube session cookies from the active Safari profile to Stream
 Tube over a one-time loopback connection tied to the open dialog. Stream Tube
-uses the session for playback reporting and keeps it in memory until disconnect
-or quit. Reconnect after restarting the prototype.
+uses one connection for playback reporting and comment reactions. It keeps the
+session in memory until you disconnect or quit. Reconnect after restarting the
+prototype. The device-code sign-in for recommendations and subscriptions is optional.
+
+## Like or dislike comments
+
+1. Open a video’s comments in Stream Tube. If the browser account is still
+   disconnected, choose **Connect to react to comments** to open the same
+   connection dialog as in Settings.
+2. Choose **Reload comments** and use the comment’s like or dislike button.
+   Click the selected button again to clear your reaction.
+3. Choose **Reload comments** again to fetch the saved reaction from YouTube.
+
+Voting and reloading happen in Stream Tube. Use **Disconnect** in **Settings →
+General** to stop sharing the session for both watch history and reactions.
 
 ## Build a test copy alongside older prototypes
 

@@ -102,7 +102,7 @@ pub fn register_scheme() {
 }
 
 /// Whether a process with this id is running.
-fn process_alive(pid: u32) -> bool {
+pub(crate) fn process_alive(pid: u32) -> bool {
     #[cfg(windows)]
     {
         const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;

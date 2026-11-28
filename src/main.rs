@@ -166,6 +166,7 @@ fn main() {
         return;
     }
     store::init();
+    api::web::sweep_cookie_files();
     perf::mark("store");
     display::choose();
     perf::mark("display");

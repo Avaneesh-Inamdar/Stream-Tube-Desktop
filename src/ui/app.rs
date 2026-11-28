@@ -480,7 +480,7 @@ pub fn import_web_cookies(cx: &mut App) {
             }
             match res {
                 Ok(name) => {
-                    toast(cx, tf!("Connected as {0}. What you watch now shows in your YouTube history.", name));
+                    toast(cx, tf!("Connected as {0} for watch history and comment reactions.", name));
                     super::history::refresh_current(cx, false);
                 }
                 Err(e) => toast(cx, crate::ui::friendly_error(&format!("{e:#}"))),
@@ -824,6 +824,9 @@ pub struct AppView {
     yt_playlists: Option<Vec<PlaylistItem>>,
     yt_playlist_session: Option<std::sync::Arc<()>>,
     favorite_membership: Option<FavoriteMembership>,
+    /// account playlists a video was saved to or removed from in the Save dialog,
+    /// by (playlist, video): (saved, request pending)
+    yt_saved: std::collections::HashMap<(String, String), (bool, bool)>,
     dialog_input: Entity<InputState>,
     focus: FocusHandle,
     pending_watch_sync: Option<String>,
@@ -1081,6 +1084,7 @@ impl AppView {
             yt_playlists: None,
             yt_playlist_session: None,
             favorite_membership: None,
+            yt_saved: Default::default(),
             dialog_input,
             focus,
             pending_watch_sync: None,
@@ -1226,10 +1230,9 @@ impl AppView {
                 self.start_safari_sign_in(cx);
                 return;
             }
-            self.web_login.error = Some(
-                "YouTube watch history sign-in requires Chrome, Edge, Brave or Chromium. Install a supported browser, then choose Try again."
-                    .into(),
-            );
+            self.web_login.error = Some(t(
+                "To connect watch history and comment reactions, use Chrome, Edge, Brave or Chromium, or import a cookies.txt file.",
+            ).into());
             cx.notify();
             return;
         };
@@ -1338,7 +1341,7 @@ impl AppView {
                         if matches!(t.dialog, Some(Dialog::WebSignIn)) {
                             t.dialog = None;
                         }
-                        toast(cx, tf!("Connected as {0}. What you watch now shows in your YouTube history.", name));
+                        toast(cx, tf!("Connected as {0} for watch history and comment reactions.", name));
                         super::history::refresh_current(cx, false);
                         cx.refresh_windows();
                     }
@@ -1361,7 +1364,9 @@ impl AppView {
                 .items_center()
                 .gap_3()
                 .child(icon("history").size_6().text_color(p.text))
-                .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(t("Connect your YouTube history"))),
+                .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(
+                    t("Connect watch history and comment reactions"),
+                )),
         );
         let cookies_link = div()
             .id("wsi-cookies")
@@ -1405,7 +1410,7 @@ impl AppView {
             let confirmed = self.web_login.channel_confirmed.load(Ordering::Relaxed);
             col = col
                 .child(div().text_sm().text_color(p.text2).child(t(
-                    "In the browser, open your YouTube profile menu and choose the channel for your watch history.",
+                    "In the browser, open your YouTube profile menu and choose the channel to connect.",
                 )))
                 .child(div().flex().flex_wrap().justify_end().gap_2().child(cancel).child(
                     pill("wsi-use-channel", None, if confirmed { "Waiting for sign-in…" } else { "Use current YouTube channel" }, cx)
@@ -1424,7 +1429,7 @@ impl AppView {
                         .text_sm()
                         .text_color(p.text2)
                         .child(if safari {
-                            t("In Safari, sign in to YouTube. On the YouTube tab, open the Stream Tube watch-history extension for this build and choose Connect this YouTube session.").into()
+                            t("On the signed-in YouTube tab in Safari, open the matching Stream Tube extension and choose Connect YouTube.").into()
                         } else if cfg!(target_os = "macos") {
                             tf!("Sign in to YouTube in the {0} window that opened. It closes by itself when you're done.", browser)
                         } else {
@@ -1435,7 +1440,7 @@ impl AppView {
                                 .text_xs()
                                 .text_color(p.text3)
                                 .child(if safari {
-                                    t("Enable the extension in Safari and grant it access to YouTube. The connection lasts until you quit Stream Tube or disconnect.")
+                                    t("Grant the extension access to YouTube to sync watch history and react to comments. The connection lasts until you quit Stream Tube or disconnect.")
                                 } else {
                                     t("Videos you watch in Stream Tube then show in your YouTube history, and your phone and TV resume them where you stopped. The window uses its own empty profile, which is deleted afterwards.")
                                 })
@@ -1667,6 +1672,10 @@ impl AppView {
         }
         crate::ui::slot::clear_slot(cx);
         self.leave_watch_fullscreen(&route, window, cx);
+        // youtube.com empties the search box when you go back to Home
+        if route == Route::Home && !self.search.read(cx).value().is_empty() {
+            self.search.update(cx, |s, cx| s.set_value("", window, cx));
+        }
         let page = build_page(&route, window, cx);
         let old_route = std::mem::replace(&mut self.route, route);
         let old_page = std::mem::replace(&mut self.page, page);
@@ -2616,6 +2625,11 @@ impl AppView {
                 cx.notify();
                 return;
             }
+            // the player's gear menu, like youtube.com: Esc closes it and stays on the video
+            if self.main_view.update(cx, |v, cx| v.close_menu(cx)) || self.mini_view.update(cx, |v, cx| v.close_menu(cx)) {
+                cx.notify();
+                return;
+            }
             if search_focused {
                 self.show_suggestions = false;
                 window.focus(&self.focus, cx);
@@ -3357,6 +3371,9 @@ impl AppView {
                 .shadow_2xl()
                 .border_1()
                 .border_color(p.border)
+                // the cards under the mini player must not get its clicks and hovers
+                // (a click on the video opened the video beneath it instead)
+                .occlude()
                 // the video itself is drawn over this slot by `Shell`
                 .child(div().w_full().h(px(h)).child(crate::ui::slot::slot_canvas(cx.global::<crate::ui::slot::MiniSlot>().0.clone())))
                 .child(
@@ -3706,7 +3723,17 @@ impl AppView {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).pb_2().child(t("Save video to…")))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .pb_2()
+                            .child(div().flex_1().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(t("Save video to…")))
+                            .child(icon_button("dlg-save-close", "x", cx).on_click(cx.listener(|this, _, _, cx| {
+                                this.dialog = None;
+                                cx.notify();
+                            }))),
+                    )
                     .children(pls.into_iter().map(|pl| {
                         let contains = store::playlist_contains(pl.id, &v.id);
                         let v2 = v.clone();
@@ -3743,6 +3770,8 @@ impl AppView {
                                 .filter(|pl| pl.id != "LL" && favorite.is_none_or(|favorite| pl.id != favorite.id))
                                 .map(|pl| {
                                     let (pid, name, vid) = (pl.id.clone(), pl.title.clone(), v.id.clone());
+                                    let state = self.yt_saved.get(&(pid.clone(), vid.clone())).copied();
+                                    let (saved, pending) = state.unwrap_or((false, false));
                                     div()
                                         .id(SharedString::from(format!("dlg-yt-{}", pl.id)))
                                         .flex()
@@ -3753,16 +3782,40 @@ impl AppView {
                                         .rounded_md()
                                         .cursor_pointer()
                                         .hover(move |s| s.bg(p.hover))
-                                        .child(icon("list-plus").text_color(p.text))
+                                        .child(icon(if pending { "loader" } else if saved { "square-check" } else { "square" }).text_color(p.text))
                                         .child(div().flex_1().text_sm().text_color(p.text).truncate().child(pl.title.clone()))
                                         .child(icon("list-video").size_4().text_color(p.text3))
-                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if pending {
+                                                return;
+                                            }
+                                            // a second click removes it again, like youtube.com's checkboxes (#268)
+                                            let save = !saved;
+                                            let key = (pid.clone(), vid.clone());
+                                            this.yt_saved.insert(key.clone(), (saved, true));
+                                            cx.notify();
                                             let (pid, name, vid) = (pid.clone(), name.clone(), vid.clone());
-                                            cx.spawn(async move |_, cx| {
-                                                let res = blocking(move || crate::api::auth::add_to_playlist(&pid, &vid)).await;
-                                                cx.update(|cx| match res {
-                                                    Ok(()) => toast(cx, tf!("Saved to playlist “{0}”", name)),
-                                                    Err(_) => toast(cx, t("Couldn't save to that YouTube playlist")),
+                                            cx.spawn(async move |this, cx| {
+                                                let res = blocking(move || {
+                                                    if save {
+                                                        crate::api::auth::add_to_playlist(&pid, &vid)
+                                                    } else {
+                                                        crate::api::auth::remove_many_from_playlist(&pid, &[vid])
+                                                    }
+                                                })
+                                                .await;
+                                                let _ = this.update(cx, |this, cx| {
+                                                    match res {
+                                                        Ok(()) => {
+                                                            this.yt_saved.insert(key, (save, false));
+                                                            toast(cx, if save { tf!("Saved to playlist “{0}”", name) } else { tf!("Removed from {0}", name) });
+                                                        }
+                                                        Err(_) => {
+                                                            this.yt_saved.insert(key, (saved, false));
+                                                            toast(cx, t("Couldn't save to that YouTube playlist"));
+                                                        }
+                                                    }
+                                                    cx.notify();
                                                 });
                                             })
                                             .detach();
@@ -4112,7 +4165,7 @@ impl Render for AppView {
             root = root.children(self.render_drawer(cx).map(deferred));
         }
         root = root.children(self.render_dl_panel(cx)).children(self.render_swipe(cx));
-        root = root.children(self.render_menu(cx)).children(self.render_dialog(cx)).child(deferred(self.render_toasts(cx)));
+        root = root.children(self.render_menu(cx)).children(self.render_dialog(cx)).child(deferred(self.render_toasts(cx)).with_priority(5));
         root
     }
 }

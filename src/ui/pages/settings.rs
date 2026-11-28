@@ -268,11 +268,22 @@ fn settings_search_text(text: &str) -> String {
     text.replace(['İ', 'ı'], "i").to_lowercase()
 }
 
+thread_local! {
+    /// rows that matched the settings search in the section being drawn
+    static HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn matches_settings_search(labels: &[&str]) -> bool {
     QUERY.with(|query| {
         let query = query.borrow();
-        query.is_empty()
-            || labels.iter().any(|label| settings_search_text(label).contains(query.as_str()))
+        if query.is_empty() {
+            return true;
+        }
+        let hit = labels.iter().any(|label| settings_search_text(label).contains(query.as_str()));
+        if hit {
+            HITS.with(|h| h.set(h.get() + 1));
+        }
+        hit
     })
 }
 
@@ -640,19 +651,19 @@ impl SettingsPage {
             .child({
                 let (desc, ctl) = match crate::api::web::account_name() {
                     Some(name) => (
-                        tf!("Connected as {0}. Videos you watch here show in your YouTube history and resume where you stopped on your other devices", name),
+                        tf!("Connected as {0}. Watch history and resume positions sync to YouTube, and you can like or dislike comments.", name),
                         pill("web-out", Some("unlink"), "Disconnect", cx).on_click(|_, _, cx| crate::ui::app::disconnect_web(cx)),
                     ),
                     None if crate::api::auth::signed_in() => (
-                        "Your YouTube sign-in already does this: videos you watch here show in your YouTube history and resume on your phone. A browser session is a fallback for when that stops working".to_string(),
+                        t("Your device-code sign-in can sync watch history. Connect your browser account for comment reactions and as a fallback for watch history.").to_string(),
                         pill("web-in", Some("history"), "Connect", cx).on_click(|_, _, cx| crate::ui::app::open_web_sign_in(cx)),
                     ),
                     None => (
-                        "Sign in through your browser so videos you watch here show in your YouTube history and resume on your phone. It also plays age-restricted videos and ones YouTube shows a bot check for".to_string(),
+                        t("Connect your browser account to sync watch history and resume positions, and to like or dislike comments.").to_string(),
                         pill("web-in", Some("history"), "Connect", cx).on_click(|_, _, cx| crate::ui::app::open_web_sign_in(cx)),
                     ),
                 };
-                row("YouTube watch history", &desc, ctl, cx)
+                row("YouTube watch history and comment reactions", &desc, ctl, cx)
             })
             .child(row(
                 "App language",
@@ -1392,8 +1403,18 @@ impl Render for SettingsPage {
         if !query.is_empty() {
             // search: matching rows from every section
             let mut all = div().flex().flex_col().gap_4();
+            let mut any = false;
             for (sec, name, _) in SECTIONS {
-                all = all.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text2).child(t(name).to_uppercase())).child(render_section(self, *sec, cx));
+                // only the sections with a matching row (an empty card read as a broken page)
+                HITS.with(|h| h.set(0));
+                let section = render_section(self, *sec, cx);
+                if HITS.with(|h| h.get()) > 0 {
+                    any = true;
+                    all = all.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text2).child(t(name).to_uppercase())).child(section);
+                }
+            }
+            if !any {
+                all = all.child(div().text_sm().text_color(p.text2).child(t("No settings match your search")));
             }
             QUERY.with(|q| q.borrow_mut().clear());
             return page_scroll("settings-scroll", &self.scroll).child(

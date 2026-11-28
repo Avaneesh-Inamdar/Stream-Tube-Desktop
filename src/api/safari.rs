@@ -1,4 +1,4 @@
-//! A single, user-initiated watch-history connection from our Safari extension.
+//! A single, user-initiated connection from our Safari extension.
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use objc2::{msg_send, runtime::AnyClass};
@@ -16,6 +16,7 @@ const EXTENSION_BUNDLE: &str = "Stream Tube Safari History Extension.appex";
 const TEST_EXTENSION_PREFIX: &str = "io.github.avaneesh-inamdar.StreamTube.SafariPrototype.Test.";
 const MAX_PAYLOAD: u64 = 16_384;
 const TIMEOUT: Duration = Duration::from_secs(300);
+const PURPOSE: &str = "history-and-reactions";
 
 #[link(name = "SafariServices", kind = "framework")]
 unsafe extern "C" {}
@@ -73,9 +74,11 @@ impl Request {
         let identifier = NSString::from_str(identifier);
         let token_key = NSString::from_str("token");
         let port_key = NSString::from_str("port");
+        let purpose_key = NSString::from_str("purpose");
         let token = NSString::from_str(&self.token);
         let port = NSString::from_str(&self.port.to_string());
-        let payload = NSDictionary::from_slices(&[&*token_key, &*port_key], &[&*token, &*port]);
+        let purpose = NSString::from_str(PURPOSE);
+        let payload = NSDictionary::from_slices(&[&*token_key, &*port_key, &*purpose_key], &[&*token, &*port, &*purpose]);
         // SAFETY: These objects and the optional nil completion match the SafariServices API.
         unsafe {
             let _: () = msg_send![
@@ -95,7 +98,7 @@ pub struct Pending {
 }
 
 impl Pending {
-    pub fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         listener.set_nonblocking(true)?;
         let token = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
@@ -126,7 +129,7 @@ impl Pending {
         while !cancel.load(Ordering::Acquire) && Instant::now() < deadline {
             match self.listener.accept() {
                 Ok((mut stream, _)) => {
-                    let Some(cookies) = read_session(&stream, &self.request.token) else {
+                    let Some(cookies) = read_session(&stream, &self.request) else {
                         continue;
                     };
                     if cancel.load(Ordering::Acquire) {
@@ -148,7 +151,13 @@ impl Pending {
     }
 }
 
-fn read_session(stream: &TcpStream, token: &str) -> Option<Vec<Value>> {
+#[derive(serde::Deserialize)]
+struct Handoff {
+    purpose: String,
+    cookies: Vec<Value>,
+}
+
+fn read_session(stream: &TcpStream, request: &Request) -> Option<Vec<Value>> {
     stream.set_nonblocking(false).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
     stream
@@ -160,7 +169,7 @@ fn read_session(stream: &TcpStream, token: &str) -> Option<Vec<Value>> {
     let (terminator, presented) = challenge.split_last()?;
     let mismatch = presented
         .iter()
-        .zip(token.bytes())
+        .zip(request.token.bytes())
         .fold(0, |acc, (a, b)| acc | (a ^ b));
     if mismatch != 0 || *terminator != b'\n' {
         return None;
@@ -173,7 +182,9 @@ fn read_session(stream: &TcpStream, token: &str) -> Option<Vec<Value>> {
     if payload.last() != Some(&b'\n') {
         return None;
     }
-    serde_json::from_slice(&payload).ok()
+    // The old watch-history-only popup sends an array without consent for reactions.
+    let handoff: Handoff = serde_json::from_slice(&payload).ok()?;
+    (handoff.purpose == PURPOSE).then_some(handoff.cookies)
 }
 
 #[cfg(test)]
@@ -209,18 +220,19 @@ mod tests {
         let other = Pending::new().unwrap().request();
         let mut send = TcpStream::connect(("127.0.0.1", correct.port)).unwrap();
         let (received, _) = pending.listener.accept().unwrap();
-        let payload = json!([{"name": "TEST", "domain": ".youtube.com", "value": "synthetic"}]);
+        let cookies = json!([{"name": "TEST", "domain": ".youtube.com", "value": "synthetic"}]);
+        let payload = json!({ "purpose": PURPOSE, "cookies": cookies });
         writeln!(send, "{}", other.token).unwrap();
         writeln!(send, "{payload}").unwrap();
-        assert!(read_session(&received, &correct.token).is_none());
+        assert!(read_session(&received, &correct).is_none());
 
         let mut send = TcpStream::connect(("127.0.0.1", correct.port)).unwrap();
         let (received, _) = pending.listener.accept().unwrap();
         writeln!(send, "{}", correct.token).unwrap();
         writeln!(send, "{payload}").unwrap();
         assert_eq!(
-            json!(read_session(&received, &correct.token).unwrap()),
-            payload
+            json!(read_session(&received, &correct).unwrap()),
+            cookies
         );
     }
 
@@ -234,7 +246,29 @@ mod tests {
             writeln!(send, "{}", pending.request.token).unwrap();
             send.write_all(&vec![b'a'; size]).unwrap();
             drop(send);
-            assert!(read_session(&received, &pending.request.token).is_none());
+            assert!(read_session(&received, &pending.request).is_none());
+        }
+    }
+
+    #[test]
+    fn handoff_requires_consent_for_history_and_reactions() {
+        let pending = Pending::new().unwrap();
+        pending.listener.set_nonblocking(false).unwrap();
+        let cookies = json!([{"name": "TEST", "domain": ".youtube.com", "value": "synthetic"}]);
+        for (payload, accepted) in [
+            (cookies.clone(), false),
+            (json!({ "purpose": "watch-history", "cookies": cookies }), false),
+            (json!({ "purpose": "comment-reactions", "cookies": cookies }), false),
+            (json!({ "purpose": PURPOSE, "cookies": cookies }), true),
+        ] {
+            let mut send = TcpStream::connect(("127.0.0.1", pending.request.port)).unwrap();
+            let (received, _) = pending.listener.accept().unwrap();
+            writeln!(send, "{}\n{payload}", pending.request.token).unwrap();
+            let result = read_session(&received, &pending.request);
+            assert_eq!(result.is_some(), accepted);
+            if let Some(cookies_read) = result {
+                assert_eq!(json!(cookies_read), cookies);
+            }
         }
     }
 }
