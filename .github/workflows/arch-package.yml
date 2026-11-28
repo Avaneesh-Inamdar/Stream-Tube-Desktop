@@ -46,6 +46,8 @@ jobs:
           depends=('mpv' 'fontconfig' 'freetype2' 'libxkbcommon' 'libxkbcommon-x11' 'libx11' 'libxcb' 'wayland' 'vulkan-icd-loader' 'openssl' 'zstd' 'desktop-file-utils')
           optdepends=('yt-dlp: downloads' 'ffmpeg: video/audio processing')
           makedepends=('rust' 'clang' 'cmake' 'pkgconf' 'git')
+          # Bundled C libraries must be linkable by Rust's linker.
+          options=('!lto')
           source=()
           sha256sums=()
 
