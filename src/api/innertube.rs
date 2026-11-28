@@ -780,6 +780,41 @@ fn is_browse_id(id: &str) -> bool {
     (2..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// An http(s) address safe to open. YouTube's `redirect` links unwrap to the real
+/// target in `q=`. Anything else (files, other programs' schemes) is dropped.
+pub fn http_target(url: &str) -> Option<String> {
+    let url = url.trim();
+    let lower = url.to_ascii_lowercase();
+    // a redirect that doesn't carry an http(s) target stays closed
+    if lower.contains("youtube.com/redirect") || lower.contains("youtu.be/redirect") {
+        return youtube_redirect_target(url);
+    }
+    is_http_url(url).then(|| url.to_string())
+}
+
+/// Whether this http(s) URL is a YouTube page the app can open itself.
+pub fn is_youtube_url(url: &str) -> bool {
+    let host = url.split("://").nth(1).unwrap_or("").split(['/', '?', '#']).next().unwrap_or("").to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    host == "youtu.be" || host == "youtube.com" || host.ends_with(".youtube.com") || host == "youtube-nocookie.com" || host.ends_with(".youtube-nocookie.com")
+}
+
+fn is_http_url(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    (u.starts_with("https://") || u.starts_with("http://")) && !url.contains(char::is_whitespace)
+}
+
+/// The page behind `youtube.com/redirect?q=`, when that page is itself http(s).
+fn youtube_redirect_target(url: &str) -> Option<String> {
+    let lower = url.to_ascii_lowercase();
+    if !lower.contains("youtube.com/redirect") && !lower.contains("youtu.be/redirect") {
+        return None;
+    }
+    let q = url.split(['?', '&']).find_map(|kv| kv.strip_prefix("q="))?;
+    let decoded = http::urldecode(q).trim().to_string();
+    is_http_url(&decoded).then_some(decoded)
+}
+
 /// Fast local parse of common URL shapes before falling back to resolve_url.
 pub fn parse_youtube_url(input: &str) -> Option<ResolvedUrl> {
     let s = input.trim();
@@ -1116,14 +1151,16 @@ fn description_link_url(command: &Value) -> Option<String> {
         }
         return Some(url);
     }
-    let browse = command.pointer("/browseEndpoint/browseId")?.as_str()?;
-    if let Some(list) = browse.strip_prefix("VL").filter(|id| is_browse_id(id)) {
-        Some(format!("https://www.youtube.com/playlist?list={list}"))
-    } else if browse.starts_with("UC") && is_browse_id(browse) {
-        Some(format!("https://www.youtube.com/channel/{browse}"))
-    } else {
-        None
+    if let Some(browse) = command.pointer("/browseEndpoint/browseId").and_then(Value::as_str) {
+        if let Some(list) = browse.strip_prefix("VL").filter(|id| is_browse_id(id)) {
+            return Some(format!("https://www.youtube.com/playlist?list={list}"));
+        }
+        if browse.starts_with("UC") && is_browse_id(browse) {
+            return Some(format!("https://www.youtube.com/channel/{browse}"));
+        }
     }
+    // plain https links in a description; YouTube wraps many of them in /redirect?q=
+    command.pointer("/urlEndpoint/url").and_then(Value::as_str).and_then(http_target)
 }
 
 fn description_links(attributed: &Value, text: &str) -> Vec<DescriptionLink> {
@@ -1744,6 +1781,24 @@ mod tests {
         assert_eq!(parse_youtube_url("https://www.youtube.com/shorts/oImytUi5y-w"), Some(ResolvedUrl::Video("oImytUi5y-w".into())));
     }
 
+    #[test]
+    fn http_targets_unwrap_youtube_redirects_and_drop_other_schemes() {
+        assert_eq!(
+            http_target("https://www.youtube.com/redirect?q=https%3A%2F%2Fexample.com%2Fa&v=abcdefghijk").as_deref(),
+            Some("https://example.com/a")
+        );
+        assert_eq!(
+            http_target("https://www.youtube.com/redirect?q=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DdQw4w9WgXcQ").as_deref(),
+            Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        );
+        assert_eq!(http_target("https://www.youtube.com/@SomeChannel").as_deref(), Some("https://www.youtube.com/@SomeChannel"));
+        assert_eq!(http_target("file:///secret"), None);
+        assert_eq!(http_target("https://www.youtube.com/redirect?q=javascript%3Aalert(1)"), None);
+        assert!(is_youtube_url("https://music.youtube.com/watch?v=dQw4w9WgXcQ"));
+        assert!(is_youtube_url("https://youtu.be/dQw4w9WgXcQ"));
+        assert!(!is_youtube_url("https://example.com/youtube.com"));
+    }
+
     fn description_run(start: u64, length: u64, command: Value) -> Value {
         json!({ "startIndex": start, "length": length, "onTap": { "innertubeCommand": command } })
     }
@@ -1781,6 +1836,21 @@ mod tests {
         let links = description_links(&runs, text);
         assert_eq!(links.len(), 1);
         assert_eq!(&text[links[0].range.clone()], "Video");
+    }
+
+    #[test]
+    fn description_https_links_keep_the_real_page() {
+        let text = "Site clip";
+        let runs = json!({ "commandRuns": [
+            description_run(0, 4, json!({ "urlEndpoint": { "url": "https://www.youtube.com/redirect?q=https%3A%2F%2Fexample.com%2Fa&v=abcdefghijk" } })),
+            description_run(5, 4, json!({ "urlEndpoint": { "url": "https://www.youtube.com/@SomeChannel" } })),
+        ] });
+        let links = description_links(&runs, text);
+        let links: Vec<_> = links.iter().map(|link| (&text[link.range.clone()], link.url.as_str())).collect();
+        assert_eq!(links, [
+            ("Site", "https://example.com/a"),
+            ("clip", "https://www.youtube.com/@SomeChannel"),
+        ]);
     }
 
     #[test]

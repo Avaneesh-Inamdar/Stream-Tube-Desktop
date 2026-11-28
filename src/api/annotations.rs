@@ -275,15 +275,9 @@ fn action_for(url: &str, video_id: &str) -> Option<Action> {
     } else {
         url.to_string()
     };
-    // YouTube's redirect links wrap the real address in q=
-    if url.contains("youtube.com/redirect") {
-        if let Some(q) = url.split(['?', '&']).find_map(|kv| kv.strip_prefix("q=")) {
-            return Some(Action::Web(http::urldecode(q)));
-        }
-    }
-    let host = url.split("://").nth(1).unwrap_or("").split(['/', '?', '#']).next().unwrap_or("").to_lowercase();
-    let youtube = host == "youtu.be" || host == "youtube.com" || host.ends_with(".youtube.com");
-    if !youtube {
+    // redirect links unwrap to the real page; a YouTube page stays in the app
+    let url = crate::api::innertube::http_target(&url)?;
+    if !crate::api::innertube::is_youtube_url(&url) {
         return Some(Action::Web(url));
     }
     let target = url.split(['?', '&', '#']).find_map(|kv| kv.strip_prefix("v="));
@@ -454,6 +448,31 @@ Thanks</TEXT>
         assert_eq!(w.style, "speech");
         assert_eq!((w.bg, w.fg, w.text_size), (0xFFFFFF, 0, 3.15));
         assert_eq!(w.action, Some(Action::Web("http://example.org/page?x=1".into())));
+    }
+
+    #[test]
+    fn redirect_to_youtube_stays_in_the_app() {
+        let xml = r#"<document><annotations>
+<annotation id="a" type="text" style="popup">
+  <TEXT>go</TEXT>
+  <segment><movingRegion type="rect">
+    <rectRegion x="5" y="5" w="20" h="8" t="0:05.0"/>
+    <rectRegion x="5" y="5" w="20" h="8" t="0:10.0"/>
+  </movingRegion></segment>
+  <action type="openUrl"><url value="https://www.youtube.com/redirect?q=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3Dzzzzzzzzzzz"/></action>
+</annotation>
+<annotation id="b" type="text" style="popup">
+  <TEXT>out</TEXT>
+  <segment><movingRegion type="rect">
+    <rectRegion x="5" y="5" w="20" h="8" t="0:05.0"/>
+    <rectRegion x="5" y="5" w="20" h="8" t="0:10.0"/>
+  </movingRegion></segment>
+  <action type="openUrl"><url value="https://www.youtube.com/redirect?q=http%3A%2F%2Fexample.org%2Fp"/></action>
+</annotation>
+</annotations></document>"#;
+        let a = parse(xml, "abcdefghijk");
+        assert_eq!(a[0].action, Some(Action::YouTube("https://www.youtube.com/watch?v=zzzzzzzzzzz".into())));
+        assert_eq!(a[1].action, Some(Action::Web("http://example.org/p".into())));
     }
 
     #[test]

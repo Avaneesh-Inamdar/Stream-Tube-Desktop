@@ -189,6 +189,28 @@ mod link_tests {
     }
 }
 
+/// Opens a YouTube https link in the app. Addresses this app does not recognise
+/// locally (a channel handle, for example) are resolved through YouTube first.
+pub fn open_youtube_url(url: String, window: &mut Window, cx: &mut App) {
+    if let Some(route) = route_from_link(&url) {
+        navigate(route, window, cx);
+        return;
+    }
+    cx.spawn(async move |cx| {
+        let res = blocking(move || innertube::resolve_url(&url)).await;
+        let _ = cx.update(|cx| {
+            let Some(w) = cx.active_window() else { return };
+            let _ = w.update(cx, |_, window, cx| match res {
+                Ok(innertube::ResolvedUrl::Video(id)) => navigate(Route::Watch { id, playlist: None, start: None }, window, cx),
+                Ok(innertube::ResolvedUrl::Channel(id)) => navigate(Route::Channel(id), window, cx),
+                Ok(innertube::ResolvedUrl::Playlist(id)) => navigate(Route::Playlist(id), window, cx),
+                Err(e) => toast(cx, tf!("Could not open link: {0}", crate::ui::friendly_error(&e.to_string()))),
+            });
+        });
+    })
+    .detach();
+}
+
 pub fn navigate(route: Route, window: &mut Window, cx: &mut App) {
     // Ctrl+click (Cmd+click) on any card or link opens it in a new tab, like a browser
     if window.modifiers().secondary(cx) {
@@ -980,7 +1002,10 @@ impl AppView {
         cx.set_global(crate::ui::slot::MiniSlot::default());
         cx.set_global(crate::ui::slot::PageClip::default());
         // a YouTube link passed on the command line opens directly
-        let arg_route = route_from_link(&std::env::args().nth(1).unwrap_or_default());
+        let arg = std::env::args().nth(1).unwrap_or_default();
+        let opened = crate::links::app_url(&arg);
+        let arg_route = opened.as_deref().and_then(route_from_link);
+        let pending_url = opened.filter(|_| arg_route.is_none());
         let start = arg_route.unwrap_or_else(|| match store::settings_snapshot().start_page.as_str() {
             "subscriptions" => Route::Subscriptions,
             "history" => Route::History,
@@ -988,6 +1013,9 @@ impl AppView {
         });
         crate::perf::mark("app shell");
         let page = build_page(&start, window, cx);
+        if let Some(url) = pending_url {
+            open_youtube_url(url, window, cx);
+        }
         super::history::refresh_current(cx, false);
         cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(super::history::REFRESH_INTERVAL).await;

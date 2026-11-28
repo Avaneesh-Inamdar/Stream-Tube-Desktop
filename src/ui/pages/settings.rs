@@ -191,7 +191,26 @@ impl SettingsPage {
 }
 
 /// Applies a changed setting to the running app (theme, palette, current playback).
+fn set_open_external_youtube(s: &mut Settings, on: bool) {
+    s.open_external_youtube = on;
+}
+
 fn after_change(id: &str, window: &mut Window, cx: &mut App) {
+    if id == "yt-links" {
+        if store::settings_snapshot().open_external_youtube {
+            crate::links::remember_browser();
+            if crate::links::install_https_handler(true) {
+                toast(cx, t("In Windows Settings, set Stream Tube as the browser for HTTPS."));
+            } else {
+                toast(cx, t("Couldn't register Stream Tube for web links."));
+            }
+        } else {
+            crate::links::remove_https_handler();
+            toast(cx, t("If Windows still opens links here, set your browser back for HTTPS."));
+        }
+        crate::ui::app::refresh_all_pages(cx);
+        return;
+    }
     if id == "app-language" {
         crate::i18n::apply_component_locale();
         window.set_window_title(&format!("{} - Stream Tube", t("Settings")));
@@ -711,6 +730,12 @@ impl SettingsPage {
                 "Minimize to tray",
                 "Keep Stream Tube open in the Windows notification area when you minimize or close it",
                 switch("minimize-to-tray", s.minimize_to_tray, |s, v| s.minimize_to_tray = v, cx),
+                cx,
+            )))
+            .when(cfg!(windows), |card| card.child(row(
+                "Open YouTube links from external sources",
+                "In Windows Settings, set Stream Tube as the browser for HTTPS.",
+                switch("yt-links", s.open_external_youtube, set_open_external_youtube, cx),
                 cx,
             )))
             .child(row("Density", "", self.choice("density", &[("compact".to_string(), "Compact"), ("default".to_string(), "Default"), ("comfortable".to_string(), "Comfortable")], s.density.clone(), |s, v| s.density = v, cx), cx))

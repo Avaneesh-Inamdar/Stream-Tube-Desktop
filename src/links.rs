@@ -75,6 +75,239 @@ pub fn forward_to_running(arg: &str) -> bool {
     BufReader::new(stream).read_line(&mut reply).is_ok() && reply.trim() == "ok"
 }
 
+/// What to do with the address another program asked us to open.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Launch {
+    /// Open the app. `url` is a YouTube page when the address was one.
+    App { url: Option<String> },
+    /// This is not a YouTube page. Hand it to the real browser and do not open a window.
+    Browser(String),
+}
+
+/// YouTube http(s) links open in the app. Every other http(s) link, and an `.html`
+/// file Windows may pass because we registered as a browser, goes to the real browser.
+pub fn classify_launch(arg: &str) -> Launch {
+    let arg = normalize(arg);
+    if arg.is_empty() {
+        return Launch::App { url: None };
+    }
+    if let Some(url) = crate::api::innertube::http_target(&arg) {
+        if crate::api::innertube::is_youtube_url(&url) {
+            return Launch::App { url: Some(url) };
+        }
+        return Launch::Browser(url);
+    }
+    let lower = arg.to_ascii_lowercase();
+    if lower.ends_with(".htm") || lower.ends_with(".html") || lower.ends_with(".xhtml") {
+        return Launch::Browser(arg);
+    }
+    Launch::App { url: None }
+}
+
+/// The YouTube page a launch should open, after redirect links are unwrapped.
+pub fn app_url(arg: &str) -> Option<String> {
+    match classify_launch(arg) {
+        Launch::App { url } => url,
+        Launch::Browser(_) => None,
+    }
+}
+
+fn browser_file() -> std::path::PathBuf {
+    crate::store::data_dir().join("https-browser.txt")
+}
+
+/// The command line Windows is using for https, when it is not this app.
+#[cfg(windows)]
+fn current_browser_command() -> Option<String> {
+    let progid = reg_value(&["query", r"HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice", "/v", "ProgId"])?;
+    if progid.eq_ignore_ascii_case("StreamTubeHTML") {
+        return None;
+    }
+    prog_command(&progid).filter(|cmd| !command_targets_exe(cmd, "streamtube.exe"))
+}
+
+/// Remember the https handler so non-YouTube links can be handed back to it.
+/// Once Stream Tube itself is that handler, the saved command is left as it was.
+#[cfg(windows)]
+pub fn remember_browser() {
+    let Some(cmd) = current_browser_command() else { return };
+    if cmd.contains('\n') || cmd.contains('\r') {
+        return;
+    }
+    let _ = std::fs::write(browser_file(), cmd);
+}
+
+#[cfg(not(windows))]
+pub fn remember_browser() {}
+
+/// Opens `url` in the browser that was default before Stream Tube, by running its
+/// program directly. Going through https again would start this app once more.
+pub fn open_in_browser(url: &str) -> bool {
+    if url.contains(['\n', '\r', '"']) {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        let saved = std::fs::read_to_string(browser_file()).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let fallback = fallback_browser();
+        for template in [saved, fallback].into_iter().flatten() {
+            if command_targets_exe(&template, "streamtube.exe") {
+                continue;
+            }
+            let Some((exe, args)) = browser_launch(&template, url) else { continue };
+            if command_targets_exe(&exe, "streamtube.exe") {
+                continue;
+            }
+            if std::process::Command::new(exe).args(args).spawn().is_ok() {
+                return true;
+            }
+        }
+        return false;
+    }
+    #[cfg(not(windows))]
+    {
+        open::that(url).is_ok()
+    }
+}
+
+/// `template` is a shell open command (`"chrome.exe" --single-argument %1`).
+fn browser_launch(template: &str, url: &str) -> Option<(String, Vec<String>)> {
+    let mut parts = split_command(template);
+    if parts.is_empty() {
+        return None;
+    }
+    let mut replaced = false;
+    for part in parts.iter_mut().skip(1) {
+        if part == "%1" {
+            *part = url.to_string();
+            replaced = true;
+        }
+    }
+    if !replaced {
+        parts.push(url.to_string());
+    }
+    let exe = parts.remove(0);
+    Some((exe, parts))
+}
+
+fn split_command(command: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote = false;
+    for c in command.chars() {
+        match c {
+            '"' => quote = !quote,
+            ' ' | '\t' if !quote => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+fn command_targets_exe(command: &str, exe_name: &str) -> bool {
+    split_command(command)
+        .first()
+        .and_then(|path| std::path::Path::new(path).file_name())
+        .is_some_and(|name| name.eq_ignore_ascii_case(exe_name))
+}
+
+#[cfg(windows)]
+fn fallback_browser() -> Option<String> {
+    for progid in ["ChromeHTML", "MSEdgeHTM", "BraveHTML", "FirefoxURL"] {
+        if let Some(cmd) = prog_command(progid).filter(|cmd| !command_targets_exe(cmd, "streamtube.exe")) {
+            return Some(cmd);
+        }
+    }
+    let edge = std::path::PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe");
+    edge.exists().then(|| format!("\"{}\" --single-argument %1", edge.display()))
+}
+
+#[cfg(windows)]
+fn prog_command(progid: &str) -> Option<String> {
+    for root in [r"HKCU\Software\Classes", r"HKLM\Software\Classes"] {
+        let key = format!(r"{root}\{progid}\shell\open\command");
+        if let Some(cmd) = reg_value(&["query", &key, "/ve"]) {
+            return Some(cmd);
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn reg_value(args: &[&str]) -> Option<String> {
+    let out = reg(args)?;
+    for line in out.lines() {
+        let Some((_, rest)) = line.split_once("REG_SZ") else { continue };
+        let value = rest.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn reg(args: &[&str]) -> Option<String> {
+    let mut c = std::process::Command::new("reg");
+    c.args(args);
+    crate::api::streams::hide_window(&mut c);
+    let out = c.output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Registers Stream Tube as a web-link handler and, when `open_settings` is set,
+/// opens the Windows page where the user confirms that choice. Windows will not
+/// switch the default by itself.
+#[cfg(windows)]
+pub fn install_https_handler(open_settings: bool) -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let exe = exe.to_string_lossy().to_string();
+    let open_cmd = format!("\"{exe}\" \"%1\"");
+    let icon = format!("\"{exe}\",0");
+    let class = r"HKCU\Software\Classes\StreamTubeHTML";
+    let client = r"HKCU\Software\Clients\StartMenuInternet\StreamTube";
+    let ok = reg(&["add", class, "/ve", "/d", "Stream Tube", "/f"]).is_some()
+        && reg(&["add", class, "/v", "URL Protocol", "/d", "", "/f"]).is_some()
+        && reg(&["add", &format!(r"{class}\DefaultIcon"), "/ve", "/d", &icon, "/f"]).is_some()
+        && reg(&["add", &format!(r"{class}\shell\open\command"), "/ve", "/d", &open_cmd, "/f"]).is_some()
+        && reg(&["add", client, "/ve", "/d", "Stream Tube", "/f"]).is_some()
+        && reg(&["add", &format!(r"{client}\shell\open\command"), "/ve", "/d", &format!("\"{exe}\""), "/f"]).is_some()
+        && reg(&["add", &format!(r"{client}\Capabilities"), "/v", "ApplicationName", "/d", "Stream Tube", "/f"]).is_some()
+        && reg(&["add", &format!(r"{client}\Capabilities"), "/v", "ApplicationDescription", "/d", "Opens YouTube links. Other links open in your browser.", "/f"]).is_some()
+        && reg(&["add", &format!(r"{client}\Capabilities"), "/v", "ApplicationIcon", "/d", &icon, "/f"]).is_some()
+        && reg(&["add", &format!(r"{client}\Capabilities\URLAssociations"), "/v", "http", "/d", "StreamTubeHTML", "/f"]).is_some()
+        && reg(&["add", &format!(r"{client}\Capabilities\URLAssociations"), "/v", "https", "/d", "StreamTubeHTML", "/f"]).is_some()
+        && reg(&["add", &format!(r"{client}\Capabilities\FileAssociations"), "/v", ".htm", "/d", "StreamTubeHTML", "/f"]).is_some()
+        && reg(&["add", &format!(r"{client}\Capabilities\FileAssociations"), "/v", ".html", "/d", "StreamTubeHTML", "/f"]).is_some()
+        && reg(&["add", r"HKCU\Software\RegisteredApplications", "/v", "StreamTube", "/d", r"Software\Clients\StartMenuInternet\StreamTube\Capabilities", "/f"]).is_some();
+    if ok && open_settings {
+        let _ = open::that("ms-settings:defaultapps?registeredAppUser=StreamTube");
+    }
+    ok
+}
+
+#[cfg(not(windows))]
+pub fn install_https_handler(_open_settings: bool) -> bool {
+    false
+}
+
+#[cfg(windows)]
+pub fn remove_https_handler() {
+    let _ = reg(&["delete", r"HKCU\Software\Classes\StreamTubeHTML", "/f"]);
+    let _ = reg(&["delete", r"HKCU\Software\Clients\StartMenuInternet\StreamTube", "/f"]);
+    let _ = reg(&["delete", r"HKCU\Software\RegisteredApplications", "/v", "StreamTube", "/f"]);
+}
+
+#[cfg(not(windows))]
+pub fn remove_https_handler() {}
+
 /// Makes `streamtube://` links open this app when nothing handles them yet (the
 /// portable zip; the installer registers them itself). Runs in the background.
 pub fn register_scheme() {
@@ -181,7 +414,7 @@ fn check_token<'a>(rest: &'a str, token: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize;
+    use super::{browser_launch, classify_launch, command_targets_exe, normalize, Launch};
 
     #[test]
     fn links_need_the_token() {
@@ -204,6 +437,35 @@ mod tests {
     fn alive() {
         assert!(super::process_alive(std::process::id()));
         assert!(!super::process_alive(u32::MAX - 1));
+    }
+
+    #[test]
+    fn youtube_https_opens_in_the_app_and_other_links_do_not() {
+        assert_eq!(
+            classify_launch("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+            Launch::App { url: Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".into()) }
+        );
+        assert_eq!(
+            classify_launch("https://youtu.be/dQw4w9WgXcQ"),
+            Launch::App { url: Some("https://youtu.be/dQw4w9WgXcQ".into()) }
+        );
+        assert_eq!(
+            classify_launch("https://www.youtube.com/redirect?q=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DdQw4w9WgXcQ"),
+            Launch::App { url: Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".into()) }
+        );
+        assert_eq!(
+            classify_launch("https://www.youtube.com/redirect?q=https%3A%2F%2Fexample.com%2Fa&v=abcdefghijk"),
+            Launch::Browser("https://example.com/a".into())
+        );
+        assert_eq!(classify_launch("https://example.com/a"), Launch::Browser("https://example.com/a".into()));
+        assert_eq!(classify_launch(r"C:\page.html"), Launch::Browser(r"C:\page.html".into()));
+        assert_eq!(classify_launch(""), Launch::App { url: None });
+        assert!(command_targets_exe(r#""C:\Apps\streamtube.exe" "%1""#, "streamtube.exe"));
+        assert!(!command_targets_exe(r#""C:\Program Files\Google\Chrome\Application\chrome.exe" --single-argument %1"#, "streamtube.exe"));
+        assert_eq!(
+            browser_launch(r#""C:\Program Files\Google\Chrome\Application\chrome.exe" --single-argument %1"#, "https://example.com/a"),
+            Some(("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe".into(), vec!["--single-argument".into(), "https://example.com/a".into()]))
+        );
     }
 
     #[test]
