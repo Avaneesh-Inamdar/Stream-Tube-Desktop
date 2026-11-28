@@ -212,17 +212,7 @@ thread_local! {
     static QUERY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
-const CAPTION_COLORS: &[(u32, &str)] = &[
-    (0xFFFFFF, "White"),
-    (0xFFFF00, "Yellow"),
-    (0x00FF00, "Green"),
-    (0x00FFFF, "Cyan"),
-    (0x0000FF, "Blue"),
-    (0xFF00FF, "Magenta"),
-    (0xFF0000, "Red"),
-    (0x000000, "Black"),
-];
-const OPACITIES: &[(u32, &str)] = &[(25, "25%"), (50, "50%"), (75, "75%"), (100, "100%")];
+use crate::player::controller::{CAPTION_COLORS, CAPTION_EDGES, CAPTION_FONTS, CAPTION_OPACITIES as OPACITIES, CAPTION_SIZES};
 
 /// How captions will look with the current settings, over a stand-in for video.
 fn caption_preview(s: &Settings) -> AnyElement {
@@ -777,11 +767,11 @@ impl SettingsPage {
             .child(row("Hardware decoding", "Takes effect after restart", switch("hw", s.hwdec, |s, v| s.hwdec = v, cx), cx))
             .child(row("Captions on by default", "", switch("cc", s.captions_enabled, |s, v| s.captions_enabled = v, cx), cx))
             .child(row("Caption language", "Preferred subtitle track", self.dropdown("dd-cap", crate::locale::CAPTION_LANGUAGES, s.captions_lang.clone(), |s, v| s.captions_lang = v, cx), cx))
-            .child(row("Caption size", "", self.choice("capsize", &[(30u32, "Small"), (40, "Medium"), (52, "Large"), (64, "Extra large")], s.caption_size, |s, v| s.caption_size = v, cx), cx))
+            .child(row("Caption size", "", self.choice("capsize", CAPTION_SIZES, s.caption_size, |s, v| s.caption_size = v, cx), cx))
             .child(row(
                 "Caption font",
                 "",
-                self.choice("capfont", &[("sans".to_string(), "Sans-serif"), ("serif".to_string(), "Serif"), ("mono".to_string(), "Monospace"), ("casual".to_string(), "Casual")], s.caption_font.clone(), |s, v| s.caption_font = v, cx),
+                self.choice("capfont", &CAPTION_FONTS.iter().map(|&(v, l)| (v.to_string(), l)).collect::<Vec<_>>(), s.caption_font.clone(), |s, v| s.caption_font = v, cx),
                 cx,
             ))
             .child(row("Caption color", "", self.choice("capcolor", CAPTION_COLORS, s.caption_color, |s, v| s.caption_color = v, cx), cx))
@@ -797,7 +787,7 @@ impl SettingsPage {
                     "Around the text when there's no background",
                     self.choice(
                         "capedge",
-                        &[("outline-shadow".to_string(), "Outline and shadow"), ("outline".to_string(), "Outline"), ("shadow".to_string(), "Drop shadow"), ("none".to_string(), "None")],
+                        &CAPTION_EDGES.iter().map(|&(v, l)| (v.to_string(), l)).collect::<Vec<_>>(),
                         s.caption_edge.clone(),
                         |s, v| s.caption_edge = v,
                         cx,

@@ -42,7 +42,12 @@ pub enum KeyboardFeedback {
 const SEEK_DISK_CACHE_LIMIT: u64 = 128 * 1024 * 1024;
 const BACK_CACHE_SIZE: &str = "12MiB";
 
+/// The caption margin (mpv's 720-line scale) while the controls are hidden.
+pub const CAPTION_MARGIN: u32 = 40;
+
 pub struct Player {
+    /// where captions sit above the bottom edge (see [`Player::set_caption_margin`])
+    caption_margin: std::cell::Cell<u32>,
     /// speed to go back to while a press-and-hold plays at 2x
     pub boost: Option<f64>,
     mpv: Option<Arc<Mpv>>,
@@ -177,7 +182,7 @@ pub fn enqueue(v: VideoItem, cx: &mut App) {
 }
 
 pub const EQ_PRESETS: &[(&str, &str, &str)] = &[
-    ("flat", "Flat", ""),
+    ("flat", "Off", ""),
     ("bass", "Bass boost", "equalizer=f=60:width_type=o:w=1.5:g=6,equalizer=f=150:width_type=o:w=1.5:g=4"),
     ("voice", "Voice", "equalizer=f=300:width_type=o:w=1.5:g=-3,equalizer=f=1500:width_type=o:w=2:g=4,equalizer=f=3500:width_type=o:w=1.5:g=3"),
     ("treble", "Treble boost", "equalizer=f=4000:width_type=o:w=1.5:g=4,equalizer=f=10000:width_type=o:w=1.5:g=6"),
@@ -185,7 +190,7 @@ pub const EQ_PRESETS: &[(&str, &str, &str)] = &[
 ];
 
 pub fn eq_label(id: &str) -> &'static str {
-    EQ_PRESETS.iter().find(|&&(k, _, _)| k == id).map(|&(_, l, _)| l).unwrap_or("Flat")
+    EQ_PRESETS.iter().find(|&&(k, _, _)| k == id).map(|&(_, l, _)| l).unwrap_or("Off")
 }
 
 fn eq_filter(id: &str) -> &'static str {
@@ -196,6 +201,7 @@ impl Player {
     fn new(cx: &mut Context<Self>) -> Self {
         let s = store::settings_snapshot();
         Self {
+            caption_margin: std::cell::Cell::new(CAPTION_MARGIN),
             mpv: None,
             engine_generation: 0,
             foreground: true,
@@ -401,9 +407,14 @@ impl Player {
             opts_owned.push(("log-file".into(), f));
         }
         let refs: Vec<(&str, &str)> = opts_owned.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-        match Mpv::new(&refs, move |ev| {
+        let t_init = std::time::Instant::now();
+        let created = Mpv::new(&refs, move |ev| {
             let _ = tx.unbounded_send(ev);
-        }) {
+        });
+        if crate::perf::on() {
+            eprintln!("[mpv] engine created in {:?}", t_init.elapsed());
+        }
+        match created {
             Ok(m) => {
                 self.mpv = Some(m.clone());
                 self.engine_generation += 1;
@@ -442,6 +453,15 @@ impl Player {
                     _ => tf!("Could not start the video engine (libmpv): {0}", error),
                 });
                 None
+            }
+        }
+    }
+
+    /// Moves captions up (over the controls) or back down; a no-op when unchanged.
+    pub fn set_caption_margin(&self, margin: u32) {
+        if self.caption_margin.replace(margin) != margin {
+            if let Some(mpv) = &self.mpv {
+                mpv.set("sub-margin-y", &margin.to_string());
             }
         }
     }
@@ -1320,7 +1340,7 @@ impl Player {
         mpv.set("sub-font-size", &s.caption_size.to_string());
         mpv.set("sub-font", caption_font(&s.caption_font));
         mpv.set("sub-bold", "no");
-        mpv.set("sub-margin-y", "40");
+        mpv.set("sub-margin-y", &self.caption_margin.get().to_string());
         mpv.set("sub-color", &mpv_color(s.caption_color, s.caption_opacity));
         if s.caption_background {
             mpv.set("sub-border-style", "background-box");
@@ -1340,6 +1360,11 @@ impl Player {
             mpv.set("sub-border-size", border);
             mpv.set("sub-shadow-offset", shadow);
         }
+    }
+
+    /// Re-applies the caption look after a caption setting changed.
+    pub fn restyle_captions(&self) {
+        self.apply_caption_style();
     }
 
     /// Re-applies settings that affect the current playback.
@@ -2220,6 +2245,22 @@ pub fn pick_caption(info: &StreamInfo, pref: &str) -> Option<usize> {
 
 /// The font for a caption font choice. libass looks fonts up by name, and finds
 /// the nearest match when one isn't installed.
+/// Caption looks offered in Settings and in the player's Subtitles/CC options, as (value, label).
+pub const CAPTION_FONTS: &[(&str, &str)] = &[("sans", "Sans-serif"), ("serif", "Serif"), ("mono", "Monospace"), ("casual", "Casual")];
+pub const CAPTION_SIZES: &[(u32, &str)] = &[(30, "Small"), (40, "Medium"), (52, "Large"), (64, "Extra large")];
+pub const CAPTION_COLORS: &[(u32, &str)] = &[
+    (0xFFFFFF, "White"),
+    (0xFFFF00, "Yellow"),
+    (0x00FF00, "Green"),
+    (0x00FFFF, "Cyan"),
+    (0x0000FF, "Blue"),
+    (0xFF00FF, "Magenta"),
+    (0xFF0000, "Red"),
+    (0x000000, "Black"),
+];
+pub const CAPTION_OPACITIES: &[(u32, &str)] = &[(25, "25%"), (50, "50%"), (75, "75%"), (100, "100%")];
+pub const CAPTION_EDGES: &[(&str, &str)] = &[("outline-shadow", "Outline and shadow"), ("outline", "Outline"), ("shadow", "Drop shadow"), ("none", "None")];
+
 pub fn caption_font(key: &str) -> &'static str {
     if cfg!(windows) {
         match key {

@@ -810,7 +810,7 @@ impl Render for ShortsPage {
         let cid = v.channel_id.clone();
         let watch_id = v.id.clone();
         let share_id = v.id.clone();
-        let action = |id: &'static str, ic: &'static str, label: String, cx: &App| {
+        let action_on = |id: &'static str, ic: &'static str, label: String, active: bool, cx: &App| {
             let p = pal(cx);
             div()
                 .id(id)
@@ -819,8 +819,30 @@ impl Render for ShortsPage {
                 .items_center()
                 .gap_1()
                 .cursor_pointer()
-                .child(div().flex().items_center().justify_center().size_12().rounded_full().bg(p.chip).hover(move |s| s.bg(p.hover)).child(icon(ic).size_6().text_color(p.text)))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size_12()
+                        .rounded_full()
+                        .bg(if active { p.hover } else { p.chip })
+                        .hover(move |s| s.bg(p.hover))
+                        .child(icon(ic).size_6().text_color(if active { p.accent } else { p.text })),
+                )
                 .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(p.text).child(label))
+        };
+        let action = |id: &'static str, ic: &'static str, label: String, cx: &App| action_on(id, ic, label, false, cx);
+        // like and dislike work like the watch page's: saved here, and on the
+        // YouTube account when signed in (#284)
+        let rating = store::rating(&v.id);
+        let rate = |r: i8| {
+            let id = v.id.clone();
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                let now = if store::rating(&id) == r { 0 } else { r };
+                super::watch::set_rating(&id, now, cx);
+                cx.refresh_windows();
+            }
         };
         let comments_panel = if self.show_comments { self.render_comments(h, cx) } else { div().into_any_element() };
         let can_up = self.idx > 0;
@@ -830,7 +852,14 @@ impl Render for ShortsPage {
         let show_subscribe = yt_layout && st.shorts_show_subscribe;
         let show_dislike = !yt_layout || st.shorts_show_dislike;
         let dislike_btn = show_dislike.then(|| {
-            action("sh-dislike", "thumbs-down", votes.as_ref().map(|v| compact_number(v.dislikes)).unwrap_or_else(|| t("Dislike").into()), cx)
+            action_on(
+                "sh-dislike",
+                "thumbs-down",
+                votes.as_ref().map(|v| compact_number(v.dislikes + (rating == -1) as u64)).unwrap_or_else(|| t("Dislike").into()),
+                rating == -1,
+                cx,
+            )
+            .on_click(rate(-1))
         });
         let info_panel = (!below).then(|| {
             let meta = self.meta.get(&v.id);
@@ -925,16 +954,20 @@ impl Render for ShortsPage {
                     .h(h)
                     .gap_4()
                     .pb_4()
-                    .child(action(
-                        "sh-like",
-                        "thumbs-up",
-                        votes
-                            .as_ref()
-                            .map(|v| compact_number(v.likes))
-                            .or_else(|| self.meta.get(&v.id).and_then(|w| w.likes_text.clone()).filter(|s| s.chars().any(|c| c.is_ascii_digit())))
-                            .unwrap_or_else(|| t("Like").into()),
-                        cx,
-                    ))
+                    .child(
+                        action_on(
+                            "sh-like",
+                            "thumbs-up",
+                            votes
+                                .as_ref()
+                                .map(|v| compact_number(v.likes + (rating == 1) as u64))
+                                .or_else(|| self.meta.get(&v.id).and_then(|w| w.likes_text.clone()).filter(|s| s.chars().any(|c| c.is_ascii_digit())))
+                                .unwrap_or_else(|| t("Like").into()),
+                            rating == 1,
+                            cx,
+                        )
+                        .on_click(rate(1)),
+                    )
                     .when_some(dislike_btn, |d, btn| d.child(btn))
                     .child({
                         let n = self.meta.get(&v.id).and_then(|w| w.comment_count_text.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| t("Comments").into());

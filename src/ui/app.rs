@@ -642,6 +642,62 @@ struct SidebarData {
     subs: Vec<store::Subscription>,
 }
 
+// GPUI copies a cached view's hitboxes into frames that reuse it, but not its
+// window-control regions. While a video plays only the player redraws and the
+// cached `AppView` is reused, so the top bar's drag gaps and caption buttons
+// dropped out of the frame: the window couldn't be moved until something
+// redrew the page (#286). The top bar records where its regions are, and
+// `Shell`, which renders every frame, adds them again over it.
+thread_local! {
+    static CONTROL_RECTS: std::cell::RefCell<(Vec<(WindowControlArea, Bounds<Pixels>)>, Vec<(WindowControlArea, Bounds<Pixels>)>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
+/// Fills its parent and records it as a window-control region for `Shell`.
+fn control_rect(area: WindowControlArea) -> impl IntoElement {
+    canvas(
+        move |bounds, window, _| {
+            let moved = CONTROL_RECTS.with(|r| {
+                let mut r = r.borrow_mut();
+                r.0.push((area, bounds));
+                // `Shell` drew last frame's regions: draw again when they moved
+                let i = r.0.len() - 1;
+                r.1.get(i) != Some(&(area, bounds))
+            });
+            if moved {
+                window.refresh();
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full()
+}
+
+fn control_overlays() -> Vec<AnyElement> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    CONTROL_RECTS.with(|r| {
+        let mut r = r.borrow_mut();
+        r.1 = r.0.clone();
+        r.1.iter()
+            .enumerate()
+            .map(|(i, (area, b))| {
+                div()
+                    .id(("win-area", i))
+                    .absolute()
+                    .left(b.origin.x)
+                    .top(b.origin.y)
+                    .w(b.size.width)
+                    .h(b.size.height)
+                    .window_control_area(*area)
+                    .into_any_element()
+            })
+            .collect()
+    })
+}
+
 /// The window's root. GPUI renders the root view on every frame it draws, and a
 /// view that notifies dirties all views above it, so the players live here, beside
 /// the (cached) `AppView` instead of inside it: a video frame re-renders this thin
@@ -687,6 +743,7 @@ impl Render for Shell {
             .size_full()
             .relative()
             .child(AnyView::from(self.app.clone()).cached(StyleRefinement::default().size_full()))
+            .children(control_overlays())
             .children(main)
             .children(preview)
             .children(mini)
@@ -3749,6 +3806,7 @@ impl AppView {
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::add(&crate::perf::APP_RENDERS, 1);
+        CONTROL_RECTS.with(|r| r.borrow_mut().0.clear());
         {
             static FIRST: std::sync::Once = std::sync::Once::new();
             FIRST.call_once(|| crate::perf::mark("first frame"));
@@ -3959,8 +4017,10 @@ pub fn restore_window(window: &mut Window) {
 fn drag_gap(id: &'static str) -> Stateful<Div> {
     let gap = div()
         .id(id)
+        .relative()
         .h(px(56.))
-        .window_control_area(WindowControlArea::Drag);
+        .window_control_area(WindowControlArea::Drag)
+        .child(control_rect(WindowControlArea::Drag));
     #[cfg(target_os = "linux")]
     let gap = gap.on_mouse_down(MouseButton::Left, |event, window, cx| {
         if event.click_count == 2 {
@@ -3984,8 +4044,10 @@ fn window_controls(maximized: bool, cx: &App) -> impl IntoElement {
             .justify_center()
             .w(px(46.))
             .h(px(56.))
+            .relative()
             .text_color(p.text)
             .window_control_area(area)
+            .child(control_rect(area))
             .when(close, |d| d.hover(|s| s.bg(rgb(0xc42b1c)).text_color(white())))
             .when(!close, move |d| d.hover(move |s| s.bg(p.hover)))
             .child(icon(icon_name).size_4().text_color(p.text))

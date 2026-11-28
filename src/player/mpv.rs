@@ -806,7 +806,11 @@ impl Mpv {
         let (_, f) = lib().ok()?;
         let n = CString::new(name).ok()?;
         let mut v: f64 = 0.0;
+        let t = std::time::Instant::now();
         let rc = unsafe { (f.get_property)(self.h.0, n.as_ptr(), MPV_FORMAT_DOUBLE, &mut v as *mut f64 as *mut c_void) };
+        if crate::perf::on() && t.elapsed() > std::time::Duration::from_millis(30) {
+            eprintln!("[mpv] slow get {name}: {:?} on {:?}", t.elapsed(), std::thread::current().name());
+        }
         (rc >= 0).then_some(v)
     }
 
@@ -814,7 +818,11 @@ impl Mpv {
         let (_, f) = lib().ok()?;
         let n = CString::new(name).ok()?;
         let mut p: *mut c_char = std::ptr::null_mut();
+        let t = std::time::Instant::now();
         let rc = unsafe { (f.get_property)(self.h.0, n.as_ptr(), MPV_FORMAT_STRING, &mut p as *mut *mut c_char as *mut c_void) };
+        if crate::perf::on() && t.elapsed() > std::time::Duration::from_millis(30) {
+            eprintln!("[mpv] slow get {name}: {:?} on {:?}", t.elapsed(), std::thread::current().name());
+        }
         if rc < 0 || p.is_null() {
             return None;
         }
