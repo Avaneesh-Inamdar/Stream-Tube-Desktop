@@ -107,10 +107,30 @@ fn main() {
     // one running app: a second launch (e.g. a clicked streamtube: link) hands over and
     // exits before it opens the database the running one is using
     let arg = std::env::args().nth(1).unwrap_or_default();
-    if !display::relaunched() && links::forward_to_running(&arg) {
+    let launch = links::classify_launch(&arg);
+    // Windows sends every https link to one program. YouTube stays here; any other
+    // site is started in the previous browser without opening a window.
+    #[cfg(windows)]
+    if let links::Launch::Browser(url) = &launch {
+        links::remember_browser();
+        links::open_in_browser(url);
+        return;
+    }
+    let forward_arg = match &launch {
+        links::Launch::App { url: Some(url) } => url.clone(),
+        _ => arg.clone(),
+    };
+    if !display::relaunched() && links::forward_to_running(&forward_arg) {
         return;
     }
     store::init();
+    #[cfg(windows)]
+    {
+        links::remember_browser();
+        if store::settings_snapshot().open_external_youtube {
+            links::install_https_handler(false);
+        }
+    }
     api::web::sweep_cookie_files();
     perf::mark("store");
     display::choose();
@@ -175,8 +195,13 @@ fn main() {
                             let _ = main.update(cx, |_, window, cx| {
                                 ui::app::restore_window(window);
                                 window.activate_window();
-                                if let Some(route) = ui::app::route_from_link(&arg) {
-                                    ui::app::navigate(route, window, cx);
+                                match links::classify_launch(&arg) {
+                                    links::Launch::App { url: Some(url) } => ui::app::open_youtube_url(url, window, cx),
+                                    #[cfg(windows)]
+                                    links::Launch::Browser(url) => {
+                                        links::open_in_browser(&url);
+                                    }
+                                    _ => {}
                                 }
                             });
                         });

@@ -84,6 +84,9 @@ pub struct Settings {
     pub search_history_enabled: bool,
     /// look for a new version on GitHub at startup
     pub check_updates: bool,
+    /// Windows: receive https links from other apps and open YouTube ones here.
+    /// Other sites are handed to the browser that was default before this.
+    pub open_external_youtube: bool,
     // Subscriptions
     pub feed_source: String,
     pub feed_include_shorts: bool,
@@ -230,6 +233,7 @@ impl Default for Settings {
             history_enabled: true,
             search_history_enabled: true,
             check_updates: true,
+            open_external_youtube: false,
             feed_source: "full".into(),
             feed_include_shorts: false,
             feed_include_live: true,

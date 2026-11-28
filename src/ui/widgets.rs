@@ -396,7 +396,7 @@ fn to_markdown(text: &str, tokens: &[(std::ops::Range<usize>, Token)]) -> String
     md.replace("\r\n", "\n").replace('\n', "  \n")
 }
 
-fn open_link(url: &str, window: &mut Window, cx: &mut App) {
+pub fn open_link(url: &str, window: &mut Window, cx: &mut App) {
     if let Some(t) = url.strip_prefix("st-time:") {
         let t: f64 = t.parse().unwrap_or(0.0);
         crate::player::controller::player(cx).update(cx, |p, cx| {
@@ -420,11 +420,37 @@ fn open_link(url: &str, window: &mut Window, cx: &mut App) {
             }
         })
         .detach();
-    } else if let Some(route) = crate::ui::app::route_from_link(url).filter(|r| !matches!(r, crate::ui::app::Route::Search(_))) {
-        crate::ui::app::navigate(route, window, cx);
-    } else {
-        crate::ui::open_web(url);
+    } else if let Some(url) = crate::api::innertube::http_target(url) {
+        open_http_link(&url, window, cx);
     }
+}
+
+/// A YouTube https link opens in the app. Any other https link opens in the browser.
+fn open_http_link(url: &str, window: &mut Window, cx: &mut App) {
+    if let Some(route) = crate::ui::app::route_from_link(url) {
+        crate::ui::app::navigate(route, window, cx);
+        return;
+    }
+    if crate::api::innertube::is_youtube_url(url) {
+        let url = url.to_string();
+        cx.spawn(async move |cx| {
+            let res = blocking(move || crate::api::innertube::resolve_url(&url)).await;
+            let _ = cx.update(|cx| {
+                let Some(w) = cx.active_window() else { return };
+                let _ = w.update(cx, |_, window, cx| match res {
+                    Ok(crate::api::innertube::ResolvedUrl::Video(id)) => {
+                        crate::ui::app::navigate(crate::ui::app::Route::Watch { id, playlist: None, start: None }, window, cx)
+                    }
+                    Ok(crate::api::innertube::ResolvedUrl::Channel(id)) => crate::ui::app::navigate(crate::ui::app::Route::Channel(id), window, cx),
+                    Ok(crate::api::innertube::ResolvedUrl::Playlist(id)) => crate::ui::app::navigate(crate::ui::app::Route::Playlist(id), window, cx),
+                    Err(e) => toast(cx, tf!("Could not open link: {0}", crate::ui::friendly_error(&e.to_string()))),
+                });
+            });
+        })
+        .detach();
+        return;
+    }
+    crate::ui::open_web(url);
 }
 
 /// True when the window currently has a non-empty text selection.

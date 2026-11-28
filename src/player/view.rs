@@ -917,11 +917,7 @@ impl PlayerView {
                                 this.player.update(cx, |p, _| p.seek_to(t));
                             }
                             Action::YouTube(url) => {
-                                if let Some(route) = crate::ui::app::route_from_link(url) {
-                                    crate::ui::app::navigate(route, window, cx);
-                                } else {
-                                    let _ = open::that_detached(url);
-                                }
+                                crate::ui::widgets::open_link(url, window, cx);
                             }
                             Action::Web(url) => {
                                 this.player.update(cx, |p, cx| p.set_paused(true, cx));
