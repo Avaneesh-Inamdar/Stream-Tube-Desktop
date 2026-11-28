@@ -34,6 +34,19 @@ use gpui_kit::*;
 struct QuitRequested;
 impl Global for QuitRequested {}
 
+#[cfg(test)]
+struct PlatformQuitRequested;
+#[cfg(test)]
+impl Global for PlatformQuitRequested {}
+
+fn quit_platform(cx: &mut App) {
+    // The headless GPUI platform does not act on quit requests.
+    #[cfg(test)]
+    cx.set_global(PlatformQuitRequested);
+    idle_inhibit::release(cx);
+    cx.quit();
+}
+
 /// Quits the app: saves where every tab's video stopped and waits briefly for the
 /// watch-history reports. The last main window closing and the macOS menu's Quit
 /// both end here.
@@ -45,12 +58,25 @@ pub(crate) fn request_quit(cx: &mut App) {
     for player in player::controller::tab_players(cx) {
         player.update(cx, |p, _| p.save_progress(true));
     }
-    flush_watch_history(cx);
-    idle_inhibit::release(cx);
-    cx.quit();
+    let Some(flushed) = prepare_watch_history_flush(cx)
+        .then(api::web::flush_reports_on_exit)
+        .flatten()
+    else {
+        quit_platform(cx);
+        return;
+    };
+    // Wait before platform shutdown, which gives quit observers only a short deadline.
+    cx.spawn(async move |cx| {
+        let deadline = cx.background_executor().timer(std::time::Duration::from_secs(3));
+        let _ = futures::future::select(flushed, deadline).await;
+        let _ = cx.update(quit_platform);
+    })
+    .detach();
 }
 
 fn register_window_close_handler(cx: &mut App) {
+    // GPUI would otherwise quit on last-window close before the reporter can flush.
+    cx.set_quit_mode(QuitMode::Explicit);
     cx.on_window_closed(|cx, id| {
         ui::pip::window_closed(id, cx);
         // the picture-in-picture window alone doesn't keep the app running
@@ -131,18 +157,24 @@ struct WatchHistoryFlushed;
 impl Global for WatchHistoryFlushed {}
 
 pub(crate) fn flush_watch_history(cx: &mut App) {
-    if cx.try_global::<WatchHistoryFlushed>().is_some() {
+    if !prepare_watch_history_flush(cx) {
         return;
     }
-    cx.set_global(WatchHistoryFlushed);
-    player::controller::player(cx).update(cx, |p, _| p.finish_playback_history());
-    // The network worker does not depend on the UI thread. GPUI only allows
-    // 200 ms for async quit handlers, so wait here with a bounded exit delay.
+    // Direct platform quits and installer restarts cannot await a UI task here.
     if let Some(pending) = api::web::pending_reports() {
         if pending.recv_timeout(std::time::Duration::from_secs(2)).is_err() {
             eprintln!("streamtube: YouTube watch reports did not finish before exit");
         }
     }
+}
+
+fn prepare_watch_history_flush(cx: &mut App) -> bool {
+    if cx.try_global::<WatchHistoryFlushed>().is_some() {
+        return false;
+    }
+    cx.set_global(WatchHistoryFlushed);
+    player::controller::player(cx).update(cx, |p, _| p.finish_playback_history());
+    true
 }
 
 fn main() {

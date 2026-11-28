@@ -49,6 +49,10 @@ prototype. The device-code sign-in for recommendations and subscriptions is opti
 Voting and reloading happen in Stream Tube. Use **Disconnect** in **Settings →
 General** to stop sharing the session for both watch history and reactions.
 
+In the Apple Silicon 1.0.0 foreground test, the like and dislike each survived
+**Reload comments** on Blender Studio’s [Sprite Fright](https://www.youtube.com/watch?v=_cMxraX_5RE).
+The test reaction was cleared and a final reload confirmed the comment was unrated.
+
 ## Build a test copy alongside older prototypes
 
 Set `STREAMTUBE_SAFARI_TEST_ID` to a label for this copy. Use 1–32 lowercase

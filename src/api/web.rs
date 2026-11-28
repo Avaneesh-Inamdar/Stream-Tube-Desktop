@@ -309,6 +309,11 @@ pub(super) fn if_disconnected<T>(f: impl FnOnce() -> T) -> Option<T> {
 pub(super) struct HistorySession(Arc<Session>);
 
 impl HistorySession {
+    #[cfg(test)]
+    pub(super) fn for_test() -> Self {
+        Self(Arc::new(Session::default()))
+    }
+
     pub(super) fn current() -> Option<Self> {
         connected_account_session().map(Self)
     }
@@ -952,7 +957,7 @@ mod browser_tests {
     }
 }
 pub(in crate::api) mod reporting;
-pub use reporting::{PlaybackReport, pending_reports};
+pub use reporting::{PlaybackReport, flush_reports_on_exit, pending_reports};
 
 #[cfg(test)]
 mod devtools_pipe_tests {

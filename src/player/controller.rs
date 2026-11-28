@@ -1057,6 +1057,11 @@ impl Player {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_test_history_report(&mut self, report: crate::api::web::PlaybackReport) {
+        self.history_report = Some(report);
+    }
+
     /// Starts playing a video. Fetches streams, SponsorBlock segments and resumes progress.
     fn set_playback_ready(&mut self, ready: bool, cx: &mut Context<Self>) {
         if self.playback_ready != ready {
