@@ -7,6 +7,7 @@ pub mod music;
 pub mod pages;
 pub mod pip;
 pub mod slot;
+pub mod tabs;
 pub mod transcript_menu;
 #[cfg(target_os = "linux")]
 mod topbar_drag;

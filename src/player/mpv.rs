@@ -487,6 +487,7 @@ struct RenderShared {
     presented_frames: AtomicU64,
     stop: AtomicBool,
     force: AtomicBool,
+    active: AtomicBool,
 }
 
 pub struct Mpv {
@@ -537,6 +538,7 @@ impl Mpv {
                 presented_frames: AtomicU64::new(0),
                 stop: AtomicBool::new(false),
                 force: AtomicBool::new(false),
+                active: AtomicBool::new(true),
             });
             // render context
             let api = CString::new("sw")?;
@@ -650,7 +652,7 @@ impl Mpv {
                     }
                     let flags = (f.rc_update)(rc_ptr.0);
                     let forced = r.force.swap(false, Ordering::Relaxed);
-                    if flags & RENDER_UPDATE_FRAME == 0 && !forced {
+                    if !r.active.load(Ordering::Relaxed) || (flags & RENDER_UPDATE_FRAME == 0 && !forced) {
                         continue;
                     }
                     let (tw, th) = *r.target.lock();
@@ -742,6 +744,19 @@ impl Mpv {
         let mut w = self.render.wake.lock();
         *w = true;
         self.render.cv.notify_one();
+    }
+
+    /// Enables or pauses software frame rendering without unloading the video track.
+    pub fn set_render_active(&self, active: bool) {
+        let was = self.render.active.swap(active, Ordering::Relaxed);
+        if active && !was {
+            self.redraw();
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn is_render_active(&self) -> bool {
+        self.render.active.load(Ordering::Relaxed)
     }
 
     pub fn presented_frames(&self) -> u64 {

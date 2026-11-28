@@ -1636,8 +1636,9 @@ impl WatchPage {
             (id, title, channel, r.queue.clone(), r.queue_pos)
         };
         let width = ui.content_width.max(px(320.));
-        // the page area: the window minus the top bar and the music bar
-        let height = (ui.viewport.height - px(56. + music::BAR_HEIGHT)).max(px(240.));
+        let page_h = if ui.page_size.height > px(0.) { ui.page_size.height } else { (ui.viewport.height - px(56.)).max(px(240.)) };
+        // the page area minus the music bar
+        let height = (page_h - px(music::BAR_HEIGHT)).max(px(240.));
         let two_col = width > px(900.);
         let side_w = if two_col { px(440.) } else { width };
         let art_w = if two_col { width - side_w - px(48.) } else { width };
@@ -1903,17 +1904,18 @@ impl Render for WatchPage {
         if crate::ui::music::on(cx) {
             return self.render_now_playing(cx);
         }
-        let vp = ui.viewport;
-        let avail = vp.width - px(48.);
+        let page_w = if ui.page_size.width > px(0.) { ui.page_size.width } else { ui.viewport.width };
+        let page_h = if ui.page_size.height > px(0.) { ui.page_size.height } else { (ui.viewport.height - px(56.)).max(px(240.)) };
+        let avail = if ui.content_width > px(0.) { ui.content_width } else { (page_w - px(48.)).max(px(320.)) };
         let side_w = px(402.);
         let two_col = avail > px(1000.);
         // the main column grows with the window, as long as the player still fits
         // below the top bar with the start of the title showing (#230)
-        let max_primary = ((vp.height - px(56. + 120.)) * (16. / 9.)).max(px(1280.));
-        let primary_w = if two_col { (avail - side_w - px(24.)).min(max_primary) } else { avail };
+        let max_primary = ((page_h - px(120.)) * (16. / 9.)).max(px(1280.));
+        let primary_w = if two_col { (avail - side_w - px(24.)).max(px(320.)).min(max_primary) } else { avail };
         let full_height = theater && settings.theater_full_height;
         let player_h = if theater {
-            (vp.width * (9. / 16.)).min(vp.height - px(56. + 120.))
+            (page_w * (9. / 16.)).min((page_h - px(120.)).max(px(240.)))
         } else {
             primary_w * (9. / 16.)
         };
@@ -1953,7 +1955,7 @@ impl Render for WatchPage {
                 h
             });
         let player_box = div()
-            .w(if theater { vp.width } else { primary_w })
+            .w(if theater { page_w } else { primary_w })
             .h(player_h)
             .flex_none()
             .when(theater, |d| d.bg(black()))
