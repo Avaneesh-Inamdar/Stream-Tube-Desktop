@@ -265,8 +265,8 @@ impl Render for MusicBar {
                     .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).truncate().child(title))
                     .child(div().text_xs().text_color(p.text2).truncate().child(channel)),
             );
-        // like / dislike, as on the watch page: kept here and sent to the signed-in account
-        let rating = crate::store::rating(&id);
+        // like / dislike, as on the watch page: requires signing in to YouTube
+        let rating = crate::ui::pages::watch::visible_rating(&id);
         let rate = |button_id: &'static str, name: &'static str, value: i8| {
             let id = id.clone();
             button(button_id, name, px(20.), if rating == value { p.accent } else { p.text2 }, cx).on_click(cx.listener(move |_, _, _, cx| {
