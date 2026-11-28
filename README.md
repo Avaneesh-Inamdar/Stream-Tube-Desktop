@@ -36,7 +36,7 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 - No pre-roll, mid-roll or overlay ads: the app plays the video stream directly, so YouTube's ads are never loaded
 - No promoted videos, banners or sponsored cards in Home, search or Shorts
 - Sponsor reads inside videos are skipped too, with SponsorBlock (below)
-- Nothing to install or keep updated: it isn't an ad blocker that YouTube can break, ads simply aren't part of how the app plays video
+- Nothing to install or keep updated: it isn't an ad blocker that YouTube can break; ads simply aren't part of how the app plays video
 
 **Watching**
 - Home, Shorts, Subscriptions, Explore categories, channels (including their courses and shows), and playlists
