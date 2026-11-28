@@ -69,7 +69,7 @@ jobs:
           sed -i "s/^pkgver=.*/pkgver=${version//-/_}/" PKGBUILD
           useradd -m -s /bin/bash builder
           install -d -o builder -g builder /home/builder/arch-package/src/streamtube
-          git archive HEAD | tar -x -C /home/builder/arch-package/src/streamtube
+          git -c safe.directory="$GITHUB_WORKSPACE" archive HEAD | tar -x -C /home/builder/arch-package/src/streamtube
           cp PKGBUILD /home/builder/arch-package/
           chown -R builder:builder /home/builder/arch-package
 
