@@ -180,10 +180,12 @@ pub fn video_menu_items(v: &VideoItem) -> Vec<MenuItem> {
 }
 
 fn video_menu_items_with(v: &VideoItem, save_to_watch_later: bool) -> Vec<MenuItem> {
+    // youtube.com's items in its order, then the app's own
     let mut items = Vec::new();
+    let mut extras = Vec::new();
     {
         let route = if v.is_short { Route::Shorts(Some(v.id.clone())) } else { watch_route(v) };
-        items.push(MenuItem::new("app-window", t("Open in new tab"), move |window, cx| {
+        extras.push(MenuItem::new("app-window", t("Open in new tab"), move |window, cx| {
             crate::ui::app::open_in_new_tab(route.clone(), false, window, cx)
         }));
     }
@@ -224,7 +226,7 @@ fn video_menu_items_with(v: &VideoItem, save_to_watch_later: bool) -> Vec<MenuIt
         crate::downloads::start(v4.clone(), None, cx);
     }));
     let v5 = v.clone();
-    items.push(MenuItem::new("external-link", t("Open in external player"), move |_, cx| {
+    extras.push(MenuItem::new("external-link", t("Open in external player"), move |_, cx| {
         crate::downloads::open_external(&v5.id, cx);
     }));
     let title_copy = if store::settings_snapshot().dearrow_titles {
@@ -233,7 +235,7 @@ fn video_menu_items_with(v: &VideoItem, save_to_watch_later: bool) -> Vec<MenuIt
         v.title.clone()
     };
     if !title_copy.is_empty() {
-        items.push(MenuItem::new("copy", t("Copy title"), move |_, cx| {
+        extras.push(MenuItem::new("copy", t("Copy title"), move |_, cx| {
             copy_text_to_clipboard(title_copy.clone(), cx);
         }));
     }
@@ -242,7 +244,7 @@ fn video_menu_items_with(v: &VideoItem, save_to_watch_later: bool) -> Vec<MenuIt
         copy_to_clipboard(format!("https://www.youtube.com/watch?v={id}"), cx);
     }));
     let id2 = v.id.clone();
-    items.push(MenuItem::new("globe", t("Open on YouTube"), move |_, _| {
+    extras.push(MenuItem::new("globe", t("Open on YouTube"), move |_, _| {
         let _ = open::that(format!("https://www.youtube.com/watch?v={id2}"));
     }));
     let hid_id = v.id.clone();
@@ -278,6 +280,7 @@ fn video_menu_items_with(v: &VideoItem, save_to_watch_later: bool) -> Vec<MenuIt
             cx.refresh_windows();
         }));
     }
+    items.extend(extras);
     items
 }
 

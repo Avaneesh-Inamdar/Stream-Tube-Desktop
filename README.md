@@ -175,21 +175,21 @@ Windows doesn't have one.
 **Debian, Ubuntu, Mint**: install the `.deb`. This also installs libmpv:
 
 ```sh
-sudo apt install ./streamtube_1.0.0_amd64.deb
+sudo apt install ./streamtube_1.0.1_amd64.deb
 ```
 
 **Fedora, openSUSE**: install the `.rpm`:
 
 ```sh
-sudo dnf install ./streamtube-1.0.0.x86_64.rpm
+sudo dnf install ./streamtube-1.0.1.x86_64.rpm
 ```
 
 **Any Linux (x86_64), nothing to install**: download the AppImage, make it executable
 and run it. libmpv is inside, so video plays without installing anything else:
 
 ```sh
-chmod +x StreamTube-1.0.0-x86_64.AppImage
-./StreamTube-1.0.0-x86_64.AppImage
+chmod +x StreamTube-1.0.1-x86_64.AppImage
+./StreamTube-1.0.1-x86_64.AppImage
 ```
 
 **Other Linux (x86_64), installed for your user**: unpack `StreamTube-<version>-linux-x86_64.tar.gz` and run
@@ -224,7 +224,7 @@ and each file has a signed build provenance attestation that ties it to the work
 run that built it. With the [GitHub CLI](https://cli.github.com):
 
 ```sh
-gh attestation verify StreamTube-1.0.0-setup.exe --repo Avaneesh-Inamdar/Stream-Tube-Desktop
+gh attestation verify StreamTube-1.0.1-setup.exe --repo Avaneesh-Inamdar/Stream-Tube-Desktop
 ```
 
 Check a download against those before running it. The in-app updater also checks
@@ -256,7 +256,7 @@ else, copy `libmpv-2.dll` next to it.
 To build the installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run:
 
 ```powershell
-ISCC.exe /DAppVersion=1.0.0 installer\streamtube.iss
+ISCC.exe /DAppVersion=1.0.1 installer\streamtube.iss
 ```
 
 It lands in `dist\`. On Linux, install the packages listed in

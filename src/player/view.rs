@@ -1,6 +1,6 @@
 //! Video surface + YouTube-style controls.
 use super::aspect;
-use super::controller::{KeyboardFeedback, Player};
+use super::controller::{KeyboardFeedback, Player, CAPTION_MARGIN};
 use crate::i18n::{t as translate, tf};
 use crate::api::json::format_duration;
 use crate::api::services;
@@ -72,6 +72,25 @@ enum Menu {
     Audio,
     Equalizer,
     Aspect,
+    AudioOnly,
+    Ambient,
+    Annotations,
+    /// Subtitles/CC > Options: how captions look
+    CaptionOptions,
+    CaptionPick(CapField),
+}
+
+/// One caption look setting, picked from Subtitles/CC > Options (saved with the settings).
+#[derive(Clone, Copy, PartialEq)]
+enum CapField {
+    Font,
+    Color,
+    Size,
+    Opacity,
+    Background,
+    BgColor,
+    BgOpacity,
+    Edge,
 }
 
 pub struct PlayerView {
@@ -83,9 +102,9 @@ pub struct PlayerView {
     pub pip: bool,
     show_until: Instant,
     hovering: bool,
-    /// the pointer rests on the control bar or the quick controls: they stay up, like youtube.com's
-    over_controls: bool,
     menu: Option<Menu>,
+    /// the whole player, measured each frame (captions sit above the controls)
+    root_bounds: Rc<Cell<Bounds<Pixels>>>,
     menu_closed_at: std::time::Instant,
     seek_bounds: Rc<Cell<Bounds<Pixels>>>,
     vol_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -125,8 +144,8 @@ impl PlayerView {
             pip: false,
             show_until: Instant::now() + Duration::from_secs(3),
             hovering: false,
-            over_controls: false,
             menu: None,
+            root_bounds: Rc::new(Cell::new(Bounds::default())),
             menu_closed_at: std::time::Instant::now() - std::time::Duration::from_secs(5),
             seek_bounds: Rc::new(Cell::new(Bounds::default())),
             vol_bounds: Rc::new(Cell::new(Bounds::default())),
@@ -179,7 +198,7 @@ impl PlayerView {
     }
 
     fn controls_visible(&self, paused: bool) -> bool {
-        paused || self.over_controls || self.menu.is_some() || self.drag_seek.is_some() || Instant::now() < self.show_until
+        paused || self.menu.is_some() || self.drag_seek.is_some() || Instant::now() < self.show_until
     }
 
     /// Closes the gear menu if it is open (Esc closes it before leaving the page).
@@ -246,6 +265,19 @@ impl Render for PlayerView {
         let mpv = pl.mpv();
         let vsize = pl.video_size;
         let show = self.controls_visible(paused) || mini && self.hovering;
+        // like youtube.com, captions move up over the controls while they show
+        // and back down when they hide
+        let caption_margin = {
+            let (r, s) = (self.root_bounds.get(), self.seek_bounds.get());
+            let rh = f32::from(r.size.height);
+            let lift = f32::from(r.origin.y + r.size.height - s.origin.y) + 10.0;
+            if show && !mini && rh > 0.0 && f32::from(s.size.height) > 0.0 && lift > 0.0 && lift < rh / 2.0 {
+                ((lift * 720.0 / rh).ceil() as u32).max(CAPTION_MARGIN)
+            } else {
+                CAPTION_MARGIN
+            }
+        };
+        pl.set_caption_margin(caption_margin);
         let ui = *cx.global::<UiState>();
         let scale = window.scale_factor();
         let view = cx.entity().downgrade();
@@ -370,10 +402,13 @@ impl Render for PlayerView {
             .when(mini, |d| d.rounded_t(radius))
             .when(round_all, |d| d.rounded_xl())
             .bg(black())
+            .child({
+                let cell = self.root_bounds.clone();
+                canvas(move |b, _, _| cell.set(b), |_, _, _, _| {}).absolute().size_full()
+            })
             .on_hover(cx.listener(|this, h: &bool, _, cx| {
                 this.hovering = *h;
                 if !*h {
-                    this.over_controls = false;
                     this.hover_frac = None;
                     this.finish_pointer_press(cx);
                 }
@@ -893,6 +928,9 @@ impl PlayerView {
     }
 }
 
+/// How far behind the end of a live stream's window still counts as live.
+const LIVE_EDGE_SLACK: f64 = 20.0;
+
 fn context_items(player: &Entity<Player>, cx: &App) -> Vec<crate::ui::app::MenuItem> {
     use crate::ui::app::MenuItem;
     let pl = player.read(cx);
@@ -1165,6 +1203,19 @@ impl PlayerView {
         }
         let multi = spans.len() > 1;
         let base_h = if active { 5. } else { 3. };
+        let sb_spans: Vec<(f32, f32, u32)> = if sb_show && duration > 0.0 {
+            segments
+                .iter()
+                .filter(|s| sb_actions.get(&s.category).is_some_and(|a| a != "off"))
+                .map(|s| {
+                    let a = (s.start / duration) as f32;
+                    let w = (((s.end - s.start) / duration) as f32).max(0.004);
+                    (a, a + w, services::sponsor_category_color(&s.category))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut bar = div()
             .id("seekbar")
             .relative()
@@ -1189,6 +1240,13 @@ impl PlayerView {
                     (right > left).then(|| div().absolute().top_0().left(relative(left)).h_full().w(relative(right - left)).bg(hsla(0., 0., 1., 0.4)))
                 }))
                 .when_some(hover, |d, hv| d.child(div().absolute().top_0().left_0().h_full().w(relative(local(hv))).bg(hsla(0., 0., 1., 0.5))))
+                // SponsorBlock segments sit under the played part, so the red
+                // progress still shows where playback is inside one (#285)
+                .children(sb_spans.iter().filter_map(|&(start, end, color)| {
+                    let left = local(start);
+                    let right = local(end);
+                    (right > left).then(|| div().absolute().top_0().left(relative(left)).h_full().w(relative(right - left)).bg(rgb(color)))
+                }))
                 .child(div().absolute().top_0().left_0().h_full().w(relative(local(frac))).bg(accent));
             bar = bar.child(
                 div()
@@ -1216,24 +1274,6 @@ impl PlayerView {
                 );
             }
             bar = bar.child(graph);
-        }
-        if sb_show && duration > 0.0 {
-            for s in &segments {
-                if sb_actions.get(&s.category).map(|a| a == "off").unwrap_or(true) {
-                    continue;
-                }
-                let a = (s.start / duration) as f32;
-                let w = (((s.end - s.start) / duration) as f32).max(0.004);
-                bar = bar.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .h_full()
-                        .left(relative(a))
-                        .w(relative(w))
-                        .bg(rgb(services::sponsor_category_color(&s.category))),
-                );
-            }
         }
         bar = bar.child(
             div()
@@ -1319,10 +1359,33 @@ impl PlayerView {
         };
         let vol_icon = if muted || volume <= 0.0 { "volume-x" } else if volume < 50.0 { "volume-1" } else { "volume-2" };
         let vol_frac = if muted { 0.0 } else { (volume / 100.0).min(1.0) as f32 };
-        let time_text = if is_live {
-            translate("LIVE").to_string()
+        // like youtube.com: a red dot at the live edge, grey behind it; clicking
+        // the badge goes back to live (#281)
+        let behind_live = is_live && duration > 0.0 && duration - time > LIVE_EDGE_SLACK;
+        let time_text: AnyElement = if is_live {
+            div()
+                .id("c-live")
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .px_1()
+                .rounded_md()
+                .when(behind_live, |d| d.cursor_pointer().hover(|s| s.bg(hsla(0., 0., 1., 0.15))))
+                .child(div().size_2().rounded_full().bg(if behind_live { hsla(0., 0., 0.75, 1.) } else { rgb(0xff0000).into() }))
+                .child(translate("LIVE").to_string())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    if behind_live {
+                        this.player.update(cx, |p, cx| {
+                            let end = p.duration;
+                            p.seek_to(end);
+                            cx.notify();
+                        });
+                    }
+                }))
+                .into_any_element()
         } else {
-            format!("{} / {}", format_duration(time as u64), format_duration(duration as u64))
+            format!("{} / {}", format_duration(time as u64), format_duration(duration as u64)).into_any_element()
         };
 
         let left = div()
@@ -1562,7 +1625,6 @@ impl PlayerView {
         div()
             .id("player-control-bar")
             .on_hover(cx.listener(|this, h: &bool, _, cx| {
-                this.over_controls = *h;
                 if !*h {
                     // hide on the usual delay from here, not at once
                     this.poke(cx);
@@ -1725,7 +1787,7 @@ impl PlayerView {
                 .child(div().flex_1().child(label))
                 .when_some(value, |d, v| d.child(div().text_color(hsla(0., 0., 1., 0.7)).child(v)).child(icon("chevron-right").size_4().text_color(white())))
         };
-        let header = |title: &str, cx: &mut Context<Self>| {
+        let header = |title: &str, back: Menu, cx: &mut Context<Self>| {
             div()
                 .id("menu-back")
                 .flex()
@@ -1741,8 +1803,8 @@ impl PlayerView {
                 .text_color(white())
                 .child(icon("chevron-left").size_5().text_color(white()))
                 .child(translate(title).to_string())
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.menu = Some(Menu::Main);
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.menu = Some(back);
                     cx.notify();
                 }))
         };
@@ -1773,7 +1835,12 @@ impl PlayerView {
                     translate("Audio only").to_string()
                 } else {
                     let h = pl.current_height();
-                    if h > 0 { format!("{}p", h) } else { translate("Auto").into() }
+                    match (pl.quality, h) {
+                        (_, 0) => translate("Auto").into(),
+                        // like youtube.com: "Auto (1080p)" while Auto picks
+                        (0, h) => format!("{} ({h}p)", translate("Auto")),
+                        (_, h) => format!("{h}p"),
+                    }
                 };
                 let caption = pl
                     .caption
@@ -1790,7 +1857,7 @@ impl PlayerView {
                 panel = panel
                     .child(
                         row("m-ao".into(), Some("headphones"), translate("Audio only (background)").into(), Some(translate(if audio_only { "On" } else { "Off" }).into()), false)
-                            .on_click(cx.listener(move |t, _, _, cx| t.player.update(cx, |p, cx| p.set_audio_only(!audio_only, cx)))),
+                            .on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::AudioOnly); cx.notify() })),
                     )
                     .child({
                         let cur = translate(crate::player::controller::eq_label(&store::settings_snapshot().eq_preset)).to_string();
@@ -1803,25 +1870,15 @@ impl PlayerView {
                     })
                     .child({
                         let ambient = store::settings_snapshot().ambient_mode;
-                        row("m-amb".into(), Some("sun"), translate("Ambient mode").into(), Some(translate(if ambient { "On" } else { "Off" }).into()), false).on_click(cx.listener(move |t, _, _, cx| {
-                            store::update_settings(|s| s.ambient_mode = !ambient);
-                            t.player.update(cx, |p, cx| {
-                                if ambient {
-                                    p.ambient = None;
-                                }
-                                cx.notify()
-                            });
-                            cx.refresh_windows();
-                        }))
+                        row("m-amb".into(), Some("sun"), translate("Ambient mode").into(), Some(translate(if ambient { "On" } else { "Off" }).into()), false)
+                            .on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::Ambient); cx.notify() }))
                     })
                     .when(!pl.annotations.is_empty(), |d| {
                         let on = store::settings_snapshot().annotations;
-                        d.child(row("m-ann".into(), Some("message-square"), translate("Annotations").into(), Some(translate(if on { "On" } else { "Off" }).into()), false).on_click(
-                            cx.listener(move |_, _, _, cx| {
-                                store::update_settings(|s| s.annotations = !on);
-                                cx.notify();
-                            }),
-                        ))
+                        d.child(
+                            row("m-ann".into(), Some("message-square"), translate("Annotations").into(), Some(translate(if on { "On" } else { "Off" }).into()), false)
+                                .on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::Annotations); cx.notify() })),
+                        )
                     })
                     .when(audio_tracks.len() > 1, |d| {
                         let cur = pl.audio_track.clone().unwrap_or_else(|| translate("Default").into());
@@ -1835,7 +1892,7 @@ impl PlayerView {
                 let cur = pl.quality;
                 let quals = pl.available_qualities();
                 let playing = pl.current_height();
-                panel = panel.child(header("Quality", cx));
+                panel = panel.child(header("Quality", Menu::Main, cx));
                 for q in quals {
                     panel = panel.child(
                         row(SharedString::from(format!("q-{q}")), None, format!("{q}p{}", if q >= 2160 { " 4K" } else if q >= 720 { " HD" } else { "" }), None, q == cur)
@@ -1855,7 +1912,7 @@ impl PlayerView {
             }
             Menu::Speed => {
                 let cur = pl.speed;
-                panel = panel.child(header("Playback speed", cx));
+                panel = panel.child(header("Playback speed", Menu::Main, cx));
                 for s in [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0] {
                     panel = panel.child(
                         row(SharedString::from(format!("s-{s}")), None, speed_label(s), None, (cur - s).abs() < 0.001)
@@ -1880,7 +1937,13 @@ impl PlayerView {
             Menu::Captions => {
                 let cur = pl.caption;
                 let tracks = pl.streams.as_ref().map(|s| s.captions.clone()).unwrap_or_default();
-                panel = panel.child(header("Subtitles/CC", cx)).child(
+                panel = panel
+                    .child(header("Subtitles/CC", Menu::Main, cx))
+                    .child(row("cap-opts".into(), Some("settings"), translate("Options").into(), Some(String::new()), false).on_click(cx.listener(|t, _, _, cx| {
+                        t.menu = Some(Menu::CaptionOptions);
+                        cx.notify();
+                    })))
+                    .child(
                     row("cap-off".into(), None, translate("Off").into(), None, cur.is_none()).on_click(cx.listener(|t, _, _, cx| {
                         t.menu = None;
                         t.player.update(cx, |p, cx| p.set_caption(None, cx));
@@ -1899,7 +1962,7 @@ impl PlayerView {
             Menu::Audio => {
                 let cur = pl.audio_track.clone();
                 let tracks = pl.audio_tracks();
-                panel = panel.child(header("Audio track", cx));
+                panel = panel.child(header("Audio track", Menu::Main, cx));
                 for (i, t) in tracks.into_iter().enumerate() {
                     let active = cur.as_deref() == Some(t.as_str());
                     let t2 = t.clone();
@@ -1914,7 +1977,7 @@ impl PlayerView {
             }
             Menu::Equalizer => {
                 let cur = store::settings_snapshot().eq_preset.clone();
-                panel = panel.child(header("Equalizer", cx));
+                panel = panel.child(header("Equalizer", Menu::Main, cx));
                 for &(value, label, _) in crate::player::controller::EQ_PRESETS {
                     panel = panel.child(row(SharedString::from(format!("eq-{value}")), None, translate(label).into(), None, cur == value).on_click(cx.listener(move |t, _, _, cx| {
                         t.menu = None;
@@ -1925,9 +1988,116 @@ impl PlayerView {
                     })));
                 }
             }
+            Menu::AudioOnly | Menu::Ambient | Menu::Annotations => {
+                let settings = store::settings_snapshot();
+                let (title, cur) = match menu {
+                    Menu::AudioOnly => ("Audio only (background)", pl.audio_only),
+                    Menu::Ambient => ("Ambient mode", settings.ambient_mode),
+                    _ => ("Annotations", settings.annotations),
+                };
+                panel = panel.child(header(title, Menu::Main, cx));
+                for (on, label) in [(false, "Off"), (true, "On")] {
+                    panel = panel.child(row(SharedString::from(format!("onoff-{on}")), None, translate(label).into(), None, cur == on).on_click(cx.listener(move |t, _, _, cx| {
+                        t.menu = None;
+                        if on != cur {
+                            match menu {
+                                Menu::AudioOnly => t.player.update(cx, |p, cx| p.set_audio_only(on, cx)),
+                                Menu::Ambient => {
+                                    store::update_settings(|s| s.ambient_mode = on);
+                                    t.player.update(cx, |p, cx| {
+                                        if !on {
+                                            p.ambient = None;
+                                        }
+                                        cx.notify()
+                                    });
+                                    cx.refresh_windows();
+                                }
+                                _ => store::update_settings(|s| s.annotations = on),
+                            }
+                        }
+                        cx.notify();
+                    })));
+                }
+            }
+            Menu::CaptionOptions => {
+                use crate::player::controller::{CAPTION_COLORS, CAPTION_EDGES, CAPTION_FONTS, CAPTION_OPACITIES, CAPTION_SIZES};
+                let s = store::settings_snapshot();
+                fn name<T: PartialEq>(list: &[(T, &'static str)], v: &T) -> String {
+                    translate(list.iter().find(|(k, _)| k == v).map(|(_, l)| *l).unwrap_or("Custom")).to_string()
+                }
+                let font = CAPTION_FONTS.iter().find(|(k, _)| *k == s.caption_font).map(|(_, l)| *l).unwrap_or("Sans-serif");
+                let edge = CAPTION_EDGES.iter().find(|(k, _)| *k == s.caption_edge).map(|(_, l)| *l).unwrap_or("Outline and shadow");
+                let mut rows = vec![
+                    (CapField::Font, "Font family", translate(font).to_string()),
+                    (CapField::Color, "Font color", name(CAPTION_COLORS, &s.caption_color)),
+                    (CapField::Size, "Font size", name(CAPTION_SIZES, &s.caption_size)),
+                    (CapField::Opacity, "Font opacity", name(CAPTION_OPACITIES, &s.caption_opacity)),
+                    (CapField::Background, "Background", translate(if s.caption_background { "On" } else { "Off" }).to_string()),
+                ];
+                if s.caption_background {
+                    rows.push((CapField::BgColor, "Background color", name(CAPTION_COLORS, &s.caption_bg_color)));
+                    rows.push((CapField::BgOpacity, "Background opacity", name(CAPTION_OPACITIES, &s.caption_bg_opacity)));
+                } else {
+                    rows.push((CapField::Edge, "Character edge style", translate(edge).to_string()));
+                }
+                panel = panel.child(header("Options", Menu::Captions, cx));
+                for (i, (field, label, value)) in rows.into_iter().enumerate() {
+                    panel = panel.child(row(SharedString::from(format!("co-{i}")), None, translate(label).into(), Some(value), false).on_click(cx.listener(move |t, _, _, cx| {
+                        t.menu = Some(Menu::CaptionPick(field));
+                        cx.notify();
+                    })));
+                }
+                panel = panel.child(row("co-reset".into(), None, translate("Reset").into(), None, false).on_click(cx.listener(|t, _, _, cx| {
+                    let d = store::Settings::default();
+                    store::update_settings(|s| {
+                        s.caption_font = d.caption_font;
+                        s.caption_color = d.caption_color;
+                        s.caption_size = d.caption_size;
+                        s.caption_opacity = d.caption_opacity;
+                        s.caption_background = d.caption_background;
+                        s.caption_bg_color = d.caption_bg_color;
+                        s.caption_bg_opacity = d.caption_bg_opacity;
+                        s.caption_edge = d.caption_edge;
+                    });
+                    t.player.read(cx).restyle_captions();
+                    cx.notify();
+                })));
+            }
+            Menu::CaptionPick(field) => {
+                use crate::player::controller::{CAPTION_COLORS, CAPTION_EDGES, CAPTION_FONTS, CAPTION_OPACITIES, CAPTION_SIZES};
+                type Set = Rc<dyn Fn(&mut store::Settings)>;
+                fn num(list: &'static [(u32, &'static str)], cur: u32, set: fn(&mut store::Settings, u32)) -> Vec<(&'static str, bool, Set)> {
+                    list.iter().map(|&(v, l)| (l, v == cur, Rc::new(move |s: &mut store::Settings| set(s, v)) as Set)).collect()
+                }
+                fn text(list: &'static [(&'static str, &'static str)], cur: &str, set: fn(&mut store::Settings, &'static str)) -> Vec<(&'static str, bool, Set)> {
+                    list.iter().map(|&(v, l)| (l, v == cur, Rc::new(move |s: &mut store::Settings| set(s, v)) as Set)).collect()
+                }
+                let s = store::settings_snapshot();
+                let (title, choices) = match field {
+                    CapField::Font => ("Font family", text(CAPTION_FONTS, &s.caption_font, |s, v| s.caption_font = v.into())),
+                    CapField::Color => ("Font color", num(CAPTION_COLORS, s.caption_color, |s, v| s.caption_color = v)),
+                    CapField::Size => ("Font size", num(CAPTION_SIZES, s.caption_size, |s, v| s.caption_size = v)),
+                    CapField::Opacity => ("Font opacity", num(CAPTION_OPACITIES, s.caption_opacity, |s, v| s.caption_opacity = v)),
+                    CapField::Background => ("Background", num(&[(0, "Off"), (1, "On")], s.caption_background as u32, |s, v| s.caption_background = v == 1)),
+                    CapField::BgColor => ("Background color", num(CAPTION_COLORS, s.caption_bg_color, |s, v| s.caption_bg_color = v)),
+                    CapField::BgOpacity => ("Background opacity", num(CAPTION_OPACITIES, s.caption_bg_opacity, |s, v| s.caption_bg_opacity = v)),
+                    CapField::Edge => ("Character edge style", text(CAPTION_EDGES, &s.caption_edge, |s, v| s.caption_edge = v.into())),
+                };
+                panel = panel.child(header(title, Menu::CaptionOptions, cx));
+                for (i, (label, active, set)) in choices.into_iter().enumerate() {
+                    panel = panel.child(row(SharedString::from(format!("cp-{i}")), None, translate(label).into(), None, active).on_click(cx.listener(move |t, _, _, cx| {
+                        let set = set.clone();
+                        store::update_settings(move |s| set(s));
+                        t.player.read(cx).restyle_captions();
+                        // back to the list, like youtube.com, to change something else
+                        t.menu = Some(Menu::CaptionOptions);
+                        cx.notify();
+                    })));
+                }
+            }
             Menu::Aspect => {
                 let cur = store::settings_snapshot().aspect_mode.clone();
-                panel = panel.child(header("Aspect ratio", cx));
+                panel = panel.child(header("Aspect ratio", Menu::Main, cx));
                 for &(value, label) in aspect::MODES {
                     panel = panel.child(row(SharedString::from(format!("ar-{value}")), None, translate(label).into(), None, cur == value).on_click(cx.listener(move |t, _, _, cx| {
                         t.menu = None;
