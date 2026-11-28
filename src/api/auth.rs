@@ -582,9 +582,75 @@ pub fn subscriptions_videos(max_pages: usize) -> Result<(Vec<VideoItem>, Option<
     Ok((out, page.continuation))
 }
 
-/// Copies the account's subscriptions into the local list. Returns how many were new.
-pub fn sync_subscriptions() -> Result<usize> {
+/// Which local subscriptions came from which account, so that signing in with
+/// another account takes the previous account's channels out of the local list.
+/// Channels followed locally (signed out) are not in it and stay.
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+struct AccountSubscriptions {
+    account: String,
+    channels: Vec<String>,
+}
+
+const ACCOUNT_SUBSCRIPTIONS: &str = "account_subscriptions";
+
+/// Identifies the signed-in account in [`AccountSubscriptions`].
+fn account_key() -> Option<String> {
+    let a = account()?;
+    a.handle.filter(|h| !h.is_empty()).or_else(|| Some(a.name).filter(|n| !n.is_empty()))
+}
+
+fn load_account_subscriptions() -> Option<AccountSubscriptions> {
+    crate::store::kv_get(ACCOUNT_SUBSCRIPTIONS).and_then(|s| serde_json::from_str(&s).ok())
+}
+
+fn save_account_subscriptions(record: &AccountSubscriptions) {
+    if let Ok(s) = serde_json::to_string(record) {
+        crate::store::kv_set(ACCOUNT_SUBSCRIPTIONS, &s);
+    }
+}
+
+/// What a sync does to the local list: the previous account's channels that the
+/// current account doesn't follow go, and the record now lists `current`'s.
+fn plan_account_switch(previous: Option<&AccountSubscriptions>, account: &str, current: &[String]) -> (Vec<String>, AccountSubscriptions) {
+    let mut channels: Vec<String> = current.to_vec();
+    let mut remove = Vec::new();
+    match previous {
+        Some(prev) if prev.account != account => {
+            remove = prev.channels.iter().filter(|c| !current.contains(c)).cloned().collect();
+        }
+        // the same account: keep what it followed before (the list YouTube
+        // returns may not hold every channel) as long as it's still subscribed
+        Some(prev) => {
+            for c in &prev.channels {
+                if !channels.contains(c) && crate::store::is_subscribed(c) {
+                    channels.push(c.clone());
+                }
+            }
+        }
+        None => {}
+    }
+    (remove, AccountSubscriptions { account: account.to_string(), channels })
+}
+
+/// Copies the account's subscriptions into the local list. Returns how many
+/// were new, and how many of a previously signed-in account's left the list
+/// (after an account switch, those go first).
+pub fn sync_subscriptions() -> Result<(usize, usize)> {
+    let key = account_key();
     let chans = subscribed_channels()?;
+    let mut removed = 0;
+    if let Some(key) = &key {
+        let ids: Vec<String> = chans.iter().map(|c| c.id.clone()).collect();
+        let (remove, record) = plan_account_switch(load_account_subscriptions().as_ref(), key, &ids);
+        if crate::perf::on() {
+            eprintln!("[subs] {} from the account, {} of the previous account's removed", ids.len(), remove.len());
+        }
+        for id in &remove {
+            crate::store::unsubscribe(id);
+        }
+        removed = remove.len();
+        save_account_subscriptions(&record);
+    }
     let mut added = 0;
     for c in chans {
         if !crate::store::is_subscribed(&c.id) {
@@ -592,7 +658,18 @@ pub fn sync_subscriptions() -> Result<usize> {
         }
         crate::store::subscribe(&c.id, &c.name, c.avatar.as_deref());
     }
-    Ok(added)
+    Ok((added, removed))
+}
+
+/// Keeps the account's record in step with a subscribe/unsubscribe made in the app.
+fn note_account_subscription(channel_id: &str, on: bool) {
+    let Some(key) = account_key() else { return };
+    let mut record = load_account_subscriptions().filter(|r| r.account == key).unwrap_or_else(|| AccountSubscriptions { account: key, channels: Vec::new() });
+    record.channels.retain(|c| c != channel_id);
+    if on {
+        record.channels.push(channel_id.to_string());
+    }
+    save_account_subscriptions(&record);
 }
 
 pub fn like(video_id: &str, kind: &str) -> Result<()> {
@@ -604,6 +681,7 @@ pub fn like(video_id: &str, kind: &str) -> Result<()> {
 pub fn subscribe(channel_id: &str, on: bool) -> Result<()> {
     let ep = if on { "subscription/subscribe" } else { "subscription/unsubscribe" };
     tv_call(ep, json!({ "channelIds": [channel_id] }))?;
+    note_account_subscription(channel_id, on);
     Ok(())
 }
 
@@ -760,4 +838,28 @@ pub fn send_live_chat(channel_id: &str, video_id: &str, message: &str) -> Result
         anyhow::bail!(if t.is_empty() { "YouTube did not accept the message".to_string() } else { t });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod account_switch_tests {
+    use super::{AccountSubscriptions, plan_account_switch};
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn another_account_takes_the_previous_accounts_channels_away() {
+        let prev = AccountSubscriptions { account: "@old".into(), channels: ids(&["UCa", "UCb", "UCshared"]) };
+        let (remove, record) = plan_account_switch(Some(&prev), "@new", &ids(&["UCshared", "UCc"]));
+        assert_eq!(remove, ids(&["UCa", "UCb"]));
+        assert_eq!(record, AccountSubscriptions { account: "@new".into(), channels: ids(&["UCshared", "UCc"]) });
+    }
+
+    #[test]
+    fn first_sync_removes_nothing() {
+        let (remove, record) = plan_account_switch(None, "@me", &ids(&["UCa"]));
+        assert!(remove.is_empty());
+        assert_eq!(record.channels, ids(&["UCa"]));
+    }
 }

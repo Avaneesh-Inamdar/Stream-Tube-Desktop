@@ -643,7 +643,9 @@ impl Player {
         }
         let live = video.is_live || self.streams.as_ref().is_some_and(|info| info.is_live);
         let position = self.mpv.as_ref().and_then(|mpv| mpv.get_f64("time-pos")).unwrap_or(self.time);
-        if live && self.live_rejoins < 5 && !self.loop_video {
+        // a live stream has no start to loop back to (youtube.com offers no Loop there)
+        let looping = self.loop_video && !live;
+        if live && self.live_rejoins < 5 {
             // A live HLS playlist can stop refreshing mid-stream (the URL
             // expired, a reload failed) and mpv reports the end. Ask YouTube
             // again: still live means join it again, ended means play on.
@@ -659,7 +661,7 @@ impl Player {
         }
         self.eof = true;
         self.time = position;
-        if self.loop_video {
+        if looping {
             self.eof = false;
             self.save_progress(true);
             if let Some(report) = &self.history_report {
@@ -1246,6 +1248,9 @@ impl Player {
             Some(streams::PlaybackStream::Hls(url)) if info.hls_only || is_short => {
                 let audio = streams::hls_audio_choice(&info, self.audio_track.as_deref());
                 let source = super::proxy::playback_hls(url, self.quality, audio.as_deref(), self.recovering_picture);
+                if !is_short && !info.is_live && source != url {
+                    super::proxy::prefetch_opening(url, self.quality, audio.as_deref(), self.recovering_picture, start.unwrap_or(0.0));
+                }
                 if is_short && !self.recovering_picture && source != url && start.unwrap_or(0.0) == 0.0 {
                     opening = super::shorts_preload::hls_opening_seconds(
                         url,
