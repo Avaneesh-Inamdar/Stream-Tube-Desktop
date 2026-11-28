@@ -262,6 +262,16 @@ ISCC.exe /DAppVersion=1.0.0 installer\streamtube.iss
 It lands in `dist\`. On Linux, install the packages listed in
 [`.github/workflows/linux.yml`](.github/workflows/linux.yml) and run `cargo build --release`.
 
+On macOS, `brew install mpv dylibbundler`, then:
+
+```sh
+cargo build --release
+packaging/macos/build-app.sh
+```
+
+It makes `dist/Stream Tube.app` and a `.dmg`, with libmpv and FFmpeg inside the app.
+`cargo run` alone also works, using Homebrew's libmpv.
+
 ## Where things are stored
 
 History and subscriptions go in `%APPDATA%\StreamTube\streamtube.db` on
@@ -290,7 +300,7 @@ src/
 
 - YouTube sometimes answers with "Sign in to confirm you're not a bot". Signing in
   inside the app avoids it; otherwise updating yt-dlp usually fixes it.
-- Windows is the main platform. The Linux build is new and less tested; macOS isn't built yet.
+- Windows is the main platform. The Linux and macOS builds are new and less tested.
 
 ## Contributing
 

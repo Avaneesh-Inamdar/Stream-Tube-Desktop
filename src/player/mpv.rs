@@ -203,6 +203,25 @@ fn linux_candidates(exe_dir: Option<&std::path::Path>) -> Vec<PathBuf> {
     c
 }
 
+/// macOS lookup order for libmpv: a copy bundled in the `.app`
+/// (`Contents/Frameworks`) or next to the binary, then the plain name
+/// (`DYLD_*` paths), then Homebrew's prefixes, which dyld does not search on
+/// its own (`/opt/homebrew` on Apple Silicon, `/usr/local` on Intel).
+#[cfg(target_os = "macos")]
+fn macos_candidates(exe_dir: Option<&std::path::Path>) -> Vec<PathBuf> {
+    let mut c = Vec::new();
+    for name in LIBRARY_NAMES {
+        if let Some(d) = exe_dir {
+            c.push(d.join("../Frameworks").join(name));
+            c.push(d.join(name));
+        }
+        c.push(PathBuf::from(name));
+        c.push(PathBuf::from("/opt/homebrew/lib").join(name));
+        c.push(PathBuf::from("/usr/local/lib").join(name));
+    }
+    c
+}
+
 fn lib() -> Result<&'static (Library, Fns)> {
     static LIB: std::sync::OnceLock<Result<(Library, Fns), String>> = std::sync::OnceLock::new();
     LIB.get_or_init(|| {
@@ -210,14 +229,15 @@ fn lib() -> Result<&'static (Library, Fns)> {
         unsafe {
             preload_vulkan_loader();
         }
-        #[cfg(any(windows, target_os = "linux"))]
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|e| e.parent().map(|d| d.to_path_buf()));
-        // Linux fixes the whole order up front, plain names included.
+        // Linux and macOS fix the whole order up front, plain names included.
         #[cfg(target_os = "linux")]
         let candidates = linux_candidates(exe_dir.as_deref());
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        let candidates = macos_candidates(exe_dir.as_deref());
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let mut candidates = Vec::new();
         #[cfg(windows)]
         if let Some(d) = &exe_dir {
@@ -225,7 +245,7 @@ fn lib() -> Result<&'static (Library, Fns)> {
         }
         #[cfg(windows)]
         candidates.push(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/third_party/mpv/libmpv-2.dll")));
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         candidates.extend(LIBRARY_NAMES.iter().map(PathBuf::from));
         open_library(candidates)
     })

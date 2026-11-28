@@ -3924,15 +3924,15 @@ fn strip_download_section(notes: &str) -> String {
 }
 
 fn hide_to_tray(window: &Window) -> bool {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     { crate::tray::hide(window) }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     { let _ = window; false }
 }
 
 /// Brings a minimized window back (leaves maximized/normal windows as they are).
 pub fn restore_window(window: &mut Window) {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     if crate::tray::restore(window) {
         return;
     }
