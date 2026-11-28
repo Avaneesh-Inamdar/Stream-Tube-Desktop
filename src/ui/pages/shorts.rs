@@ -705,7 +705,8 @@ impl Render for ShortsPage {
         let v = self.list[self.idx].clone();
         let rem = window.rem_size();
         let yt_layout = store::settings_snapshot().shorts_yt_layout;
-        let available_h = if ui.fullscreen { ui.viewport.height.max(px(240.)) } else { (ui.viewport.height - px(88.)).max(px(400.)) };
+        let page_h = if ui.page_size.height > px(0.) { ui.page_size.height } else { (ui.viewport.height - px(56.)).max(px(240.)) };
+        let available_h = if ui.fullscreen { ui.viewport.height.max(px(240.)) } else { (page_h - px(32.)).max(px(400.)) };
         let video_w = available_h * (9. / 16.);
         // Use the space beside the video first. On small windows give the title its own row.
         let side_space = if ui.fullscreen {
@@ -719,7 +720,7 @@ impl Render for ShortsPage {
         let compact_channel = below && !ui.fullscreen && !v.channel_name.is_empty();
         let caption_h = rem * if compact_channel { 4.5 } else { 3.5 };
         let h = if below { available_h - caption_h } else { available_h };
-        let w = (h * (9. / 16.)).min(ui.viewport.width);
+        let w = (h * (9. / 16.)).min(if ui.fullscreen { ui.viewport.width } else { ui.content_width.max(px(240.)) });
         let title = |color: Hsla| {
             selectable_text(SharedString::from(format!("shorts-title-{}", v.id)), v.title.clone())
                 .min_w_0()

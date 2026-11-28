@@ -307,7 +307,9 @@ impl Player {
     fn update_video_output(&mut self, cx: &mut Context<Self>) {
         let visible = self.foreground || self.in_pip;
         if let Some(mpv) = &self.mpv {
-            mpv.set("vid", if visible { "auto" } else { "no" });
+            // Keep the video track attached while in the background so switching
+            // back shows the picture immediately without re-opening/re-buffering.
+            mpv.set_render_active(visible);
         }
         if !visible {
             if let Some(frame) = self.frame.take() {
@@ -339,7 +341,7 @@ impl Player {
         let hw = if s.hwdec { "auto-copy" } else { "no" };
         let opts: Vec<(&str, &str)> = vec![
             ("vo", "libmpv"),
-            ("vid", if self.foreground || self.in_pip { "auto" } else { "no" }),
+            ("vid", if self.audio_only { "no" } else { "auto" }),
             ("hwdec", hw),
             ("keep-open", "yes"),
             ("idle", "yes"),
@@ -405,6 +407,7 @@ impl Player {
             let _ = tx.unbounded_send(ev);
         }) {
             Ok(m) => {
+                m.set_render_active(self.foreground || self.in_pip);
                 self.mpv = Some(m.clone());
                 self.engine_generation += 1;
                 let generation = self.engine_generation;

@@ -7,6 +7,11 @@ use crate::api::{auth, types::{PlaylistItem, VideoItem}};
 use crate::player::controller::{KeyboardFeedback, Player, new_tab_player, player, set_active_player, tab_players};
 use crate::player::view::PlayerView;
 use crate::store;
+use crate::ui::tabs::{
+    DragTab, DragTabPreview, GROUP_COLORS, SavedTab, SavedTabLayout, TabBarPosition, TabGroup, TabItem,
+    load_layout, move_tab_onto_tab, move_tab_to_group, move_tab_to_ungrouped_end, next_group_color,
+    normalize_group_contiguity, save_layout,
+};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 
 // ───────────────────────── routes ─────────────────────────
@@ -58,6 +63,7 @@ pub struct UiState {
     pub windowed: bool,
     pub sidebar_open: bool,
     pub content_width: Pixels,
+    pub page_size: Size<Pixels>,
     pub viewport: Size<Pixels>,
 }
 impl Global for UiState {}
@@ -361,7 +367,13 @@ pub enum Dialog {
     /// signing in to youtube.com in a browser, so watches reach the account
     WebSignIn,
     SaveToPlaylist(VideoItem),
-    TextPrompt { title: String, placeholder: String, on_submit: Arc<dyn Fn(String, &mut Window, &mut App)> },
+    TextPrompt {
+        title: String,
+        placeholder: String,
+        initial: String,
+        submit_label: &'static str,
+        on_submit: Arc<dyn Fn(String, &mut Window, &mut App)>,
+    },
     Confirm { title: String, body: String, confirm: String, on_confirm: Arc<dyn Fn(&mut Window, &mut App)> },
     /// a newer version is on GitHub
     Update,
@@ -490,7 +502,11 @@ mod favorite_playlist_tests {
 pub fn open_dialog(d: Dialog, window: &mut Window, cx: &mut App) {
     if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
         app.update(cx, |a, cx| {
-            a.dialog_input.update(cx, |i, cx| i.set_value("", window, cx));
+            let initial = match &d {
+                Dialog::TextPrompt { initial, .. } => initial.as_str(),
+                _ => "",
+            };
+            a.dialog_input.update(cx, |i, cx| i.set_value(initial, window, cx));
             if let Dialog::TextPrompt { placeholder, .. } = &d {
                 a.dialog_input.update(cx, |input, cx| input.set_placeholder(t(placeholder).to_string(), window, cx));
                 let fh = a.dialog_input.read(cx).focus_handle(cx);
@@ -503,11 +519,215 @@ pub fn open_dialog(d: Dialog, window: &mut Window, cx: &mut App) {
 }
 
 pub fn prompt_text(title: &str, placeholder: &str, window: &mut Window, cx: &mut App, f: impl Fn(String, &mut Window, &mut App) + 'static) {
+    prompt_text_with(title, placeholder, "", "Create", window, cx, f);
+}
+
+pub fn prompt_text_with(
+    title: &str,
+    placeholder: &str,
+    initial: &str,
+    submit_label: &'static str,
+    window: &mut Window,
+    cx: &mut App,
+    f: impl Fn(String, &mut Window, &mut App) + 'static,
+) {
     open_dialog(
-        Dialog::TextPrompt { title: title.into(), placeholder: placeholder.into(), on_submit: Arc::new(f) },
+        Dialog::TextPrompt {
+            title: title.into(),
+            placeholder: placeholder.into(),
+            initial: initial.into(),
+            submit_label,
+            on_submit: Arc::new(f),
+        },
         window,
         cx,
     );
+}
+
+pub fn tab_groups_snapshot(cx: &App) -> Vec<(TabGroup, usize)> {
+    let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) else {
+        return Vec::new();
+    };
+    let a = app.read(cx);
+    a.groups
+        .iter()
+        .map(|g| {
+            let count = a.tabs.iter().filter(|t| t.group_id == Some(g.id)).count();
+            (g.clone(), count)
+        })
+        .collect()
+}
+
+pub fn create_tab_group(name: String, color: Option<u32>, cx: &mut App) {
+    if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+        app.update(cx, |a, cx| {
+            a.create_group(name, color, None, cx);
+        });
+    }
+}
+
+pub fn rename_tab_group(group_id: u64, name: String, cx: &mut App) {
+    if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+        app.update(cx, |a, cx| a.rename_group(group_id, name, cx));
+    }
+}
+
+pub fn recolor_tab_group(group_id: u64, color: u32, cx: &mut App) {
+    if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+        app.update(cx, |a, cx| a.recolor_group(group_id, color, cx));
+    }
+}
+
+pub fn toggle_tab_group_collapsed(group_id: u64, cx: &mut App) {
+    if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+        app.update(cx, |a, cx| a.toggle_group_collapsed(group_id, cx));
+    }
+}
+
+pub fn delete_tab_group(group_id: u64, close_tabs: bool, window: &mut Window, cx: &mut App) {
+    if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+        app.update(cx, |a, cx| a.delete_group(group_id, close_tabs, window, cx));
+    }
+}
+
+pub fn reset_tab_layout(window: &mut Window, cx: &mut App) {
+    if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+        app.update(cx, |a, cx| a.reset_tabs_and_groups(window, cx));
+    }
+}
+
+struct TabGroupMenuView {
+    group: TabGroup,
+    can_close_group: bool,
+}
+
+impl Render for TabGroupMenuView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = pal(cx);
+        let g = self.group.clone();
+        let gid = g.id;
+        let gcolor: Hsla = rgb(g.color).into();
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .w(px(236.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_4()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(p.border)
+                    .child(div().flex_none().size(px(10.)).rounded_full().bg(gcolor))
+                    .child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(g.name.clone())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_4()
+                    .py_2p5()
+                    .border_b_1()
+                    .border_color(p.border)
+                    .children(GROUP_COLORS.iter().map(|&(c, _)| {
+                        let active = c == g.color;
+                        div()
+                            .id(("tg-clr", c as u64))
+                            .size(px(20.))
+                            .rounded_full()
+                            .p(px(2.))
+                            .border_2()
+                            .border_color(if active { p.text } else { hsla(0., 0., 0., 0.) })
+                            .cursor_pointer()
+                            .child(div().size_full().rounded_full().bg(rgb(c)))
+                            .on_click(move |_, _, cx| {
+                                recolor_tab_group(gid, c, cx);
+                                cx.set_global(OpenMenu(None));
+                                cx.refresh_windows();
+                            })
+                    })),
+            );
+
+        let mut actions: Vec<(SharedString, &'static str, SharedString, Box<dyn Fn(&mut Window, &mut App)>)> = vec![
+            (
+                "tg-new".into(),
+                "plus",
+                t("New tab in group").into(),
+                Box::new(move |window, cx| {
+                    if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+                        app.update(cx, |a, cx| a.new_tab_with_group(Route::Home, Some(gid), true, window, cx));
+                    }
+                }),
+            ),
+            (
+                "tg-rename".into(),
+                "pencil",
+                t("Rename group").into(),
+                {
+                    let cur_name = g.name.clone();
+                    Box::new(move |window, cx| {
+                        let initial = cur_name.clone();
+                        prompt_text_with("Rename tab group", "Group name", &initial, "Save", window, cx, move |name, _, cx| {
+                            rename_tab_group(gid, name, cx);
+                        });
+                    })
+                },
+            ),
+            (
+                "tg-toggle".into(),
+                if g.collapsed { "chevron-down" } else { "chevron-up" },
+                t(if g.collapsed { "Expand group" } else { "Collapse group" }).into(),
+                Box::new(move |_, cx| {
+                    toggle_tab_group_collapsed(gid, cx);
+                }),
+            ),
+            (
+                "tg-ungroup".into(),
+                "ungroup",
+                t("Ungroup tabs").into(),
+                Box::new(move |window, cx| {
+                    delete_tab_group(gid, false, window, cx);
+                }),
+            ),
+        ];
+        if self.can_close_group {
+            actions.push((
+                "tg-close".into(),
+                "trash-2",
+                t("Close group").into(),
+                Box::new(move |window, cx| {
+                    delete_tab_group(gid, true, window, cx);
+                }),
+            ));
+        }
+
+        for (id, ic, label, act) in actions {
+            col = col.child(
+                div()
+                    .id(id)
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .h_9()
+                    .cursor_pointer()
+                    .text_sm()
+                    .text_color(p.text)
+                    .hover(move |s| s.bg(p.hover))
+                    .child(icon(ic).size_4().text_color(p.text))
+                    .child(label)
+                    .on_click(move |_, window, cx| {
+                        cx.set_global(OpenMenu(None));
+                        act(window, cx);
+                        cx.refresh_windows();
+                    }),
+            );
+        }
+        col
+    }
 }
 
 pub fn confirm(title: &str, body: &str, confirm: &str, window: &mut Window, cx: &mut App, f: impl Fn(&mut Window, &mut App) + 'static) {
@@ -535,6 +755,8 @@ struct Tab {
     /// left, so coming back resumes it with its queue (one player is shared)
     playback: Option<(String, Vec<crate::api::types::VideoItem>, Option<usize>, f64)>,
     pinned: bool,
+    group_id: Option<u64>,
+    cached_title: Option<String>,
     player: Option<Entity<Player>>,
     last_active: std::time::Instant,
 }
@@ -542,7 +764,11 @@ struct Tab {
 impl Tab {
     fn new(id: u64, route: Route, pinned: bool) -> Self {
         Self {
-            id, route, pinned,
+            id,
+            route,
+            pinned,
+            group_id: None,
+            cached_title: None,
             page: None,
             history: Vec::new(),
             forward: Vec::new(),
@@ -550,6 +776,20 @@ impl Tab {
             player: None,
             last_active: std::time::Instant::now(),
         }
+    }
+}
+
+impl TabItem for Tab {
+    fn tab_id(&self) -> u64 {
+        self.id
+    }
+
+    fn group_id(&self) -> Option<u64> {
+        self.group_id
+    }
+
+    fn set_group_id(&mut self, group: Option<u64>) {
+        self.group_id = group;
     }
 }
 
@@ -612,7 +852,7 @@ mod tab_playback_smoke {
                     wait_for_playback(&first, first_time + 0.5, cx).await?;
                     cx.update(|cx| anyhow::Result::<()>::Ok({
                         anyhow::ensure!(first != second, "tabs reused one player");
-                        anyhow::ensure!(first.read(cx).mpv().and_then(|p| p.get_string("vid")).as_deref() == Some("no"), "background player still decodes video");
+                        anyhow::ensure!(first.read(cx).mpv().is_some_and(|p| !p.is_render_active()), "background player still renders video");
                         window.update(cx, |_, w, cx| app.update(cx, |app, cx| app.switch_tab(0, w, cx)))?;
                         crate::ui::pip::open(cx);
                         window.update(cx, |_, w, cx| app.update(cx, |app, cx| app.switch_tab(1, w, cx)))?;
@@ -663,22 +903,24 @@ impl Render for Shell {
         let music = super::music::state(cx);
         // music mode's "Now playing" shows the cover art unless the video is asked
         // for (fullscreen always shows the video)
-        let has_slot = match a.route {
-            Route::Watch { .. } => !music.on || music.video || cx.global::<UiState>().fullscreen,
-            Route::Shorts(_) => true,
-            _ => false,
-        };
+        let overlay_open = a.settings_open || a.dialog.is_some();
+        let has_slot = !overlay_open
+            && match a.route {
+                Route::Watch { .. } => !music.on || music.video || cx.global::<UiState>().fullscreen,
+                Route::Shorts(_) => true,
+                _ => false,
+            };
         let clip = cx.global::<crate::ui::slot::PageClip>().0.clone();
         let main = has_slot.then(|| crate::ui::pip::main_surface(&a.main_view, cx).clip(clip.clone()));
         // only over a thumbnail drawn on this page (the slot is cleared when a
         // preview stops or moves to another video)
-        let preview = (crate::player::preview::showing(cx).is_some() && cx.global::<crate::player::preview::PreviewSlot>().0.get().is_some()).then(|| {
+        let preview = (!overlay_open && crate::player::preview::showing(cx).is_some() && cx.global::<crate::player::preview::PreviewSlot>().0.get().is_some()).then(|| {
             let slot = cx.global::<crate::player::preview::PreviewSlot>().0.clone();
             crate::ui::slot::SlotFollower::with_slot(slot, AnyView::from(a.preview_view.clone())).clip(clip.clone())
         });
         // the same conditions as `AppView::render_mini_player` (fullscreen is a watch page)
         // in music mode the bar along the bottom takes the mini player's place
-        let mini = (!has_slot && !music.on && player(cx).read(cx).video.is_some()).then(|| {
+        let mini = (!overlay_open && !has_slot && !music.on && player(cx).read(cx).video.is_some()).then(|| {
             let slot = cx.global::<crate::ui::slot::MiniSlot>().0.clone();
             crate::ui::slot::SlotFollower::with_slot(slot, a.mini_view.clone())
         });
@@ -697,8 +939,10 @@ pub struct AppView {
     /// every tab in order; the entry at `active_tab` is a placeholder for the
     /// tab shown through the fields below
     tabs: Vec<Tab>,
+    groups: Vec<TabGroup>,
     active_tab: usize,
     next_tab_id: u64,
+    next_group_id: u64,
     independent_tab_playback: bool,
     pub route: Route,
     /// space is down: released quickly it toggles pause, held it plays at 2x
@@ -751,6 +995,8 @@ pub struct AppView {
     subs_expanded: bool,
     /// downloads dropdown under the topbar button
     dl_panel: bool,
+    settings_open: bool,
+    settings_view: Option<Entity<settings::SettingsPage>>,
     _subs: Vec<Subscription>,
     had_video: bool,
 }
@@ -758,9 +1004,21 @@ pub struct AppView {
 impl AppView {
     fn observe_current_player(player: &Entity<Player>, cx: &mut Context<Self>) -> Subscription {
         cx.observe(player, |this: &mut Self, player, cx| {
-            let has_video = player.read(cx).video.is_some();
-            if has_video != this.had_video {
-                this.had_video = has_video;
+            let pl = player.read(cx);
+            let has_video = pl.video.is_some();
+            let mut changed = has_video != this.had_video;
+            this.had_video = has_video;
+            if let Route::Watch { id, .. } = &this.route {
+                if let Some(v) = pl.video.as_ref().filter(|v| &v.id == id && !v.title.is_empty()) {
+                    if let Some(tab) = this.tabs.get_mut(this.active_tab) {
+                        if tab.cached_title.as_deref() != Some(v.title.as_str()) {
+                            tab.cached_title = Some(v.title.clone());
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if changed {
                 cx.notify();
             }
         })
@@ -809,10 +1067,10 @@ impl AppView {
         }));
         subs.push(cx.subscribe_in(&dialog_input, window, |this: &mut Self, state, ev: &InputEvent, window, cx| {
             if let InputEvent::PressEnter { .. } = ev {
-                let v = state.read(cx).value().to_string();
+                let v = state.read(cx).value().trim().to_string();
                 if let Some(Dialog::TextPrompt { on_submit, .. }) = this.dialog.take() {
-                    if !v.trim().is_empty() {
-                        on_submit(v.trim().to_string(), window, cx);
+                    if !v.is_empty() {
+                        window.defer(cx, move |window, cx| on_submit(v, window, cx));
                     }
                 }
                 cx.notify();
@@ -880,8 +1138,11 @@ impl AppView {
                 apply_theme(Some(window), cx);
             }
         }));
-        window.on_window_should_close(cx, |window, _| {
+        window.on_window_should_close(cx, |window, cx| {
             crate::save_window_bounds(window);
+            if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+                app.read(cx).save_tab_layout(cx);
+            }
             if hide_to_tray(window) {
                 return false;
             }
@@ -907,11 +1168,77 @@ impl AppView {
         cx.set_global(crate::ui::slot::PageClip::default());
         // a YouTube link passed on the command line opens directly
         let arg_route = route_from_link(&std::env::args().nth(1).unwrap_or_default());
-        let start = arg_route.unwrap_or_else(|| match store::settings_snapshot().start_page.as_str() {
+        let settings_snap = store::settings_snapshot();
+        let default_start = match settings_snap.start_page.as_str() {
             "subscriptions" => Route::Subscriptions,
             "history" => Route::History,
             _ => Route::Home,
-        });
+        };
+        let saved_layout = load_layout();
+        let mut groups: Vec<TabGroup> = saved_layout.as_ref().map(|l| l.groups.clone()).unwrap_or_default();
+        let next_group_id = groups.iter().map(|g| g.id).max().unwrap_or(0) + 1;
+        let mut tabs: Vec<Tab> = Vec::new();
+        let mut next_tab_id = 1u64;
+        let mut active_tab = 0usize;
+
+        if settings_snap.restore_tabs {
+            if let Some(layout) = saved_layout {
+                for st in layout.tabs.into_iter().take(MAX_TABS) {
+                    if matches!(st.route, Route::Settings) {
+                        continue;
+                    }
+                    let mut t = Tab::new(next_tab_id, st.route, st.pinned);
+                    t.group_id = st.group_id.filter(|id| groups.iter().any(|g| g.id == *id));
+                    t.cached_title = st.title;
+                    tabs.push(t);
+                    next_tab_id += 1;
+                }
+                if !tabs.is_empty() {
+                    let saved_active_id = tabs
+                        .get(layout.active_index.min(tabs.len() - 1))
+                        .map(|t| t.id)
+                        .unwrap_or(tabs[0].id);
+                    normalize_group_contiguity(&mut tabs);
+                    active_tab = tabs.iter().position(|t| t.id == saved_active_id).unwrap_or(0);
+                }
+            }
+        }
+        if tabs.is_empty() {
+            let pinned_routes: Vec<Route> = store::kv_get("pinned_tabs")
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            for r in pinned_routes.into_iter().take(MAX_TABS.saturating_sub(1)) {
+                if matches!(r, Route::Settings) {
+                    continue;
+                }
+                tabs.push(Tab::new(next_tab_id, r, true));
+                next_tab_id += 1;
+            }
+            active_tab = tabs.len();
+            tabs.push(Tab::new(next_tab_id, default_start, false));
+            next_tab_id += 1;
+        }
+        if let Some(cli_route) = arg_route {
+            if tabs.len() < MAX_TABS {
+                let at = (active_tab + 1).min(tabs.len());
+                tabs.insert(at, Tab::new(next_tab_id, cli_route, false));
+                next_tab_id += 1;
+                active_tab = at;
+            } else {
+                tabs[active_tab].route = cli_route;
+                tabs[active_tab].cached_title = None;
+            }
+        }
+        let start = tabs[active_tab].route.clone();
+        let independent_tab_playback = settings_snap.independent_tab_playback;
+        if independent_tab_playback {
+            tabs[active_tab].player = Some(p.clone());
+        }
+        if let Some(gid) = tabs[active_tab].group_id {
+            if let Some(g) = groups.iter_mut().find(|g| g.id == gid) {
+                g.collapsed = false;
+            }
+        }
         crate::perf::mark("app shell");
         let page = build_page(&start, window, cx);
         super::history::refresh_current(cx, false);
@@ -947,25 +1274,12 @@ impl AppView {
                 .detach();
             }
         }
-        let pinned_routes: Vec<Route> = store::kv_get("pinned_tabs")
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-        let mut tabs: Vec<Tab> = Vec::new();
-        let independent_tab_playback = store::settings_snapshot().independent_tab_playback;
-        let mut next_tab_id = 1u64;
-        for r in pinned_routes.into_iter().take(MAX_TABS.saturating_sub(1)) {
-            tabs.push(Tab::new(next_tab_id, r, true));
-            next_tab_id += 1;
-        }
-        let active_tab = tabs.len();
-        let mut first = Tab::new(next_tab_id, start.clone(), false);
-        if independent_tab_playback { first.player = Some(p.clone()); }
-        tabs.push(first);
-        next_tab_id += 1;
         Self {
             tabs,
+            groups,
             active_tab,
             next_tab_id,
+            next_group_id,
             independent_tab_playback,
             had_video: false,
             route: start,
@@ -1004,6 +1318,8 @@ impl AppView {
             drawer_open: false,
             subs_expanded: false,
             dl_panel: false,
+            settings_open: false,
+            settings_view: None,
             space_down: false,
             _subs: subs,
         }
@@ -1468,7 +1784,41 @@ impl AppView {
             .into_any_element()
     }
 
+    pub fn open_settings_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.set_global(OpenMenu(None));
+        crate::player::preview::stop(cx);
+        self.drawer_open = false;
+        self.dl_panel = false;
+        if self.settings_view.is_none() {
+            self.settings_view = Some(cx.new(|cx| settings::SettingsPage::new(window, cx)));
+        }
+        self.settings_open = true;
+        cx.notify();
+    }
+
+    pub fn close_settings_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.settings_open {
+            return;
+        }
+        self.settings_open = false;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    pub fn toggle_settings_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open {
+            self.close_settings_overlay(window, cx);
+        } else {
+            self.open_settings_overlay(window, cx);
+        }
+    }
+
     pub fn go(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(route, Route::Settings) {
+            self.open_settings_overlay(window, cx);
+            return;
+        }
+        self.settings_open = false;
         // items without a known channel/video/playlist have nothing to open
         match &route {
             Route::Channel(id) | Route::Playlist(id) | Route::Watch { id, .. } if id.is_empty() => return,
@@ -1504,6 +1854,11 @@ impl AppView {
             self.history.remove(0);
         }
         self.forward.clear();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.route = self.route.clone();
+            tab.cached_title = Some(Self::tab_label(&self.route, cx));
+        }
+        self.save_tab_layout(cx);
         window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
         window.focus(&self.focus, cx);
         cx.notify();
@@ -1512,6 +1867,33 @@ impl AppView {
     // ───── tabs ─────
 
     pub fn new_tab(&mut self, route: Route, switch: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_tab_inner(route, None, true, switch, window, cx);
+    }
+
+    pub fn new_ungrouped_tab(&mut self, route: Route, switch: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_tab_inner(route, None, false, switch, window, cx);
+    }
+
+    pub fn new_tab_with_group(
+        &mut self,
+        route: Route,
+        group_id: Option<u64>,
+        switch: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.new_tab_inner(route, group_id, true, switch, window, cx);
+    }
+
+    fn new_tab_inner(
+        &mut self,
+        route: Route,
+        group_id: Option<u64>,
+        inherit_active_group: bool,
+        switch: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match &route {
             Route::Channel(id) | Route::Playlist(id) | Route::Watch { id, .. } if id.is_empty() => return,
             _ => {}
@@ -1523,12 +1905,37 @@ impl AppView {
         }
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        // right after the current tab, like a browser
-        let at = self.active_tab + 1;
-        self.tabs.insert(at, Tab::new(id, route, false));
-        if switch {
-            self.switch_tab(at, window, cx);
+        let group_id = group_id
+            .filter(|gid| self.groups.iter().any(|g| g.id == *gid))
+            .or_else(|| inherit_active_group.then(|| self.tabs.get(self.active_tab).and_then(|t| t.group_id)).flatten());
+        let mut tab = Tab::new(id, route, false);
+        tab.group_id = group_id;
+        let at = if let Some(gid) = group_id {
+            if let Some(last) = self.tabs.iter().rposition(|t| t.group_id == Some(gid)) {
+                last + 1
+            } else {
+                (self.active_tab + 1).min(self.tabs.len())
+            }
+        } else if !inherit_active_group {
+            self.tabs.len()
         } else {
+            // right after the current tab, like a browser
+            (self.active_tab + 1).min(self.tabs.len())
+        };
+        let active_id = self.tabs[self.active_tab].id;
+        self.tabs.insert(at, tab);
+        normalize_group_contiguity(&mut self.tabs);
+        self.active_tab = self.tabs.iter().position(|t| t.id == active_id).unwrap_or(0);
+        let inserted_idx = self.tabs.iter().position(|t| t.id == id).unwrap_or(at);
+        if switch {
+            if let Some(gid) = group_id {
+                if let Some(g) = self.groups.iter_mut().find(|g| g.id == gid) {
+                    g.collapsed = false;
+                }
+            }
+            self.switch_tab(inserted_idx, window, cx);
+        } else {
+            self.save_tab_layout(cx);
             toast(cx, t("Opened in a new tab"));
             cx.notify();
         }
@@ -1543,8 +1950,10 @@ impl AppView {
         crate::ui::image_cache::on_navigate(cx);
         self.drawer_open = false;
         // park the shown tab
+        let parked_title = self.active_tab_title(cx);
         let cur = &mut self.tabs[self.active_tab];
         cur.route = self.route.clone();
+        cur.cached_title = Some(parked_title);
         cur.page = Some(self.page.clone());
         cur.history = std::mem::take(&mut self.history);
         cur.forward = std::mem::take(&mut self.forward);
@@ -1565,6 +1974,11 @@ impl AppView {
         };
         // and show the other one
         self.active_tab = index;
+        if let Some(gid) = self.tabs[index].group_id {
+            if let Some(g) = self.groups.iter_mut().find(|g| g.id == gid) {
+                g.collapsed = false;
+            }
+        }
         if self.independent_tab_playback {
             self.activate_tab_player(index, cx);
         }
@@ -1606,6 +2020,7 @@ impl AppView {
         if cx.global::<UiState>().fullscreen && !matches!(self.route, Route::Watch { .. } | Route::Shorts(_)) {
             exit_fullscreen(window, cx);
         }
+        self.save_tab_layout(cx);
         window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
         window.focus(&self.focus, cx);
         cx.notify();
@@ -1662,7 +2077,42 @@ impl AppView {
         if index < self.active_tab {
             self.active_tab -= 1;
         }
+        self.save_pinned_tabs();
+        self.save_tab_layout(cx);
         cx.notify();
+    }
+
+    fn close_other_tabs(&mut self, keep_index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if keep_index >= self.tabs.len() {
+            return;
+        }
+        let keep_id = self.tabs[keep_index].id;
+        if self.active_tab != keep_index {
+            self.switch_tab(keep_index, window, cx);
+        }
+        let ids_to_close: Vec<u64> = self
+            .tabs
+            .iter()
+            .filter(|t| t.id != keep_id && !t.pinned)
+            .map(|t| t.id)
+            .collect();
+        for id in ids_to_close {
+            if self.tabs.len() <= 1 {
+                break;
+            }
+            if let Some(idx) = self.tabs.iter().position(|t| t.id == id) {
+                self.close_tab(idx, window, cx);
+            }
+        }
+    }
+
+    fn duplicate_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        let route = if index == self.active_tab { self.route.clone() } else { tab.route.clone() };
+        let group_id = tab.group_id;
+        self.new_tab_with_group(route, group_id, true, window, cx);
     }
 
     fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1681,8 +2131,51 @@ impl AppView {
                 p.video.as_ref().filter(|v| &v.id == id && !v.title.is_empty()).map(|v| v.title.clone()).unwrap_or_else(|| t("Video").into())
             }
             Route::Channel(id) => store::subscriptions().into_iter().find(|s| &s.channel_id == id).map(|s| s.name).unwrap_or_else(|| t("Channel").into()),
+            Route::LocalPlaylist(id) => store::playlists().into_iter().find(|p| p.id == *id).map(|p| if p.protected { t(&p.name).to_string() } else { p.name }).unwrap_or_else(|| t("Playlist").into()),
             r => r.title(),
         }
+    }
+
+    fn active_tab_title(&self, cx: &App) -> String {
+        let fallback = self.tabs.get(self.active_tab).and_then(|t| t.cached_title.clone());
+        match &self.route {
+            Route::Watch { id, .. } => {
+                let p = player(cx).read(cx);
+                p.video
+                    .as_ref()
+                    .filter(|v| &v.id == id && !v.title.is_empty())
+                    .map(|v| v.title.clone())
+                    .or(fallback)
+                    .unwrap_or_else(|| t("Video").into())
+            }
+            Route::Channel(id) => store::subscriptions()
+                .into_iter()
+                .find(|s| &s.channel_id == id)
+                .map(|s| s.name)
+                .or(fallback)
+                .unwrap_or_else(|| t("Channel").into()),
+            _ => Self::tab_label(&self.route, cx),
+        }
+    }
+
+    fn tab_title_at(&self, index: usize, cx: &App) -> String {
+        if index == self.active_tab {
+            return self.active_tab_title(cx);
+        }
+        let tab = &self.tabs[index];
+        if self.independent_tab_playback {
+            if let Some(pl) = &tab.player {
+                if let Route::Watch { id, .. } = &tab.route {
+                    if let Some(v) = pl.read(cx).video.as_ref().filter(|v| &v.id == id && !v.title.is_empty()) {
+                        return v.title.clone();
+                    }
+                }
+            }
+        }
+        if let Some(cached) = tab.cached_title.as_ref().filter(|s| !s.is_empty()) {
+            return cached.clone();
+        }
+        Self::tab_label(&tab.route, cx)
     }
 
     fn tab_icon(route: &Route) -> &'static str {
@@ -1711,158 +2204,718 @@ impl AppView {
         store::kv_set("pinned_tabs", &serde_json::to_string(&pinned).unwrap_or_default());
     }
 
+    fn save_tab_layout(&self, cx: &App) {
+        let tabs = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, tab)| {
+                let route = if i == self.active_tab { self.route.clone() } else { tab.route.clone() };
+                let title = Some(self.tab_title_at(i, cx));
+                SavedTab {
+                    route,
+                    pinned: tab.pinned,
+                    group_id: tab.group_id,
+                    title,
+                }
+            })
+            .collect();
+        save_layout(&SavedTabLayout {
+            groups: self.groups.clone(),
+            tabs,
+            active_index: self.active_tab,
+        });
+    }
+
     fn toggle_pin_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(index) {
             tab.pinned = !tab.pinned;
             self.save_pinned_tabs();
+            self.save_tab_layout(cx);
             cx.notify();
         }
     }
 
-    fn render_tabs(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.tabs.len() < 2 && !store::settings_snapshot().always_show_tab_bar {
+    fn notify_pages(&self, cx: &mut Context<Self>) {
+        let ids: Vec<EntityId> = [self.page.entity_id(), self.mini_view.entity_id()]
+            .into_iter()
+            .chain(self.settings_view.iter().map(|v| v.entity_id()))
+            .chain(self.history.iter().map(|(_, v)| v.entity_id()))
+            .chain(self.forward.iter().map(|(_, v)| v.entity_id()))
+            .collect();
+        for id in ids {
+            App::notify(cx, id);
+        }
+        cx.notify();
+        cx.refresh_windows();
+    }
+
+    fn create_group(&mut self, name: String, color: Option<u32>, tab_index: Option<usize>, cx: &mut Context<Self>) -> Option<u64> {
+        let trimmed = name.trim().to_string();
+        if trimmed.is_empty() {
             return None;
         }
+        let gid = self.next_group_id;
+        self.next_group_id += 1;
+        let color = color.unwrap_or_else(|| next_group_color(&self.groups));
+        self.groups.push(TabGroup {
+            id: gid,
+            name: trimmed,
+            color,
+            collapsed: false,
+        });
+        if let Some(idx) = tab_index {
+            if let Some(tab) = self.tabs.get(idx) {
+                let tab_id = tab.id;
+                let active_id = self.tabs[self.active_tab].id;
+                move_tab_to_group(&mut self.tabs, tab_id, Some(gid));
+                self.active_tab = self.tabs.iter().position(|t| t.id == active_id).unwrap_or(0);
+            }
+        }
+        self.save_tab_layout(cx);
+        self.notify_pages(cx);
+        Some(gid)
+    }
+
+    fn rename_group(&mut self, group_id: u64, name: String, cx: &mut Context<Self>) {
+        let trimmed = name.trim().to_string();
+        if trimmed.is_empty() {
+            return;
+        }
+        if let Some(g) = self.groups.iter_mut().find(|g| g.id == group_id) {
+            g.name = trimmed;
+            self.save_tab_layout(cx);
+            self.notify_pages(cx);
+        }
+    }
+
+    fn recolor_group(&mut self, group_id: u64, color: u32, cx: &mut Context<Self>) {
+        if let Some(g) = self.groups.iter_mut().find(|g| g.id == group_id) {
+            g.color = color;
+            self.save_tab_layout(cx);
+            self.notify_pages(cx);
+        }
+    }
+
+    fn toggle_group_collapsed(&mut self, group_id: u64, cx: &mut Context<Self>) {
+        if let Some(g) = self.groups.iter_mut().find(|g| g.id == group_id) {
+            g.collapsed = !g.collapsed;
+            self.save_tab_layout(cx);
+            self.notify_pages(cx);
+        }
+    }
+
+    fn move_tab_to_group_idx(&mut self, index: usize, group_id: Option<u64>, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        let tab_id = tab.id;
+        let active_id = self.tabs[self.active_tab].id;
+        if move_tab_to_group(&mut self.tabs, tab_id, group_id) {
+            self.active_tab = self.tabs.iter().position(|t| t.id == active_id).unwrap_or(0);
+            if tab_id == active_id {
+                if let Some(gid) = group_id {
+                    if let Some(g) = self.groups.iter_mut().find(|g| g.id == gid) {
+                        g.collapsed = false;
+                    }
+                }
+            }
+            self.save_tab_layout(cx);
+            self.notify_pages(cx);
+        }
+    }
+
+    fn delete_group(&mut self, group_id: u64, close_tabs: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if close_tabs {
+            let ids: Vec<u64> = self
+                .tabs
+                .iter()
+                .filter(|t| t.group_id == Some(group_id) && !t.pinned)
+                .map(|t| t.id)
+                .collect();
+            for id in ids {
+                if self.tabs.len() <= 1 {
+                    break;
+                }
+                if let Some(idx) = self.tabs.iter().position(|t| t.id == id) {
+                    self.close_tab(idx, window, cx);
+                }
+            }
+        }
+        for tab in &mut self.tabs {
+            if tab.group_id == Some(group_id) {
+                tab.group_id = None;
+            }
+        }
+        self.groups.retain(|g| g.id != group_id);
+        self.save_tab_layout(cx);
+        self.notify_pages(cx);
+    }
+
+    fn reset_tabs_and_groups(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let active_id = self.tabs[self.active_tab].id;
+        let ids: Vec<u64> = self.tabs.iter().filter(|t| t.id != active_id && !t.pinned).map(|t| t.id).collect();
+        for id in ids {
+            if self.tabs.len() <= 1 {
+                break;
+            }
+            if let Some(idx) = self.tabs.iter().position(|t| t.id == id) {
+                self.close_tab(idx, window, cx);
+            }
+        }
+        for tab in &mut self.tabs {
+            tab.group_id = None;
+        }
+        self.groups.clear();
+        self.save_tab_layout(cx);
+        self.notify_pages(cx);
+    }
+
+    fn handle_tab_drop_on_tab(&mut self, dragged_id: u64, target_id: u64, cx: &mut Context<Self>) {
+        let active_id = self.tabs[self.active_tab].id;
+        if move_tab_onto_tab(&mut self.tabs, dragged_id, target_id) {
+            self.active_tab = self.tabs.iter().position(|t| t.id == active_id).unwrap_or(0);
+            if let Some(gid) = self.tabs[self.active_tab].group_id {
+                if let Some(g) = self.groups.iter_mut().find(|g| g.id == gid) {
+                    g.collapsed = false;
+                }
+            }
+            self.save_tab_layout(cx);
+            self.notify_pages(cx);
+        }
+    }
+
+    fn handle_tab_drop_on_group(&mut self, dragged_id: u64, group_id: u64, cx: &mut Context<Self>) {
+        let active_id = self.tabs[self.active_tab].id;
+        if move_tab_to_group(&mut self.tabs, dragged_id, Some(group_id)) {
+            self.active_tab = self.tabs.iter().position(|t| t.id == active_id).unwrap_or(0);
+            if dragged_id == active_id {
+                if let Some(g) = self.groups.iter_mut().find(|g| g.id == group_id) {
+                    g.collapsed = false;
+                }
+            }
+            self.save_tab_layout(cx);
+            self.notify_pages(cx);
+        }
+    }
+
+    fn handle_tab_drop_ungrouped(&mut self, dragged_id: u64, cx: &mut Context<Self>) {
+        let active_id = self.tabs[self.active_tab].id;
+        if move_tab_to_ungrouped_end(&mut self.tabs, dragged_id) {
+            self.active_tab = self.tabs.iter().position(|t| t.id == active_id).unwrap_or(0);
+            self.save_tab_layout(cx);
+            self.notify_pages(cx);
+        }
+    }
+
+    fn render_group_pill(&mut self, group: &TabGroup, count: usize, has_active: bool, vertical: bool, cx: &mut Context<Self>) -> AnyElement {
         let p = pal(cx);
-        let mut strip = div()
-            .id("tabs")
+        let gid = group.id;
+        let gcolor: Hsla = rgb(group.color).into();
+        let pill_bg = gcolor.opacity(if p.dark {
+            if group.collapsed { 0.28 } else { 0.20 }
+        } else if group.collapsed {
+            0.22
+        } else {
+            0.16
+        });
+        let hover_bg = gcolor.opacity(if p.dark { 0.34 } else { 0.26 });
+        let text_color = Hsla {
+            l: if p.dark { gcolor.l.max(0.70) } else { gcolor.l.min(0.40) },
+            ..gcolor
+        };
+        let group_clone = group.clone();
+        let has_other_tabs = self.tabs.iter().any(|t| t.group_id != Some(gid) || t.pinned);
+        let can_close_group = self.tabs.len() > 1 && has_other_tabs;
+
+        let mut pill = div()
+            .id(("tab-group", gid))
             .flex()
             .flex_none()
             .items_center()
-            .gap_1()
-            .h(px(38.))
-            .px_3()
-            .bg(p.bg)
-            .border_b_1()
-            .border_color(p.border)
-            .overflow_x_scroll();
-        for i in 0..self.tabs.len() {
-            let active = i == self.active_tab;
-            let pinned = self.tabs[i].pinned;
-            let route = if active { self.route.clone() } else { self.tabs[i].route.clone() };
-            let id = self.tabs[i].id;
-            let label = Self::tab_label(&route, cx);
-            strip = strip.child(
+            .gap_1p5()
+            .cursor_pointer()
+            .rounded_md()
+            .bg(pill_bg)
+            .hover(move |d| d.bg(hover_bg))
+            .drag_over::<DragTab>(move |style, _, _, _| style.border_2().border_color(gcolor).bg(gcolor.opacity(0.32)))
+            .on_drop(cx.listener(move |this, drag: &DragTab, _, cx| {
+                this.handle_tab_drop_on_group(drag.id, gid, cx);
+            }))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_group_collapsed(gid, cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |_, ev: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    let g = group_clone.clone();
+                    let view = cx.new(|_| TabGroupMenuView {
+                        group: g,
+                        can_close_group,
+                    });
+                    cx.set_global(OpenMenu(Some((ev.position, MenuContent::View(view.into())))));
+                    let _ = window;
+                    cx.refresh_windows();
+                }),
+            );
+
+        pill = if vertical {
+            pill.w_full().h(px(28.)).px_2p5()
+        } else {
+            let max_w = if self.groups.len() > 4 { px(112.) } else { px(150.) };
+            pill.h(px(24.)).px_2p5().max_w(max_w)
+        };
+
+        pill = pill.child(
+            div()
+                .when(vertical, |d| d.flex_1().min_w_0())
+                .truncate()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(text_color)
+                .child(group.name.clone()),
+        );
+
+        if group.collapsed || count == 0 {
+            pill = pill.child(
                 div()
-                    .id(("tab", id))
+                    .flex_none()
+                    .px_1p5()
+                    .rounded_full()
+                    .bg(if has_active { gcolor } else { gcolor.opacity(0.22) })
+                    .text_size(px(10.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if has_active { white() } else { text_color })
+                    .child(count.to_string()),
+            );
+        }
+
+        if vertical {
+            pill = pill.child(
+                div()
+                    .id(("tab-group-add", gid))
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap_2()
-                    .h(px(30.))
-                    .pl_3()
-                    .pr_1()
-                    .w(if pinned { px(160.) } else { px(200.) })
-                    .rounded_lg()
-                    .cursor_pointer()
-                    .when(active, |d| d.bg(p.surface2))
-                    .when(!active, |d| d.hover(|d| d.bg(p.hover)))
+                    .justify_center()
+                    .size(px(20.))
+                    .rounded_md()
+                    .hover(move |d| d.bg(p.hover))
+                    .child(icon("plus").size_3p5().text_color(text_color))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        if let Some(i) = this.tabs.iter().position(|t| t.id == id) {
-                            this.switch_tab(i, window, cx);
-                        }
-                    }))
-                    // middle click closes (unless pinned), like a browser tab
-                    .on_mouse_down(
-                        MouseButton::Middle,
-                        cx.listener(move |this, _, window, cx| {
-                            if let Some(i) = this.tabs.iter().position(|t| t.id == id) {
-                                this.close_tab(i, window, cx);
-                            }
-                        }),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                            cx.stop_propagation();
-                            let can_close = !pinned && this.tabs.len() > 1;
-                            let mut items = vec![MenuItem::new(
-                                "pin",
-                                t(if pinned { "Unpin tab" } else { "Pin tab" }),
-                                move |_, cx| {
-                                    if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
-                                        app.update(cx, |a, cx| {
-                                            if let Some(idx) = a.tabs.iter().position(|t| t.id == id) {
-                                                a.toggle_pin_tab(idx, cx);
-                                            }
-                                        });
-                                    }
-                                },
-                            )];
-                            if can_close {
-                                items.push(MenuItem::new("x", t("Close tab"), move |window, cx| {
-                                    if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
-                                        app.update(cx, |a, cx| {
-                                            if let Some(idx) = a.tabs.iter().position(|t| t.id == id) {
-                                                a.close_tab(idx, window, cx);
-                                            }
-                                        });
-                                    }
-                                }));
-                            }
-                            open_menu(ev.position, items, window, cx);
-                        }),
-                    )
-                    .child(icon(Self::tab_icon(&route)).size_4().text_color(if active { p.accent } else { p.text2 }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_sm()
-                            .text_color(if active { p.text } else { p.text2 })
-                            .child(label),
-                    )
-                    .when(pinned, |d| {
-                        d.child(
-                            div()
-                                .flex()
-                                .flex_none()
-                                .items_center()
-                                .justify_center()
-                                .size(px(22.))
-                                .child(icon("pin").size_3p5().text_color(p.accent)),
-                        )
-                    })
-                    .when(!pinned, |d| {
-                        d.child(
-                            div()
-                                .id(("tab-close", id))
-                                .flex()
-                                .flex_none()
-                                .items_center()
-                                .justify_center()
-                                .size(px(22.))
-                                .rounded_md()
-                                .hover(|d| d.bg(p.hover))
-                                .child(icon("x").size_3p5().text_color(p.text2))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    if let Some(i) = this.tabs.iter().position(|t| t.id == id) {
-                                        this.close_tab(i, window, cx);
-                                    }
-                                })),
-                        )
-                    }),
+                        cx.stop_propagation();
+                        this.new_tab_with_group(Route::Home, Some(gid), true, window, cx);
+                    })),
             );
         }
-        strip = strip.child(
-            div()
-                .id("tab-new")
-                .flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .size(px(30.))
-                .rounded_lg()
-                .cursor_pointer()
-                .hover(|d| d.bg(p.hover))
-                .child(icon("plus").size_4().text_color(p.text2))
-                .on_click(cx.listener(|this, _, window, cx| this.new_tab(Route::Home, true, window, cx))),
-        );
-        Some(strip.into_any_element())
+
+        pill.into_any_element()
+    }
+
+    fn render_tab_tile(&mut self, i: usize, vertical: bool, horiz_width: f32, cx: &mut Context<Self>) -> AnyElement {
+        let p = pal(cx);
+        let active = i == self.active_tab;
+        let pinned = self.tabs[i].pinned;
+        let compact = !vertical && horiz_width < 108.0 && !active;
+        let group_id = self.tabs[i].group_id;
+        let group_color = group_id.and_then(|gid| self.groups.iter().find(|g| g.id == gid).map(|g| g.color));
+        let route = if active { self.route.clone() } else { self.tabs[i].route.clone() };
+        let id = self.tabs[i].id;
+        let label = self.tab_title_at(i, cx);
+        let mut is_playing_bg = false;
+        if self.independent_tab_playback && !active {
+            if let Some(pl) = &self.tabs[i].player {
+                let st = pl.read(cx);
+                is_playing_bg = st.video.is_some() && !st.paused;
+            }
+        }
+        let ic = if is_playing_bg { "volume-2" } else { Self::tab_icon(&route) };
+        let drag_payload = DragTab {
+            id,
+            index: i,
+            label: label.clone(),
+            icon: ic,
+            group_color,
+        };
+        let accent_color = p.accent;
+        let groups_snapshot = self.groups.clone();
+        let active_bg = if p.dark { p.surface2 } else { p.bg };
+        let active_border = if p.dark { hsla(0., 0., 1., 0.14) } else { rgb(0xd0d0d0).into() };
+
+        let mut tile = div()
+            .id(("tab", id))
+            .relative()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .rounded_lg()
+            .cursor_pointer()
+            .when(active, |d| d.bg(active_bg).border_1().border_color(active_border))
+            .when(!active, |d| d.hover(|d| d.bg(p.hover)))
+            .on_drag(drag_payload, |drag, _, _, cx| cx.new(|_| DragTabPreview { drag: drag.clone() }))
+            .drag_over::<DragTab>(move |style, drag, _, _| {
+                if drag.id == id {
+                    return style;
+                }
+                let style = style.bg(accent_color.opacity(0.14)).border_color(accent_color);
+                if vertical {
+                    if drag.index < i { style.border_b_2() } else { style.border_t_2() }
+                } else if drag.index < i {
+                    style.border_r_2()
+                } else {
+                    style.border_l_2()
+                }
+            })
+            .on_drop(cx.listener(move |this, drag: &DragTab, _, cx| {
+                this.handle_tab_drop_on_tab(drag.id, id, cx);
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if let Some(idx) = this.tabs.iter().position(|t| t.id == id) {
+                    this.switch_tab(idx, window, cx);
+                }
+            }))
+            // middle click closes (unless pinned), like a browser tab
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, _, window, cx| {
+                    if let Some(idx) = this.tabs.iter().position(|t| t.id == id) {
+                        this.close_tab(idx, window, cx);
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    let can_close = !pinned && this.tabs.len() > 1;
+                    let has_other_closable = this.tabs.iter().any(|t| t.id != id && !t.pinned);
+                    let mut items = vec![
+                        MenuItem::new("pin", t(if pinned { "Unpin tab" } else { "Pin tab" }), move |_, cx| {
+                            if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+                                app.update(cx, |a, cx| {
+                                    if let Some(idx) = a.tabs.iter().position(|t| t.id == id) {
+                                        a.toggle_pin_tab(idx, cx);
+                                    }
+                                });
+                            }
+                        }),
+                        MenuItem::new("copy", t("Duplicate tab"), move |window, cx| {
+                            if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+                                app.update(cx, |a, cx| {
+                                    if let Some(idx) = a.tabs.iter().position(|t| t.id == id) {
+                                        a.duplicate_tab(idx, window, cx);
+                                    }
+                                });
+                            }
+                        }),
+                        MenuItem::new("folder-plus", t("Add tab to new group"), move |window, cx| {
+                            prompt_text("New tab group", "Group name", window, cx, move |name, _, cx| {
+                                if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+                                    app.update(cx, |a, cx| {
+                                        let idx = a.tabs.iter().position(|t| t.id == id);
+                                        a.create_group(name, None, idx, cx);
+                                    });
+                                }
+                            });
+                        }),
+                    ];
+                    for g in &groups_snapshot {
+                        if group_id == Some(g.id) {
+                            continue;
+                        }
+                        let gid = g.id;
+                        let gname = g.name.clone();
+                        items.push(MenuItem::new(
+                            "folder",
+                            tf!("Move to “{0}”", gname),
+                            move |_, cx| {
+                                if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+                                    app.update(cx, |a, cx| {
+                                        if let Some(idx) = a.tabs.iter().position(|t| t.id == id) {
+                                            a.move_tab_to_group_idx(idx, Some(gid), cx);
+                                        }
+                                    });
+                                }
+                            },
+                        ));
+                    }
+                    if group_id.is_some() {
+                        items.push(MenuItem::new("ungroup", t("Remove from group"), move |_, cx| {
+                            if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+                                app.update(cx, |a, cx| {
+                                    if let Some(idx) = a.tabs.iter().position(|t| t.id == id) {
+                                        a.move_tab_to_group_idx(idx, None, cx);
+                                    }
+                                });
+                            }
+                        }));
+                    }
+                    if can_close {
+                        items.push(MenuItem::new("x", t("Close tab"), move |window, cx| {
+                            if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+                                app.update(cx, |a, cx| {
+                                    if let Some(idx) = a.tabs.iter().position(|t| t.id == id) {
+                                        a.close_tab(idx, window, cx);
+                                    }
+                                });
+                            }
+                        }));
+                    }
+                    if has_other_closable {
+                        items.push(MenuItem::new("trash-2", t("Close other tabs"), move |window, cx| {
+                            if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+                                app.update(cx, |a, cx| {
+                                    if let Some(idx) = a.tabs.iter().position(|t| t.id == id) {
+                                        a.close_other_tabs(idx, window, cx);
+                                    }
+                                });
+                            }
+                        }));
+                    }
+                    open_menu(ev.position, items, window, cx);
+                }),
+            )
+            .child(icon(ic).size_4().text_color(if active || is_playing_bg { p.accent } else { p.text2 }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_sm()
+                    .when(active, |d| d.font_weight(FontWeight::SEMIBOLD))
+                    .text_color(if active { p.text } else { p.text2 })
+                    .child(label),
+            )
+            .when(pinned, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .size(px(22.))
+                        .child(icon("pin").size_3p5().text_color(p.accent)),
+                )
+            })
+            .when(!pinned && !compact, |d| {
+                d.child(
+                    div()
+                        .id(("tab-close", id))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .size(px(22.))
+                        .rounded_md()
+                        .hover(|d| d.bg(p.hover))
+                        .child(icon("x").size_3p5().text_color(p.text2))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            if let Some(idx) = this.tabs.iter().position(|t| t.id == id) {
+                                this.close_tab(idx, window, cx);
+                            }
+                        })),
+                )
+            });
+
+        if vertical {
+            tile = tile.w_full().h(px(34.)).pl_2p5().pr_1();
+        } else {
+            tile = tile
+                .h(px(28.))
+                .pl(px(if compact { 8. } else { 10. }))
+                .pr(px(if compact { 6. } else { 4. }))
+                .w(px(horiz_width));
+        }
+
+        tile.into_any_element()
+    }
+
+    fn render_tabs(&mut self, pos: TabBarPosition, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let s = store::settings_snapshot();
+        if self.tabs.len() < 2 && self.groups.is_empty() && !s.always_show_tab_bar {
+            return None;
+        }
+        let p = pal(cx);
+        let vertical = pos.is_vertical();
+        let mut outer = div()
+            .id("tabs")
+            .flex()
+            .flex_none()
+            .gap_1()
+            .bg(if p.dark { p.bg } else { p.surface })
+            .border_color(p.border);
+        outer = match pos {
+            TabBarPosition::Top => outer.items_center().w_full().h(px(38.)).px_3().border_b_1(),
+            TabBarPosition::Bottom => outer.items_center().w_full().h(px(38.)).px_3().border_t_1(),
+            TabBarPosition::Left => outer.flex_col().w(px(224.)).h_full().p_2().border_r_1(),
+            TabBarPosition::Right => outer.flex_col().w(px(224.)).h_full().p_2().border_l_1(),
+        };
+
+        let visible_tabs: Vec<&Tab> = self
+            .tabs
+            .iter()
+            .filter(|t| {
+                t.group_id
+                    .and_then(|gid| self.groups.iter().find(|g| g.id == gid))
+                    .is_none_or(|g| !g.collapsed)
+            })
+            .collect();
+        let visible_count = visible_tabs.len().max(1);
+        let pinned_visible = visible_tabs.iter().filter(|t| t.pinned).count();
+        let regular_visible = visible_count.saturating_sub(pinned_visible);
+        let vp_w: f32 = cx.global::<UiState>().viewport.width.into();
+        let (tab_w, pinned_w) = if vp_w <= 10. {
+            (190.0_f32, 140.0_f32)
+        } else {
+            let group_pills_est = self.groups.len() as f32 * if self.groups.len() > 4 { 86. } else { 104. };
+            let avail_w = (vp_w - 24. - 76. - group_pills_est).max(180.);
+            if regular_visible == 0 {
+                (190.0_f32, (avail_w / visible_count as f32).clamp(52., 140.))
+            } else {
+                let p_w = (avail_w / visible_count as f32).clamp(52., 136.);
+                let rem_w = (avail_w - pinned_visible as f32 * p_w).max(regular_visible as f32 * 64.);
+                let r_w = (rem_w / regular_visible as f32).clamp(68., 190.);
+                (r_w, p_w)
+            }
+        };
+
+        let mut scroll_area = div()
+            .id("tabs-scroll")
+            .flex()
+            .flex_shrink(1.)
+            .gap_1();
+        scroll_area = if vertical {
+            scroll_area.flex_col().w_full().min_h_0().overflow_y_scroll()
+        } else {
+            scroll_area.items_center().min_w_0().overflow_x_scroll()
+        };
+
+        let mut rendered_groups: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let groups_snapshot = self.groups.clone();
+        let tab_len = self.tabs.len();
+
+        let render_group_block = |pill: AnyElement, tiles: Vec<AnyElement>, color: u32, vertical: bool| -> AnyElement {
+            let gcolor: Hsla = rgb(color).into();
+            if vertical {
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .w_full()
+                    .pl_2()
+                    .child(pill)
+                    .children(tiles)
+                    .child(div().absolute().left_0().top_1().bottom_1().w(px(2.)).rounded_full().bg(gcolor))
+                    .into_any_element()
+            } else {
+                div()
+                    .relative()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_1()
+                    .pt(px(3.))
+                    .pb(px(3.))
+                    .child(pill)
+                    .children(tiles)
+                    .child(div().absolute().left_0().right_0().bottom_0().h(px(2.)).rounded_full().bg(gcolor))
+                    .into_any_element()
+            }
+        };
+
+        let mut i = 0;
+        while i < tab_len {
+            if let Some(gid) = self.tabs[i].group_id {
+                if let Some(group) = groups_snapshot.iter().find(|g| g.id == gid).cloned() {
+                    let mut end = i + 1;
+                    while end < tab_len && self.tabs[end].group_id == Some(gid) {
+                        end += 1;
+                    }
+                    let count = end - i;
+                    let has_active = (i..end).contains(&self.active_tab);
+                    rendered_groups.insert(gid);
+                    let pill = self.render_group_pill(&group, count, has_active, vertical, cx);
+                    let mut tiles = Vec::new();
+                    if !group.collapsed {
+                        for idx in i..end {
+                            let w = if self.tabs[idx].pinned { pinned_w } else { tab_w };
+                            tiles.push(self.render_tab_tile(idx, vertical, w, cx));
+                        }
+                    }
+                    scroll_area = scroll_area.child(render_group_block(pill, tiles, group.color, vertical));
+                    i = end;
+                    continue;
+                }
+            }
+            let w = if self.tabs[i].pinned { pinned_w } else { tab_w };
+            scroll_area = scroll_area.child(self.render_tab_tile(i, vertical, w, cx));
+            i += 1;
+        }
+
+        // Empty groups stay visible as drop targets so users can create & organize freely.
+        for group in &groups_snapshot {
+            if !rendered_groups.contains(&group.id) {
+                let pill = self.render_group_pill(group, 0, false, vertical, cx);
+                scroll_area = scroll_area.child(render_group_block(pill, Vec::new(), group.color, vertical));
+            }
+        }
+
+        let new_tab_btn = div()
+            .id("tab-new")
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .when(vertical, |d| d.flex_1().h(px(30.)).gap_1p5().px_2().child(icon("plus").size_4().text_color(p.text2)).child(div().text_xs().text_color(p.text2).truncate().child(t("New tab"))))
+            .when(!vertical, |d| d.size(px(30.)).child(icon("plus").size_4().text_color(p.text2)))
+            .rounded_lg()
+            .cursor_pointer()
+            .hover(|d| d.bg(p.hover))
+            .on_click(cx.listener(|this, _, window, cx| this.new_ungrouped_tab(Route::Home, true, window, cx)));
+
+        let new_group_btn = div()
+            .id("tab-new-group")
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .when(vertical, |d| d.flex_1().h(px(30.)).gap_1p5().px_2().child(icon("folder-plus").size_4().text_color(p.text2)).child(div().text_xs().text_color(p.text2).truncate().child(t("New group"))))
+            .when(!vertical, |d| d.size(px(30.)).child(icon("folder-plus").size_4().text_color(p.text2)))
+            .rounded_lg()
+            .cursor_pointer()
+            .hover(|d| d.bg(p.hover))
+            .on_click(|_, window, cx| {
+                prompt_text("New tab group", "Group name", window, cx, |name, _, cx| {
+                    create_tab_group(name, None, cx);
+                });
+            });
+
+        let actions = if vertical {
+            div().flex().flex_none().items_center().gap_1().pt_1().child(new_tab_btn).child(new_group_btn)
+        } else {
+            div().flex().flex_none().items_center().gap_1().child(new_tab_btn).child(new_group_btn)
+        };
+
+        // Trailing empty space accepts drops to move a tab out of any group to the end.
+        let drop_tail = div()
+            .id("tab-strip-drop-tail")
+            .flex_1()
+            .when(vertical, |d| d.w_full().min_h(px(28.)))
+            .when(!vertical, |d| d.h_full().min_w(px(16.)))
+            .rounded_lg()
+            .drag_over::<DragTab>(move |style, _, _, _| style.bg(p.accent.opacity(0.10)).border_1().border_color(p.accent.opacity(0.5)))
+            .on_drop(cx.listener(|this, drag: &DragTab, _, cx| {
+                this.handle_tab_drop_ungrouped(drag.id, cx);
+            }));
+
+        outer = outer.child(scroll_area).child(actions).child(drop_tail);
+        Some(outer.into_any_element())
     }
 
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1881,6 +2934,11 @@ impl AppView {
                     self.page = build_page(&self.route.clone(), window, cx);
                 }
             }
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.route = self.route.clone();
+                tab.cached_title = Some(Self::tab_label(&self.route, cx));
+            }
+            self.save_tab_layout(cx);
             window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
             cx.notify();
         }
@@ -1895,6 +2953,11 @@ impl AppView {
             if cx.global::<UiState>().fullscreen && !matches!(self.route, Route::Watch { .. } | Route::Shorts(_)) {
                 toggle_fullscreen(window, cx);
             }
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.route = self.route.clone();
+                tab.cached_title = Some(Self::tab_label(&self.route, cx));
+            }
+            self.save_tab_layout(cx);
             window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
             cx.notify();
         }
@@ -2272,6 +3335,7 @@ impl AppView {
         if ev.keystroke.key == "escape"
             && cx.global::<UiState>().fullscreen
             && !self.dl_panel
+            && !self.settings_open
             && self.dialog.is_none()
             && cx.global::<OpenMenu>().0.is_none()
         {
@@ -2299,6 +3363,9 @@ impl AppView {
         let dialog_focused = self.dialog_input.read(cx).focus_handle(cx).is_focused(window);
         let k = shortcut_key(&ev.keystroke.key);
         let m = &ev.keystroke.modifiers;
+        if self.settings_open && k != "escape" {
+            return;
+        }
         if k == "f5" || (m.control && k == "r" && !search_focused && !dialog_focused) {
             self.refresh(window, cx);
             return;
@@ -2307,7 +3374,7 @@ impl AppView {
         if m.control && !m.alt {
             match k {
                 "t" if !m.shift => {
-                    self.new_tab(Route::Home, true, window, cx);
+                    self.new_ungrouped_tab(Route::Home, true, window, cx);
                     return;
                 }
                 "w" if !m.shift && self.tabs.len() > 1 => {
@@ -2346,6 +3413,11 @@ impl AppView {
             if cx.global::<OpenMenu>().0.is_some() {
                 cx.set_global(OpenMenu(None));
                 cx.notify();
+                return;
+            }
+            if self.settings_open {
+                self.close_settings_overlay(window, cx);
+                cx.stop_propagation();
                 return;
             }
             // the player's gear menu, like youtube.com: Esc closes it and stays on the video
@@ -2722,7 +3794,11 @@ impl AppView {
                     .items_center()
                     .gap_1()
                     .child(self.render_dl_button(cx))
-                    .child(icon_button("settings", "settings", cx).on_click(cx.listener(|this, _, window, cx| this.go(Route::Settings, window, cx))))
+                    .child(
+                        icon_button("settings", "settings", cx)
+                            .when(self.settings_open, |b| b.bg(pal(cx).hover))
+                            .on_click(cx.listener(|this, _, window, cx| this.toggle_settings_overlay(window, cx))),
+                    )
                     .child(self.account_button(cx))
                     .child(drag_gap("drag-c").w_3())
                     .child(window_controls(maximized, cx)),
@@ -3014,8 +4090,85 @@ impl AppView {
         }
         col = col
             .child(sep())
-            .child(entry("s-set", "settings", "Settings", Route::Settings, route == Route::Settings, cx));
+            .child(entry("s-set", "settings", "Settings", Route::Settings, self.settings_open, cx));
         col.into_any_element()
+    }
+
+    fn render_settings_overlay(&mut self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.settings_open {
+            return None;
+        }
+        let view = self.settings_view.clone()?;
+        let p = pal(cx);
+        let vp = window.viewport_size();
+        let modal_w = (vp.width - px(48.)).clamp(px(360.), px(980.));
+        let modal_h = (vp.height - px(56.)).clamp(px(320.), px(760.));
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_5()
+            .py_3()
+            .border_b_1()
+            .border_color(p.border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(icon("settings").size_4().text_color(p.text2))
+                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(t("Settings"))),
+            )
+            .child(
+                div()
+                    .id("settings-overlay-close")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w_7()
+                    .h_7()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(p.hover))
+                    .child(icon("x").size_4().text_color(p.text2))
+                    .on_click(cx.listener(|this, _, window, cx| this.close_settings_overlay(window, cx))),
+            );
+        Some(
+            deferred(
+                div()
+                    .id("settings-backdrop")
+                    .occlude()
+                    .absolute()
+                    .inset_0()
+                    .bg(gpui::rgba(0x00000088))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                        this.close_settings_overlay(window, cx);
+                    }))
+                    .child(
+                        div()
+                            .id("settings-modal")
+                            .occlude()
+                            .w(modal_w)
+                            .h(modal_h)
+                            .rounded_xl()
+                            .bg(p.bg)
+                            .border_1()
+                            .border_color(p.border)
+                            .shadow_xl()
+                            .overflow_hidden()
+                            .flex()
+                            .flex_col()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(header)
+                            .child(div().flex_1().min_h_0().w_full().overflow_hidden().child(view)),
+                    ),
+            )
+            .with_priority(2)
+            .into_any_element(),
+        )
     }
 
     /// The sidebar as a slide-over on the watch page.
@@ -3599,7 +4752,7 @@ impl AppView {
                     )
                     .into_any_element()
             }
-            Dialog::TextPrompt { title, .. } => div()
+            Dialog::TextPrompt { title, submit_label, .. } => div()
                 .flex()
                 .flex_col()
                 .gap_4()
@@ -3610,11 +4763,11 @@ impl AppView {
                         this.dialog = None;
                         cx.notify();
                     }))).child(
-                        pill("dlg-ok", None, "Create", cx).bg(p.link).text_color(white()).on_click(cx.listener(|this, _, window, cx| {
-                            let v = this.dialog_input.read(cx).value().to_string();
+                        pill("dlg-ok", None, *submit_label, cx).bg(p.link).text_color(white()).on_click(cx.listener(|this, _, window, cx| {
+                            let v = this.dialog_input.read(cx).value().trim().to_string();
                             if let Some(Dialog::TextPrompt { on_submit, .. }) = this.dialog.take() {
-                                if !v.trim().is_empty() {
-                                    on_submit(v.trim().to_string(), window, cx);
+                                if !v.is_empty() {
+                                    window.defer(cx, move |window, cx| on_submit(v, window, cx));
                                 }
                             }
                             cx.notify();
@@ -3636,7 +4789,7 @@ impl AppView {
                     }))).child(
                         pill("dlg-ok", None, confirm.clone(), cx).bg(rgb(0xcc0000)).text_color(white()).on_click(cx.listener(|this, _, window, cx| {
                             if let Some(Dialog::Confirm { on_confirm, .. }) = this.dialog.take() {
-                                on_confirm(window, cx);
+                                window.defer(cx, move |window, cx| on_confirm(window, cx));
                             }
                             cx.notify();
                         })),
@@ -3820,7 +4973,20 @@ impl Render for AppView {
             .relative()
             .overflow_hidden()
             // the players drawn over this area (by `Shell`) are clipped to it
-            .child(canvas(move |b, _, _| clip.set(Some(b)), |_, _, _, _| {}).absolute().size_full())
+            .child(
+                canvas(
+                    move |b, _, cx| {
+                        clip.set(Some(b));
+                        if cx.global::<UiState>().page_size != b.size {
+                            cx.global_mut::<UiState>().page_size = b.size;
+                            cx.notify(page_id);
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
             // Measure inside the page's px_6 gutters before the cached page lays out its cards.
             .child(
                 canvas(
@@ -3859,18 +5025,29 @@ impl Render for AppView {
             } else {
                 Some(self.render_sidebar(cx))
             };
-            root = root.child(self.render_topbar(window, cx)).children(self.render_tabs(cx)).child(
+            let tab_pos = TabBarPosition::parse(&store::settings_snapshot().tab_bar_position);
+            let tab_bar = self.render_tabs(tab_pos, cx);
+            let (top_tabs, bottom_tabs, left_tabs, right_tabs) = match tab_pos {
+                TabBarPosition::Top => (tab_bar, None, None, None),
+                TabBarPosition::Bottom => (None, tab_bar, None, None),
+                TabBarPosition::Left => (None, None, tab_bar, None),
+                TabBarPosition::Right => (None, None, None, tab_bar),
+            };
+            root = root.child(self.render_topbar(window, cx)).children(top_tabs).child(
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
+                    .children(left_tabs)
                     .children(sidebar)
-                    .child(page_area.flex_1().min_w_0().h_full()),
+                    .child(page_area.flex_1().min_w_0().h_full())
+                    .children(right_tabs),
             );
             // Shorts keep their own player
             if super::music::on(cx) && !is_shorts {
                 root = root.child(self.music_bar.clone());
             }
+            root = root.children(bottom_tabs);
             {
                 // a smaller window keeps the mini player on screen
                 let vp = window.viewport_size();
@@ -3881,7 +5058,11 @@ impl Render for AppView {
             root = root.children(self.render_drawer(cx).map(deferred));
         }
         root = root.children(self.render_dl_panel(cx));
-        root = root.children(self.render_menu(cx)).children(self.render_dialog(cx)).child(deferred(self.render_toasts(cx)).with_priority(5));
+        root = root
+            .children(self.render_settings_overlay(window, cx))
+            .children(self.render_menu(cx))
+            .children(self.render_dialog(cx))
+            .child(deferred(self.render_toasts(cx)).with_priority(5));
         root
     }
 }
@@ -4104,6 +5285,7 @@ pub fn refresh_all_pages(cx: &mut App) {
     let ids: Vec<EntityId> = {
         let a = app.read(cx);
         [a.page.entity_id(), a.mini_view.entity_id()].into_iter()
+            .chain(a.settings_view.iter().map(|v| v.entity_id()))
             .chain(a.history.iter().map(|(_, v)| v.entity_id()))
             .chain(a.forward.iter().map(|(_, v)| v.entity_id()))
             .collect()

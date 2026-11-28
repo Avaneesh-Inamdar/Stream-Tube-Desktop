@@ -157,6 +157,10 @@ pub struct Settings {
     pub eq_preset: String,
     /// keep the tab bar visible even when only one tab is open
     pub always_show_tab_bar: bool,
+    /// where the tab bar is placed: "top", "bottom", "left", or "right"
+    pub tab_bar_position: String,
+    /// save open tabs and tab groups and restore them on restart
+    pub restore_tabs: bool,
 }
 
 impl Default for Settings {
@@ -236,7 +240,9 @@ impl Default for Settings {
             feed_group_by_day: true,
             show_player_title: false,
             eq_preset: "flat".into(),
-            always_show_tab_bar: false,
+            always_show_tab_bar: true,
+            tab_bar_position: "top".into(),
+            restore_tabs: true,
             download_dir: dirs::download_dir()
                 .map(|d| d.join("Stream Tube").to_string_lossy().into_owned())
                 .unwrap_or_default(),
@@ -263,7 +269,7 @@ impl Default for Settings {
             enhanced_bitrate: false,
             ipv4_only: true,
             background_play: true,
-            independent_tab_playback: false,
+            independent_tab_playback: true,
             ambient_mode: true,
             shorts_in_player: false,
             shorts_autoadvance: false,
@@ -366,6 +372,7 @@ fn normalize_settings(s: &mut Settings) {
     if s.ui_scale == 0.0 {
         s.ui_scale = 1.0;
     }
+    s.tab_bar_position = crate::ui::tabs::TabBarPosition::normalize(&s.tab_bar_position).into();
 }
 
 pub fn settings_snapshot() -> Arc<Settings> {
@@ -1380,6 +1387,26 @@ mod settings_tests {
         let restored = settings_from_value(saved);
         assert!(restored.theater_mode);
         assert!(restored.theater_full_height);
+    }
+
+    #[test]
+    fn tab_settings_default_and_round_trip() {
+        let defaults = settings_from_value(serde_json::json!({}));
+        assert_eq!(defaults.tab_bar_position, "top");
+        assert!(defaults.restore_tabs);
+        assert!(defaults.always_show_tab_bar);
+
+        let mut custom = Settings {
+            tab_bar_position: "left".into(),
+            restore_tabs: false,
+            always_show_tab_bar: false,
+            ..defaults
+        };
+        normalize_settings(&mut custom);
+        let restored = settings_from_value(serde_json::to_value(custom).unwrap());
+        assert_eq!(restored.tab_bar_position, "left");
+        assert!(!restored.restore_tabs);
+        assert!(!restored.always_show_tab_bar);
     }
 
     #[test]

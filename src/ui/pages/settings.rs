@@ -8,6 +8,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 #[derive(Clone, Copy, PartialEq)]
 enum Section {
     General,
+    Tabs,
     Player,
     Premium,
     Tweaks,
@@ -23,6 +24,7 @@ enum Section {
 
 const SECTIONS: &[(Section, &str, &str)] = &[
     (Section::General, "General", "palette"),
+    (Section::Tabs, "Tabs", "layers"),
     (Section::Player, "Player", "circle-play"),
     (Section::Premium, "Premium features", "sparkles"),
     (Section::Tweaks, "Tweaks", "sliders-horizontal"),
@@ -711,12 +713,6 @@ impl SettingsPage {
                 switch("sbar", s.always_scrollbars, |s, v| s.always_scrollbars = v, cx),
                 cx,
             ))
-            .child(row(
-                "Always show tab bar",
-                "Keep the tab bar visible even when only one tab is open",
-                switch("tbar", s.always_show_tab_bar, |s, v| s.always_show_tab_bar = v, cx),
-                cx,
-            ))
             .when(cfg!(windows), |card| card.child(row(
                 "Minimize to tray",
                 "Keep Stream Tube open in the Windows notification area when you minimize or close it",
@@ -736,6 +732,253 @@ impl SettingsPage {
                 switch("original-video-titles", s.original_video_titles, |s, v| s.original_video_titles = v, cx),
                 cx,
             ))
+    }
+
+    fn tabs(&self, cx: &mut Context<Self>) -> Div {
+        let s = store::settings_snapshot();
+        let p = pal(cx);
+        let cur_pos = crate::ui::tabs::TabBarPosition::parse(&s.tab_bar_position).as_str();
+        let mut pos_picker = div().flex().flex_none().p(px(3.)).gap(px(2.)).rounded_lg().bg(p.chip);
+        for (i, &(val, label, ic)) in crate::ui::tabs::TabBarPosition::CHOICES.iter().enumerate() {
+            let active = val == cur_pos;
+            let val_owned = val.to_string();
+            pos_picker = pos_picker.child(
+                div()
+                    .id(SharedString::from(format!("tab-pos-{i}")))
+                    .px_3()
+                    .h(px(28.))
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_sm()
+                    .when(active, |d| d.bg(p.accent).text_color(white()).font_weight(FontWeight::MEDIUM))
+                    .when(!active, |d| d.text_color(p.text).hover(move |st| st.bg(p.hover)))
+                    .child(icon(ic).size_4().text_color(if active { white() } else { p.text2 }))
+                    .child(t(label).to_string())
+                    .on_click(move |_, window, cx| {
+                        let v = val_owned.clone();
+                        store::update_settings(|s| s.tab_bar_position = v);
+                        after_change("tab-bar-position", window, cx);
+                    }),
+            );
+        }
+
+        let groups = crate::ui::app::tab_groups_snapshot(cx);
+        let mut group_list = div().flex().flex_col().gap_2().w_full();
+        if groups.is_empty() {
+            group_list = group_list.child(
+                div()
+                    .py_3()
+                    .px_3()
+                    .rounded_lg()
+                    .bg(p.bg)
+                    .text_xs()
+                    .text_color(p.text2)
+                    .child(t("No tab groups yet. Create one here or right-click any tab in the tab bar.")),
+            );
+        } else {
+            for (group, count) in groups {
+                let gid = group.id;
+                let gname = group.name.clone();
+                let gcolor: Hsla = rgb(group.color).into();
+                let collapsed = group.collapsed;
+                let count_text = if count == 1 {
+                    tf!("{0} tab", count)
+                } else {
+                    tf!("{0} tabs", count)
+                };
+                let swatches = div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .children(crate::ui::tabs::GROUP_COLORS.iter().map(|&(c, _)| {
+                        let selected = c == group.color;
+                        div()
+                            .id(SharedString::from(format!("set-tg-clr-{gid}-{c:x}")))
+                            .size(px(18.))
+                            .rounded_full()
+                            .p(px(2.))
+                            .border_2()
+                            .border_color(if selected { p.text } else { hsla(0., 0., 0., 0.) })
+                            .cursor_pointer()
+                            .child(div().size_full().rounded_full().bg(rgb(c)))
+                            .on_click(move |_, _, cx| {
+                                crate::ui::app::recolor_tab_group(gid, c, cx);
+                            })
+                    }));
+
+                let action_btn = |id: SharedString, ic: &'static str, tip_text: &str| {
+                    let _ = tip_text;
+                    div()
+                        .id(id)
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .size(px(28.))
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(move |st| st.bg(p.hover))
+                        .child(icon(ic).size_4().text_color(p.text2))
+                };
+
+                group_list = group_list.child(
+                    div()
+                        .id(SharedString::from(format!("set-tg-{gid}")))
+                        .flex()
+                        .items_center()
+                        .flex_wrap()
+                        .gap_3()
+                        .px_3()
+                        .py_2p5()
+                        .rounded_lg()
+                        .bg(p.bg)
+                        .border_1()
+                        .border_color(p.border)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .flex_1()
+                                .min_w(px(160.))
+                                .child(div().flex_none().size(px(10.)).rounded_full().bg(gcolor))
+                                .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(p.text).truncate().child(group.name.clone()))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_full()
+                                        .bg(p.chip)
+                                        .text_xs()
+                                        .text_color(p.text2)
+                                        .child(count_text),
+                                )
+                                .when(collapsed, |d| {
+                                    d.child(
+                                        div()
+                                            .flex_none()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_full()
+                                            .bg(gcolor.opacity(0.18))
+                                            .text_xs()
+                                            .text_color(p.text)
+                                            .child(t("Collapsed")),
+                                    )
+                                }),
+                        )
+                        .child(swatches)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    action_btn(
+                                        SharedString::from(format!("set-tg-tog-{gid}")),
+                                        if collapsed { "chevron-right" } else { "chevron-down" },
+                                        "Collapse or expand",
+                                    )
+                                    .on_click(move |_, _, cx| {
+                                        crate::ui::app::toggle_tab_group_collapsed(gid, cx);
+                                    }),
+                                )
+                                .child(
+                                    action_btn(SharedString::from(format!("set-tg-ren-{gid}")), "pencil", "Rename")
+                                        .on_click(move |_, window, cx| {
+                                            crate::ui::app::prompt_text_with(
+                                                "Rename tab group",
+                                                "Group name",
+                                                &gname,
+                                                "Save",
+                                                window,
+                                                cx,
+                                                move |new_name, _, cx| {
+                                                    crate::ui::app::rename_tab_group(gid, new_name, cx);
+                                                },
+                                            );
+                                        }),
+                                )
+                                .child(
+                                    action_btn(SharedString::from(format!("set-tg-ung-{gid}")), "ungroup", "Ungroup tabs")
+                                        .on_click(move |_, window, cx| {
+                                            crate::ui::app::delete_tab_group(gid, false, window, cx);
+                                        }),
+                                ),
+                        ),
+                );
+            }
+        }
+
+        let groups_header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .w_full()
+            .child(div().text_xs().text_color(p.text2).child(t("Drag tabs in the tab bar to reorder them or move them between groups.")))
+            .child(
+                pill("set-tg-new", Some("folder-plus"), "New group", cx).on_click(|_, window, cx| {
+                    crate::ui::app::prompt_text("New tab group", "Group name", window, cx, |name, _, cx| {
+                        crate::ui::app::create_tab_group(name, None, cx);
+                    });
+                }),
+            );
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                card(cx)
+                    .child(row("Tab bar position", "Place the tab bar along any edge of the window", pos_picker, cx))
+                    .child(row(
+                        "Always show tab bar",
+                        "Keep the tab bar visible even when only one tab is open",
+                        switch("tbar", s.always_show_tab_bar, |s, v| s.always_show_tab_bar = v, cx),
+                        cx,
+                    ))
+                    .child(row(
+                        "Restore tabs and groups on startup",
+                        "Save your open tabs, groups, and active tab across restarts",
+                        switch("restore-tabs", s.restore_tabs, |s, v| s.restore_tabs = v, cx),
+                        cx,
+                    ))
+                    .child(row(
+                        "Independent tab playback",
+                        "Give each tab its own player (up to three active tabs; restart Stream Tube to apply)",
+                        switch("tabs-independent-playback", s.independent_tab_playback, |s, v| s.independent_tab_playback = v, cx),
+                        cx,
+                    ))
+                    .child(row(
+                        "Reset tab layout",
+                        "Ungroup all tabs and close background tabs",
+                        pill("reset-tabs", Some("rotate-cw"), "Reset layout", cx).on_click(|_, window, cx| {
+                            crate::ui::app::confirm(
+                                "Reset tab layout",
+                                "This will remove all tab groups and close unpinned background tabs.",
+                                "Reset",
+                                window,
+                                cx,
+                                |window, cx| {
+                                    crate::ui::app::reset_tab_layout(window, cx);
+                                    toast(cx, t("Tab layout reset"));
+                                },
+                            );
+                        }),
+                        cx,
+                    )),
+            )
+            .child(card(cx).child(stacked_row(
+                "Tab groups",
+                "Create, rename, color-code, collapse, and manage custom tab groups",
+                div().flex().flex_col().gap_3().w_full().child(groups_header).child(group_list),
+                cx,
+            )))
     }
 
     fn player(&self, cx: &mut Context<Self>) -> Div {
@@ -1377,6 +1620,7 @@ impl Render for SettingsPage {
         }
         let render_section = |this: &Self, sec: Section, cx: &mut Context<Self>| match sec {
             Section::General => this.general(cx),
+            Section::Tabs => this.tabs(cx),
             Section::Player => this.player(cx),
             Section::Premium => this.premium(cx),
             Section::Tweaks => this.tweaks(cx),
@@ -1414,6 +1658,7 @@ impl Render for SettingsPage {
         }
         let content = match self.section {
             Section::General => self.general(cx),
+            Section::Tabs => self.tabs(cx),
             Section::Player => self.player(cx),
             Section::Premium => self.premium(cx),
             Section::Tweaks => self.tweaks(cx),
