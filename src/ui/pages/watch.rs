@@ -607,6 +607,7 @@ impl WatchPage {
         if !append {
             self.comments_generation += 1;
             self.comments = Some(Load::Loading);
+            self.replies.clear();
         }
         let generation = self.comments_generation;
         cx.spawn(async move |this, cx| {
@@ -644,12 +645,14 @@ impl WatchPage {
 
     fn load_replies(&mut self, comment_id: String, token: String, cx: &mut Context<Self>) {
         let append = matches!(self.replies.get(&comment_id), Some(Load::Ready(_)));
+        let generation = self.comments_generation;
         if !append {
             self.replies.insert(comment_id.clone(), Load::Loading);
         }
         cx.spawn(async move |this, cx| {
             let res = blocking(move || innertube::account_comments(&token)).await;
             let _ = this.update(cx, |this, cx| {
+                if this.comments_generation != generation { return; }
                 match res {
                     Ok(p) => {
                         if let Some(Load::Ready((list, cont))) = this.replies.get_mut(&comment_id) {
@@ -951,7 +954,7 @@ impl WatchPage {
                                 .cursor_pointer()
                                 .hover(move |s| s.bg(p.hover))
                                 .when_some(c.thumbnail.clone(), |d, th| d.child(img(SharedString::from(th)).w(px(152.)).h(px(86.)).rounded(radius)))
-                                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text).line_clamp(2).child(c.title.clone()))
+                                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text).text_ellipsis().line_clamp(2).child(c.title.clone()))
                                 .child(div().text_xs().text_color(p.link).child(crate::api::json::format_duration(t as u64)))
                                 .on_click(move |_, window, cx| {
                                     cx.stop_propagation();
@@ -1041,29 +1044,30 @@ impl WatchPage {
             ).into_any_element())
     }
 
-    fn toggle_comment_like(&mut self, comment: Comment, cx: &mut Context<Self>) {
-        let Some(account) = self.comment_account() else { return; };
+    fn toggle_comment_reaction(&mut self, comment: Comment, reaction: CommentReaction, cx: &mut Context<Self>) {
+        let Some(account) = comment.account.filter(|account| crate::api::web::is_current_comment_session(account)) else { return; };
         let id = comment.id;
-        let liked = !comment.actions.liked;
-        let actions = if liked { comment.actions.like } else { comment.actions.unlike };
-        if actions.is_empty() || !self.sending_reactions.insert(id.clone()) { return; }
+        let (selected, actions) = comment.actions.toggle(reaction);
+        if id.is_empty() || actions.is_empty() || !self.sending_reactions.insert(id.clone()) { return; }
+        let actions = actions.to_vec();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let connection = account.clone();
             let result = blocking(move || innertube::react_to_comment(&connection, &actions)).await;
             let _ = this.update(cx, |this, cx| {
                 this.sending_reactions.remove(&id);
-                if result.is_ok() && crate::api::web::is_current_session(&account) {
+                if result.is_ok() && crate::api::web::is_current_comment_session(&account) {
                     let update = |c: &mut Comment| {
-                        c.actions.liked = liked;
-                        c.likes = if liked { &c.actions.liked_count } else { &c.actions.unliked_count }.clone();
+                        if c.id == id && c.account.as_ref().is_some_and(|current| Arc::ptr_eq(current, &account)) {
+                            c.set_reaction(selected);
+                        }
                     };
                     if let Some(Load::Ready(page)) = this.comments.as_mut() {
-                        page.comments.iter_mut().filter(|c| c.id == id).for_each(update);
+                        page.comments.iter_mut().for_each(update);
                     }
                     for replies in this.replies.values_mut() {
                         if let Load::Ready((list, _)) = replies {
-                            list.iter_mut().filter(|c| c.id == id).for_each(update);
+                            list.iter_mut().for_each(update);
                         }
                     }
                 } else if result.is_err() {
@@ -1154,20 +1158,17 @@ impl WatchPage {
                             .gap_4()
                             .text_xs()
                             .text_color(p.text2)
-                            .child({
-                                let can_react = self.comment_account().is_some()
-                                    && !self.sending_reactions.contains(&c.id)
-                                    && !(if c.actions.liked { &c.actions.unlike } else { &c.actions.like }).is_empty();
-                                let comment = c.clone();
-                                div().id(SharedString::from(format!("comment-like-{}", c.id)))
-                                    .flex().items_center().gap_1().p_1().rounded_md()
-                                    .child(icon("thumbs-up").size_4().text_color(if c.actions.liked { p.link } else { p.text2 }))
-                                    .child(c.likes.clone())
-                                    .when(can_react, |button| button.cursor_pointer().hover(move |s| s.bg(p.hover))
-                                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_comment_like(comment.clone(), cx))))
+                            .children({
+                                let can_react = c.account.as_ref().is_some_and(crate::api::web::is_current_comment_session)
+                                    && !self.sending_reactions.contains(&c.id);
+                                [CommentReaction::Like, CommentReaction::Dislike].map(|reaction| {
+                                    let comment = c.clone();
+                                    comment_reaction_button(c, reaction, can_react, p, cx.listener(move |this, _, _, cx| {
+                                        this.toggle_comment_reaction(comment.clone(), reaction, cx);
+                                    }))
+                                })
                             })
-                            .child(icon("thumbs-down").size_4().text_color(p.text2))
-                            .when_some(c.actions.reply.clone().filter(|_| self.comment_account().is_some()), |d, params| {
+                            .when_some(c.actions.reply.clone().filter(|_| c.account.as_ref().is_some_and(crate::api::web::is_current_session)), |d, params| {
                                 let id = c.id.clone();
                                 d.child(pill(SharedString::from(format!("comment-reply-{}", id)), None, "Reply", cx)
                                     .on_click(cx.listener(move |this, _, window, cx| this.compose_comment(Some(id.clone()), params.clone(), window, cx))))
@@ -1296,19 +1297,23 @@ impl WatchPage {
                         }),
                 ),
         );
-        if let Some(editor) = self.comment_editor(None, cx) {
+        let connected = crate::api::web::comment_session_identity().is_some();
+        let editor = self.comment_editor(None, cx);
+        let editing = editor.is_some();
+        if let Some(editor) = editor {
             col = col.child(editor);
         } else if let Some(params) = data.create_params.clone().filter(|_| self.comment_account().is_some()) {
             col = col.child(pill("comment-compose", Some("message-square"), "Write a comment", cx).on_click(
                 cx.listener(move |this, _, window, cx| this.compose_comment(None, params.clone(), window, cx)),
             ));
-        } else if self.comment_account().is_none() && crate::api::web::connected() {
+        }
+        if connected && !editing {
             if let Some(token) = w.comments_token.clone() {
                 col = col.child(pill("comment-reload", Some("refresh-cw"), "Reload comments", cx)
                     .on_click(cx.listener(move |this, _, _, cx| this.load_comments(token.clone(), false, cx))));
             }
-        } else if !crate::api::web::connected() {
-            col = col.child(pill("comment-connect", Some("circle-user"), "Connect to post comments", cx)
+        } else if !connected && !editing {
+            col = col.child(pill("comment-connect", Some("circle-user"), "Connect to react to comments", cx)
                 .on_click(|_, _, cx| crate::ui::app::open_web_sign_in(cx)));
         }
         if timed {
@@ -1442,7 +1447,7 @@ impl WatchPage {
                             .flex_1()
                             .min_w_0()
                             .gap_1()
-                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).line_clamp(2).child(c.title.clone()))
+                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).text_ellipsis().line_clamp(2).child(c.title.clone()))
                             .child(
                                 div()
                                     .w_auto()
@@ -1848,7 +1853,7 @@ impl WatchPage {
                                     .flex_col()
                                     .flex_1()
                                     .min_w_0()
-                                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).line_clamp(2).child(pl.title.clone()))
+                                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).text_ellipsis().line_clamp(2).child(pl.title.clone()))
                                     .when_some(pl.channel_name.clone(), |d, c| d.child(div().text_xs().text_color(p.text2).child(c))),
                             ),
                     );
@@ -2067,6 +2072,29 @@ pub(crate) fn reply_count_label(count: &str) -> String {
     }
 }
 
+fn comment_reaction_button(
+    comment: &Comment,
+    reaction: CommentReaction,
+    account_available: bool,
+    p: Pal,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let selected = comment.actions.reaction == Some(reaction);
+    let (id, glyph, label) = match reaction {
+        CommentReaction::Like => ("comment-like", "thumbs-up", if selected { "Remove like" } else { "Like" }),
+        CommentReaction::Dislike => ("comment-dislike", "thumbs-down", if selected { "Remove dislike" } else { "Dislike" }),
+    };
+    let (_, actions) = comment.actions.toggle(reaction);
+    div().id(SharedString::from(format!("{id}-{}", comment.id)))
+        .flex().items_center().gap_1().p_1().rounded_md()
+        .child(icon(glyph).size_4().text_color(if selected { p.link } else { p.text2 }))
+        .when(reaction == CommentReaction::Like, |button| button.child(comment.likes.clone()))
+        .tooltip(move |window, cx| component::tooltip::Tooltip::new(translate(label)).build(window, cx))
+        .when(account_available && !comment.id.is_empty() && !actions.is_empty(), |button| {
+            button.cursor_pointer().hover(move |s| s.bg(p.hover)).on_click(on_click)
+        })
+}
+
 /// For each reply, the earlier reply it answers: YouTube keeps replies flat and
 /// starts an answer with "@name", so a reply opening with the name of someone who
 /// replied before it hangs under that person's latest reply. Nesting stops a few
@@ -2116,6 +2144,100 @@ mod tests {
         let p = reply_parents(&list);
         // index 3 is already three levels deep, so answers to it sit beside it
         assert_eq!(p, vec![None, Some(0), None, Some(1), None, Some(1), Some(1)]);
+    }
+}
+
+#[cfg(test)]
+mod comment_reaction_tests {
+    use super::{Comment, CommentActions, CommentReaction, Pal, comment_reaction_button, pal};
+    use gpui::{
+        Context, IntoElement, Modifiers, ParentElement, Render, Styled, TestAppContext,
+        VisualTestContext, Window, div, point, px, size,
+    };
+
+    struct ReactionControls {
+        comment: Comment,
+        commands: Vec<String>,
+        connected: bool,
+    }
+
+    impl Render for ReactionControls {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let p = pal(cx);
+            div().size_full().flex().items_start().children(
+                [CommentReaction::Like, CommentReaction::Dislike].map(|reaction| {
+                    div().w(px(80.)).flex().items_start().child(comment_reaction_button(
+                        &self.comment, reaction, self.connected, p,
+                        cx.listener(move |this, _, _, cx| {
+                            let (next, actions) = this.comment.actions.toggle(reaction);
+                            this.commands.extend_from_slice(actions);
+                            this.comment.set_reaction(next);
+                            cx.notify();
+                        }),
+                    ))
+                }),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn comment_buttons_send_the_matching_reaction_and_undo(cx: &mut TestAppContext) {
+        use CommentReaction::{Dislike, Like};
+
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(Pal::new(true, 0x3ea6ff));
+        });
+        let window = cx.open_window(size(px(320.), px(120.)), |_, _| ReactionControls {
+            comment: Comment {
+                id: "comment".into(),
+                likes: "3".into(),
+                actions: CommentActions {
+                    like: vec!["like".into()],
+                    unlike: vec!["unlike".into()],
+                    dislike: vec!["dislike".into()],
+                    undislike: vec!["undislike".into()],
+                    unliked_count: "3".into(),
+                    liked_count: "4".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            commands: Vec::new(),
+            connected: true,
+        });
+        let controls = window.root(cx).unwrap();
+        let mut ui = VisualTestContext::from_window(window.into(), cx);
+        let draw = |ui: &mut VisualTestContext| ui.update(|window, cx| window.draw(cx).clear(cx));
+        draw(&mut ui);
+
+        let steps = [
+            (12., Some(Like), "like", "4"),
+            (92., Some(Dislike), "dislike", "3"),
+            (92., None, "undislike", "3"),
+            (92., Some(Dislike), "dislike", "3"),
+            (12., Some(Like), "like", "4"),
+            (12., None, "unlike", "3"),
+        ];
+        for (i, (x, state, command, likes)) in steps.into_iter().enumerate() {
+            ui.simulate_click(point(px(x), px(12.)), Modifiers::default());
+            controls.read_with(cx, |controls, _| {
+                assert_eq!(controls.commands.len(), i + 1);
+                assert_eq!(controls.commands[i], command);
+                assert_eq!(controls.comment.actions.reaction, state);
+                assert_eq!(controls.comment.likes, likes);
+            });
+            draw(&mut ui);
+        }
+
+        controls.update(cx, |controls, cx| {
+            controls.connected = false;
+            cx.notify();
+        });
+        draw(&mut ui);
+        ui.simulate_click(point(px(12.), px(12.)), Modifiers::default());
+        ui.simulate_click(point(px(92.), px(12.)), Modifiers::default());
+        assert_eq!(controls.read_with(cx, |controls, _| controls.commands.len()), steps.len());
     }
 }
 

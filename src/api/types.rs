@@ -134,16 +134,51 @@ pub struct Comment {
     /// GIF or sticker posted with the comment: (URL, width / height)
     pub image: Option<(String, f32)>,
     pub(crate) actions: CommentActions,
+    pub(crate) account: Option<std::sync::Arc<()>>,
+}
+
+impl Comment {
+    pub(crate) fn set_reaction(&mut self, reaction: Option<CommentReaction>) {
+        self.actions.reaction = reaction;
+        self.likes = self.actions.like_count().to_owned();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommentReaction {
+    Like,
+    Dislike,
 }
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CommentActions {
     pub like: Vec<String>,
     pub unlike: Vec<String>,
+    pub dislike: Vec<String>,
+    pub undislike: Vec<String>,
     pub reply: Option<String>,
-    pub liked: bool,
+    pub reaction: Option<CommentReaction>,
     pub unliked_count: String,
     pub liked_count: String,
+}
+
+impl CommentActions {
+    pub fn toggle(&self, reaction: CommentReaction) -> (Option<CommentReaction>, &[String]) {
+        use CommentReaction::{Dislike, Like};
+
+        let undo = self.reaction == Some(reaction);
+        let actions = match (reaction, undo) {
+            (Like, false) => &self.like,
+            (Like, true) => &self.unlike,
+            (Dislike, false) => &self.dislike,
+            (Dislike, true) => &self.undislike,
+        };
+        ((!undo).then_some(reaction), actions)
+    }
+
+    pub fn like_count(&self) -> &str {
+        if self.reaction == Some(CommentReaction::Like) { &self.liked_count } else { &self.unliked_count }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -173,6 +208,16 @@ pub struct ChannelPage {
     pub banner: Option<String>,
     pub tabs: Vec<ChannelTab>,
     pub page: Page,
+    /// the tab's sort chips (Latest, Popular, Oldest), each with the
+    /// continuation that loads the tab sorted that way
+    pub sort_chips: Vec<SortChip>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SortChip {
+    pub title: String,
+    pub token: String,
+    pub selected: bool,
 }
 
 #[derive(Clone, Debug, Default)]

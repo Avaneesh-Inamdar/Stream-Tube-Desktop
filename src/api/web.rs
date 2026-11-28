@@ -51,10 +51,10 @@ fn session() -> &'static Mutex<Option<Arc<Session>>> {
     })
 }
 
-/// Safari's session on macOS, from the watch-history extension: kept in memory
-/// only, and used for the watch history in place of the browser sign-in.
+/// Safari's YouTube connection for watch history and comment reactions.
+/// It lasts only for the current Stream Tube session.
 #[cfg(target_os = "macos")]
-static SAFARI_PLAYBACK_SESSION: Mutex<Option<Arc<Session>>> = Mutex::new(None);
+static SAFARI_SESSION: Mutex<Option<Arc<Session>>> = Mutex::new(None);
 
 fn save(s: Option<&Session>) {
     crate::store::kv_set("web_session", &s.map(|s| serde_json::to_string(s).unwrap_or_default()).unwrap_or_default());
@@ -75,16 +75,12 @@ pub fn connected() -> bool {
 
 /// The account name the browser session belongs to.
 pub fn account_name() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    if let Some(safari) = SAFARI_PLAYBACK_SESSION.lock().as_ref() {
-        return safari.account.clone();
-    }
-    session().lock().as_ref().and_then(|s| s.account.clone())
+    connected_account_session().and_then(|s| s.account.clone())
 }
 
 pub fn disconnect() {
     #[cfg(target_os = "macos")]
-    SAFARI_PLAYBACK_SESSION.lock().take();
+    SAFARI_SESSION.lock().take();
     let mut s = session().lock();
     *s = None;
     save(None);
@@ -94,7 +90,7 @@ pub fn disconnect() {
 fn connect(cookies: BTreeMap<String, String>, page_id: Option<String>) -> Result<String> {
     let (candidate, name) = verify_session(cookies, page_id)?;
     #[cfg(target_os = "macos")]
-    SAFARI_PLAYBACK_SESSION.lock().take();
+    SAFARI_SESSION.lock().take();
     let mut s = session().lock();
     save(Some(&candidate));
     *s = Some(Arc::new(candidate));
@@ -104,11 +100,10 @@ fn connect(cookies: BTreeMap<String, String>, page_id: Option<String>) -> Result
 #[cfg(target_os = "macos")]
 pub(super) fn connect_safari(cookies: &[Value], cancel: &AtomicBool) -> Result<String> {
     let (candidate, name) = verify_session(youtube_cookies(cookies), None)?;
-    let mut current = SAFARI_PLAYBACK_SESSION.lock();
+    let mut current = SAFARI_SESSION.lock();
     if cancel.load(Ordering::Acquire) {
         return Err(anyhow!("Safari sign-in cancelled"));
     }
-    // Keep the session in memory and separate from the signed-in browsing features.
     *current = Some(Arc::new(candidate));
     Ok(name)
 }
@@ -149,8 +144,26 @@ pub fn write_cookies_file() -> Option<PathBuf> {
         opts.mode(0o600);
     }
     use std::io::Write;
-    opts.open(&path).ok()?.write_all(text.as_bytes()).ok()?;
+    if opts.open(&path).ok()?.write_all(text.as_bytes()).is_err() {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
     Some(path)
+}
+
+/// Deletes cookie files a crashed run left behind (they hold the sign-in).
+pub fn sweep_cookie_files() {
+    let Ok(dir) = std::fs::read_dir(crate::store::data_dir()) else { return };
+    for e in dir.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        let Some(rest) = name.strip_prefix("yt-dlp-cookies-").filter(|_| name.ends_with(".txt")) else { continue };
+        // a file of another window that is still running stays
+        let pid = rest.split('-').next().and_then(|p| p.parse::<u32>().ok());
+        if pid.is_none_or(|p| p == std::process::id() || !crate::links::process_alive(p)) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 fn cookie_header(session: &Session) -> String {
@@ -188,6 +201,29 @@ pub(crate) fn is_current_session(identity: &Arc<()>) -> bool {
 pub(crate) fn web_call_for_session(identity: &Arc<()>, endpoint: &str, body: Value) -> Result<Value> {
     let connected = session().lock().clone().filter(|connected| Arc::ptr_eq(&connected.identity, identity))
         .ok_or_else(|| anyhow!("browser session changed"))?;
+    web_call_with_session(&connected, endpoint, body)
+}
+
+pub(crate) fn comment_session_identity() -> Option<Arc<()>> {
+    connected_account_session().map(|session| session.identity.clone())
+}
+
+pub(crate) fn is_current_comment_session(identity: &Arc<()>) -> bool {
+    comment_session_identity().is_some_and(|current| Arc::ptr_eq(&current, identity))
+}
+
+pub(super) enum CommentRequest {
+    Load,
+    React,
+}
+
+pub(super) fn comment_call_for_session(identity: &Arc<()>, request: CommentRequest, body: Value) -> Result<Value> {
+    let connected = connected_account_session().filter(|connected| Arc::ptr_eq(&connected.identity, identity))
+        .ok_or_else(|| anyhow!("comment session changed"))?;
+    let endpoint = match request {
+        CommentRequest::Load => "next",
+        CommentRequest::React => "comment/perform_comment_action",
+    };
     web_call_with_session(&connected, endpoint, body)
 }
 
@@ -248,10 +284,10 @@ fn active_session() -> Option<Arc<Session>> {
     session().lock().clone()
 }
 
-/// The session the watch history goes through: Safari's when it is connected, else the browser sign-in's.
-fn history_session() -> Option<Arc<Session>> {
+/// Watch history and comment reactions use the same connected YouTube account.
+fn connected_account_session() -> Option<Arc<Session>> {
     #[cfg(target_os = "macos")]
-    if let Some(safari) = SAFARI_PLAYBACK_SESSION.lock().clone() {
+    if let Some(safari) = SAFARI_SESSION.lock().clone() {
         return Some(safari);
     }
     active_session()
@@ -260,7 +296,7 @@ fn history_session() -> Option<Arc<Session>> {
 /// Runs `f` while no browser session is connected for the watch history.
 pub(super) fn if_disconnected<T>(f: impl FnOnce() -> T) -> Option<T> {
     #[cfg(target_os = "macos")]
-    let safari = SAFARI_PLAYBACK_SESSION.lock();
+    let safari = SAFARI_SESSION.lock();
     #[cfg(target_os = "macos")]
     if safari.is_some() {
         return None;
@@ -273,8 +309,13 @@ pub(super) fn if_disconnected<T>(f: impl FnOnce() -> T) -> Option<T> {
 pub(super) struct HistorySession(Arc<Session>);
 
 impl HistorySession {
+    #[cfg(test)]
+    pub(super) fn for_test() -> Self {
+        Self(Arc::new(Session::default()))
+    }
+
     pub(super) fn current() -> Option<Self> {
-        history_session().map(Self)
+        connected_account_session().map(Self)
     }
 
     pub(super) fn key(&self) -> u64 {
@@ -285,7 +326,7 @@ impl HistorySession {
         // Safari's session, when there is one, comes first (the same lock order as `if_disconnected`)
         #[cfg(target_os = "macos")]
         {
-            let safari = SAFARI_PLAYBACK_SESSION.lock();
+            let safari = SAFARI_SESSION.lock();
             if let Some(safari) = safari.as_ref() {
                 return Arc::ptr_eq(safari, &self.0).then(f);
             }
@@ -916,7 +957,7 @@ mod browser_tests {
     }
 }
 pub(in crate::api) mod reporting;
-pub use reporting::{PlaybackReport, pending_reports};
+pub use reporting::{PlaybackReport, flush_reports_on_exit, pending_reports};
 
 #[cfg(test)]
 mod devtools_pipe_tests {

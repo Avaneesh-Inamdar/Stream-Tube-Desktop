@@ -35,6 +35,11 @@ pub struct Page {
 }
 
 impl Account {
+    #[cfg(test)]
+    pub(super) fn for_test() -> Self {
+        Self(Session::Web(web::HistorySession::for_test()))
+    }
+
     /// Read from the account used for writes whenever it is connected.
     pub fn current() -> Option<Self> {
         web::HistorySession::current()
