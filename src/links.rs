@@ -125,7 +125,23 @@ pub(crate) fn process_alive(pid: u32) -> bool {
             !ok || code == STILL_ACTIVE
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        const EPERM: i32 = 1;
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        // 0 and negative ids would address process groups
+        let pid = match i32::try_from(pid) {
+            Ok(pid) if pid > 0 => pid,
+            _ => return false,
+        };
+        // signal 0 only checks: EPERM means the process exists but belongs to someone else
+        // SAFETY: signal 0 delivers nothing
+        let found = unsafe { kill(pid, 0) } == 0;
+        found || std::io::Error::last_os_error().raw_os_error() == Some(EPERM)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         std::path::Path::new(&format!("/proc/{pid}")).exists() || !std::path::Path::new("/proc/self").exists()
     }

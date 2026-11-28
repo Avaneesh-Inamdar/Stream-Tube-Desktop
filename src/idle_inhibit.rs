@@ -4,6 +4,8 @@
 //! `zwp_idle_inhibit_manager_v1` protocol. GPUI's own idle guard uses the
 //! desktop portal's `Suspend` flag instead, which is not visible to
 //! Hyprland, so Stream Tube needs a surface inhibitor of its own.
+//!
+//! On macOS a power assertion keeps the display awake instead.
 
 use gpui_kit::{App, Global, Window};
 
@@ -24,6 +26,8 @@ struct IdleState {
     guard: Option<InhibitorGuard>,
     #[cfg(target_os = "linux")]
     failed: bool,
+    #[cfg(target_os = "macos")]
+    assertion: Option<u32>,
 }
 
 /// App-global playback inhibition state.
@@ -109,8 +113,54 @@ fn raw_surface(window: &Window) -> Option<RawSurface> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn apply(_: &mut IdleState) {}
+
+/// The display only has to stay on while playing, whichever window shows the video.
+#[cfg(target_os = "macos")]
+fn apply(s: &mut IdleState) {
+    match (s.playing, s.assertion) {
+        (true, None) => s.assertion = macos::keep_display_awake(),
+        (false, Some(id)) => {
+            macos::release(id);
+            s.assertion = None;
+        }
+        _ => {}
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use objc2_foundation::NSString;
+
+    /// kIOPMAssertionLevelOn
+    const LEVEL_ON: u32 = 255;
+
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        fn IOPMAssertionCreateWithName(kind: *const NSString, level: u32, name: *const NSString, id: *mut u32) -> i32;
+        fn IOPMAssertionRelease(id: u32) -> i32;
+    }
+
+    pub(super) fn keep_display_awake() -> Option<u32> {
+        // kIOPMAssertionTypePreventUserIdleDisplaySleep
+        let kind = NSString::from_str("PreventUserIdleDisplaySleep");
+        let name = NSString::from_str("Stream Tube is playing a video");
+        let mut id = 0;
+        // SAFETY: NSString is toll-free bridged with CFString; both outlive the call
+        let status = unsafe { IOPMAssertionCreateWithName(&*kind, LEVEL_ON, &*name, &mut id) };
+        if status != 0 {
+            eprintln!("streamtube: idle inhibit unavailable: IOKit error {status:#x}");
+            return None;
+        }
+        Some(id)
+    }
+
+    pub(super) fn release(id: u32) {
+        // SAFETY: `id` came from IOPMAssertionCreateWithName and is released once
+        unsafe { IOPMAssertionRelease(id) };
+    }
+}
 
 #[cfg(target_os = "linux")]
 fn apply(s: &mut IdleState) {

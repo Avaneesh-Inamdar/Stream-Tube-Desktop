@@ -717,9 +717,13 @@ impl SettingsPage {
                 switch("tbar", s.always_show_tab_bar, |s, v| s.always_show_tab_bar = v, cx),
                 cx,
             ))
-            .when(cfg!(windows), |card| card.child(row(
+            .when(cfg!(any(windows, target_os = "macos")), |card| card.child(row(
                 "Minimize to tray",
-                "Keep Stream Tube open in the Windows notification area when you minimize or close it",
+                if cfg!(windows) {
+                    "Keep Stream Tube open in the Windows notification area when you minimize or close it"
+                } else {
+                    "Keep Stream Tube open in the menu bar when you close its window"
+                },
                 switch("minimize-to-tray", s.minimize_to_tray, |s, v| s.minimize_to_tray = v, cx),
                 cx,
             )))

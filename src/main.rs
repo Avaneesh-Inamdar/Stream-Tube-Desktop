@@ -12,15 +12,20 @@ mod links;
 mod locale;
 #[cfg(windows)]
 mod media_controls;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod media_session;
 #[cfg(target_os = "linux")]
 mod mpris;
+#[cfg(target_os = "macos")]
+mod now_playing;
 mod perf;
 mod player;
 mod recommend;
 mod store;
 #[cfg(windows)]
+mod tray;
+#[cfg(target_os = "macos")]
+#[path = "tray_macos.rs"]
 mod tray;
 mod ui;
 mod updater;
@@ -117,10 +122,12 @@ fn main() {
     perf::mark("display");
     let incoming = links::listen();
     perf::mark("links");
-    gpui_kit::application()
+    let app = gpui_kit::application()
         .with_assets(assets::Assets)
-        .with_http_client(ui::UreqHttp::new())
-        .run(|cx: &mut App| {
+        .with_http_client(ui::UreqHttp::new());
+    #[cfg(target_os = "macos")]
+    app.on_reopen(tray::reopen);
+    app.run(|cx: &mut App| {
             perf::mark("gpui running");
             gpui_kit::init(cx);
             i18n::apply_component_locale();
@@ -154,6 +161,11 @@ fn main() {
                 media_controls::init(window, cx);
                 #[cfg(target_os = "linux")]
                 mpris::init(cx);
+                #[cfg(target_os = "macos")]
+                {
+                    now_playing::init(cx);
+                    tray::init(cx);
+                }
                 let app = cx.new(|cx| ui::app::AppView::new(window, cx));
                 cx.new(|_| ui::app::Shell::new(app))
             })
