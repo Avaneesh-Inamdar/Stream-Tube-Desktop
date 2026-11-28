@@ -71,24 +71,45 @@ pub fn branded(v: &VideoItem, cx: &mut App) -> (String, String) {
 
 // ───────────────────────── shared pieces ─────────────────────────
 
-pub fn meta_line(v: &VideoItem) -> String {
-    let s = store::settings_snapshot();
+fn meta_line_with(v: &VideoItem, hide_view_counts: bool, live_label: &str) -> String {
     let mut parts = Vec::new();
-    if !s.hide_view_counts {
-        if let Some(vw) = &v.views_text {
-            parts.push(vw.clone());
+    if !hide_view_counts {
+        if let Some(vw) = v.views_text.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            parts.push(vw.to_string());
         }
     }
     if v.is_live {
         if parts.is_empty() {
-            parts.push(t("LIVE").into());
+            parts.push(live_label.to_string());
         }
-    } else if let Some(p) = &v.published_text {
-        parts.push(p.clone());
+    } else if let Some(p) = v.published_text.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        parts.push(p.to_string());
     } else if let Some(ts) = v.published_ts {
         parts.push(crate::api::json::relative_from_ts(ts));
     }
     parts.join(", ")
+}
+
+pub fn meta_line(v: &VideoItem) -> String {
+    let s = store::settings_snapshot();
+    meta_line_with(v, s.hide_view_counts, t("LIVE"))
+}
+
+fn render_meta_line(v: &VideoItem, compact: bool, cx: &App) -> AnyElement {
+    let p = pal(cx);
+    let meta = meta_line(v);
+    let base = div().text_color(p.text2).when(compact, |d| d.text_xs()).when(!compact, |d| d.text_sm());
+    if v.is_live {
+        base.flex()
+            .items_center()
+            .gap(px(5.))
+            .min_w_0()
+            .child(div().size(px(6.)).flex_none().rounded_full().bg(rgb(0xff0000)))
+            .child(div().min_w_0().truncate().child(meta))
+            .into_any_element()
+    } else {
+        base.truncate().child(meta).into_any_element()
+    }
 }
 
 fn badge(v: &VideoItem, cx: &App) -> Option<AnyElement> {
@@ -108,11 +129,20 @@ fn badge(v: &VideoItem, cx: &App) -> Option<AnyElement> {
             .bottom_1()
             .right_1()
             .px_1()
+            .py(px(1.))
             .rounded_sm()
             .bg(bg)
             .text_xs()
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(white())
+            .whitespace_nowrap()
+            .when(v.is_live, |d| {
+                d.flex()
+                    .items_center()
+                    .gap_1()
+                    .px(px(5.))
+                    .child(div().size(px(6.)).flex_none().rounded_full().bg(white()))
+            })
             .child(text)
             .into_any_element(),
     )
@@ -120,7 +150,7 @@ fn badge(v: &VideoItem, cx: &App) -> Option<AnyElement> {
 
 pub fn thumbnail(v: &VideoItem, url: String, w: Pixels, h: Pixels, radius: Pixels, cx: &App) -> Div {
     let p = pal(cx);
-    let progress = watched_progress(&v.id, cx);
+    let progress = if v.is_live || v.is_upcoming { None } else { watched_progress(&v.id, cx) };
     let radius = radius * thumbnail_corner_scale();
     div()
         .relative()
@@ -431,7 +461,6 @@ pub fn video_card(v: &VideoItem, width: Pixels, show_channel: bool, cx: &mut App
     let h = width * (9. / 16.);
     let route = watch_route(v);
     let channel_route = v.channel_id.clone().map(Route::Channel);
-    let meta = meta_line(v);
     let show_avatar = show_channel && !store::settings_snapshot().hide_channel_avatars;
     div()
         .id(SharedString::from(format!("vc-{}", v.id)))
@@ -506,7 +535,7 @@ pub fn video_card(v: &VideoItem, width: Pixels, show_channel: bool, cx: &mut App
                                     .child(gpui_kit::base::SelectableText::new(SharedString::from(format!("vcn-{}", v.id)), v.channel_name.clone())),
                             )
                         })
-                        .child(div().text_sm().text_color(p.text2).truncate().child(meta)),
+                        .child(render_meta_line(v, false, cx)),
                 )
                 .child(more_button(SharedString::from(format!("vm-{}", v.id)), v, cx)),
         )
@@ -552,7 +581,10 @@ pub fn shorts_card(v: &VideoItem, width: Pixels, cx: &mut App) -> AnyElement {
                         .flex_1()
                         .min_w_0()
                         .child(video_title(SharedString::from(format!("sct-{}", v.id)), title).text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text))
-                        .when_some(v.views_text.clone(), |d, vt| d.child(div().text_xs().text_color(p.text2).child(vt))),
+                        .when(v.is_live, |d| d.child(render_meta_line(v, true, cx)))
+                        .when(!v.is_live && !store::settings_snapshot().hide_view_counts, |d| {
+                            d.when_some(v.views_text.clone(), |d, vt| d.child(div().text_xs().text_color(p.text2).child(vt)))
+                        }),
                 )
                 .child(more_button(SharedString::from(format!("sm-{}", v.id)), v, cx)),
         )
@@ -566,7 +598,6 @@ pub fn video_row(v: &VideoItem, thumb_w: Pixels, cx: &mut App) -> AnyElement {
     let (title, thumb) = branded(v, cx);
     let route = watch_route(v);
     let channel_route = v.channel_id.clone().map(Route::Channel);
-    let meta = meta_line(v);
     div()
         .id(SharedString::from(format!("vr-{}", v.id)))
         .on_hover(prefetch_hover(&v.id))
@@ -600,7 +631,7 @@ pub fn video_row(v: &VideoItem, thumb_w: Pixels, cx: &mut App) -> AnyElement {
                         .child(video_title(SharedString::from(format!("vrt-{}", v.id)), title).flex_1().text_lg().text_color(p.text))
                         .child(more_button(SharedString::from(format!("vrm-{}", v.id)), v, cx)),
                 )
-                .child(div().text_xs().text_color(p.text2).child(meta))
+                .child(render_meta_line(v, true, cx))
                 .when(!v.channel_name.is_empty(), |d| {
                     let cr = channel_route.clone();
                     d.child(
@@ -706,7 +737,7 @@ pub fn compact_row(v: &VideoItem, thumb_size: Size<Pixels>, active: bool, on_cli
                         })
                         .child(gpui_kit::base::SelectableText::new(SharedString::from(format!("crn-{}", v.id)), v.channel_name.clone()))
                 })
-                .child(div().text_xs().text_color(p.text2).truncate().child(meta_line(v))),
+                .child(render_meta_line(v, true, cx)),
         )
         .child(more_button_with(SharedString::from(format!("crm-{}", v.id)), v, extra, cx))
         .into_any_element()
@@ -976,4 +1007,35 @@ pub fn grid_columns(avail: Pixels, min_card: f32, gap: Pixels) -> (usize, Pixels
     let cols = if cfg > 0 { cfg } else { (((w + gap) / (min_card + gap)).floor() as usize).clamp(1, 6) };
     let card = (w - gap * (cols as f32 - 1.0)) / cols as f32;
     (cols, px(card.floor() - 1.0))
+}
+
+#[cfg(test)]
+mod live_card_tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn live_meta_line_shows_viewer_count_or_live_fallback() {
+        let live_with_viewers = VideoItem {
+            is_live: true,
+            views_text: Some("4.2K watching".into()),
+            published_text: Some("Streamed 2 hours ago".into()),
+            ..Default::default()
+        };
+        assert_eq!(meta_line_with(&live_with_viewers, false, "LIVE"), "4.2K watching");
+        assert_eq!(meta_line_with(&live_with_viewers, true, "LIVE"), "LIVE");
+
+        let live_blank_viewers = VideoItem {
+            is_live: true,
+            views_text: Some("   ".into()),
+            ..Default::default()
+        };
+        assert_eq!(meta_line_with(&live_blank_viewers, false, "В ЭФИРЕ"), "В ЭФИРЕ");
+
+        let vod = VideoItem {
+            views_text: Some("10K views".into()),
+            published_text: Some("2 days ago".into()),
+            ..Default::default()
+        };
+        assert_eq!(meta_line_with(&vod, false, "LIVE"), "10K views, 2 days ago");
+    }
 }

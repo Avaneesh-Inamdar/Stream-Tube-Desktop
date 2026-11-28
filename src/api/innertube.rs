@@ -140,6 +140,129 @@ pub fn continuation_token(c: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+fn parse_relative_time_localized(s: &str) -> Option<i64> {
+    if let Some(ts) = crate::api::json::parse_relative_time(s) {
+        return Some(ts);
+    }
+    let lower = s.to_lowercase();
+    if is_view_or_viewer_text(&lower) {
+        return None;
+    }
+    let start = lower.find(|c: char| c.is_ascii_digit())?;
+    let rest = &lower[start..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let n: i64 = digits.parse().ok()?;
+    let after = &rest[digits.len()..];
+    if after.starts_with('.') || after.starts_with(',') {
+        return None;
+    }
+    let unit: String = after.trim_start().chars().take_while(|c| c.is_alphabetic()).collect();
+    let secs = match unit.as_str() {
+        // Russian compact related-card units ("15 ч назад", "3 нед. назад", "2 г. назад")
+        "ч" => n * 3600,
+        "нед" => n * 7 * 86400,
+        "г" if lower.contains("назад") => n * 365 * 86400,
+        // Ukrainian abbreviated hours ("3 год. тому")
+        "год" if lower.contains("тому") => n * 3600,
+        _ => return None,
+    };
+    Some(crate::api::json::now() - secs)
+}
+
+fn is_view_or_viewer_text(low: &str) -> bool {
+    const KEYS: &[&str] = &[
+        "view",
+        "watching",
+        "waiting",
+        "просмотр",
+        "перегляд",
+        "зрител",
+        "смотрят",
+        "ожида",
+        "ждут",
+        "глядач",
+        "дивляться",
+        "чекають",
+        "vue",
+        "aufruf",
+        "visualiz",
+        "spectat",
+        "zuschau",
+        "weergave",
+        "visning",
+        "vizion",
+        "görüntüleme",
+    ];
+    KEYS.iter().any(|k| low.contains(k))
+}
+
+fn is_published_or_scheduled_text(low: &str) -> bool {
+    const KEYS: &[&str] = &[
+        "ago",
+        "streamed",
+        "premiere",
+        "scheduled",
+        "назад",
+        "трансляция закончилась",
+        "трансляция прошла",
+        "трансляция началась",
+        "планируемая дата",
+        "запланировано",
+        "премьера",
+        "тому",
+        "заплановано",
+        "прем'єра",
+        "трансляція закінчилася",
+    ];
+    KEYS.iter().any(|k| low.contains(k)) || parse_relative_time_localized(low).is_some()
+}
+
+fn is_scheduled_or_waiting_text(low: &str) -> bool {
+    const KEYS: &[&str] = &[
+        "scheduled",
+        "waiting",
+        "premiere",
+        "планируемая дата",
+        "запланировано",
+        "ожидающих",
+        "ожидают",
+        "ждут начала",
+        "премьера",
+        "заплановано",
+        "чекають",
+        "прем'єра",
+    ];
+    KEYS.iter().any(|k| low.contains(k))
+}
+
+fn is_live_badge_text(s: &str) -> bool {
+    matches!(
+        s.trim().to_lowercase().as_str(),
+        "live" | "в эфире" | "прямой эфир" | "наживо" | "прямий ефір" | "en direct" | "en vivo" | "ao vivo" | "canlı" | "ライブ"
+    )
+}
+
+fn is_upcoming_badge_text(s: &str) -> bool {
+    matches!(
+        s.trim().to_lowercase().as_str(),
+        "upcoming"
+            | "premiere"
+            | "скоро"
+            | "премьера"
+            | "ожидается"
+            | "запланировано"
+            | "незабаром"
+            | "прем'єра"
+            | "demnächst"
+            | "à venir"
+            | "próximamente"
+            | "yakında"
+            | "공개 예정"
+            | "公開予定"
+            | "即将开始"
+    )
+}
+
 /// TV client tiles (home / subscriptions feeds of a signed-in account).
 pub(crate) fn parse_tile(t: &Value) -> Option<VideoItem> {
     if is_ad(t) {
@@ -161,7 +284,11 @@ pub(crate) fn parse_tile(t: &Value) -> Option<VideoItem> {
     let mut overlays = Vec::new();
     find_all(t, "thumbnailOverlayTimeStatusRenderer", &mut overlays);
     let badge = overlays.first().and_then(|o| o.get("text")).map(text);
-    let is_live = overlays.iter().any(|o| o.get("style").and_then(Value::as_str) == Some("LIVE"));
+    let is_live = overlays.iter().any(|o| o.get("style").and_then(Value::as_str) == Some("LIVE"))
+        || badge.as_deref().is_some_and(is_live_badge_text);
+    let is_upcoming = !is_live
+        && (overlays.iter().any(|o| o.get("style").and_then(Value::as_str) == Some("UPCOMING"))
+            || badge.as_deref().is_some_and(is_upcoming_badge_text));
     let mut parts: Vec<String> = Vec::new();
     let mut channel_id = None;
     for line in meta.get("lines").and_then(Value::as_array).into_iter().flatten() {
@@ -186,18 +313,22 @@ pub(crate) fn parse_tile(t: &Value) -> Option<VideoItem> {
     // views the other part that starts with a number, and the channel comes first
     let published = parts
         .iter()
-        .find(|p| p.to_lowercase().contains("ago") || p.to_lowercase().contains("streamed"))
-        .or_else(|| parts.iter().find(|p| crate::api::json::parse_relative_time(p).is_some()))
+        .find(|p| is_published_or_scheduled_text(&p.to_lowercase()))
         .cloned();
     let views = parts
         .iter()
-        .find(|p| p.to_lowercase().contains("view") || p.to_lowercase().contains("watching"))
+        .find(|p| Some(*p) != published.as_ref() && is_view_or_viewer_text(&p.to_lowercase()))
         .or_else(|| {
             parts.iter().skip(1).find(|p| Some(*p) != published.as_ref() && p.chars().next().is_some_and(|c| c.is_ascii_digit()))
         })
+        .or_else(|| {
+            is_live
+                .then(|| parts.iter().skip(1).find(|p| Some(*p) != published.as_ref() && p.chars().any(|c| c.is_ascii_digit())))
+                .flatten()
+        })
         .cloned();
     let channel_name = parts.iter().find(|p| Some(*p) != views.as_ref() && Some(*p) != published.as_ref()).cloned().unwrap_or_default();
-    let duration_secs = badge.as_deref().and_then(parse_duration);
+    let duration_secs = if is_live || is_upcoming { None } else { badge.as_deref().and_then(parse_duration) };
     // A show (podcast, series) is a tile too: it opens a playlist, its badge counts
     // episodes instead of giving a length, its title is the show's name and its two lines
     // are the latest episode and the channel. Show that episode like a video, with the
@@ -228,8 +359,10 @@ pub(crate) fn parse_tile(t: &Value) -> Option<VideoItem> {
         duration_text: badge.filter(|_| duration_secs.is_some()),
         duration_secs,
         views_text: views,
+        published_ts: published.as_deref().and_then(parse_relative_time_localized),
         published_text: published,
         is_live,
+        is_upcoming,
         playlist_id: show_playlist,
         ..Default::default()
     })
@@ -251,18 +384,23 @@ fn parse_video_renderer(r: &Value) -> Option<VideoItem> {
         .and_then(Value::as_str)
         .map(str::to_string);
     let mut duration_text = opt_text(r.get("lengthText"));
+    let mut ov = Vec::new();
+    find_all(r, "thumbnailOverlayTimeStatusRenderer", &mut ov);
     if duration_text.is_none() {
         // overlay time status
-        let mut ov = Vec::new();
-        find_all(r, "thumbnailOverlayTimeStatusRenderer", &mut ov);
         duration_text = ov.first().and_then(|o| opt_text(o.get("text")));
     }
     let badges = r.get("badges").map(|b| b.to_string()).unwrap_or_default();
     let is_live = badges.contains("LIVE_NOW")
         || badges.contains("\"LIVE\"")
-        || duration_text.as_deref().map(|d| d.eq_ignore_ascii_case("live")).unwrap_or(false);
-    let is_upcoming = r.get("upcomingEventData").is_some();
-    let duration_secs = duration_text.as_deref().and_then(parse_duration);
+        || ov.iter().any(|o| o.get("style").and_then(Value::as_str) == Some("LIVE"))
+        || duration_text.as_deref().is_some_and(is_live_badge_text);
+    let is_upcoming = !is_live
+        && (r.get("upcomingEventData").is_some()
+            || badges.contains("UPCOMING")
+            || ov.iter().any(|o| o.get("style").and_then(Value::as_str) == Some("UPCOMING"))
+            || duration_text.as_deref().is_some_and(is_upcoming_badge_text));
+    let duration_secs = if is_live || is_upcoming { None } else { duration_text.as_deref().and_then(parse_duration) };
     let published_text = opt_text(r.get("publishedTimeText"));
     let views_text = opt_text(r.get("shortViewCountText")).or_else(|| opt_text(r.get("viewCountText")));
     let snippet = r
@@ -279,13 +417,13 @@ fn parse_video_renderer(r: &Value) -> Option<VideoItem> {
     Some(VideoItem {
         thumbnail: r.get("thumbnail").and_then(best_thumb).unwrap_or_else(|| default_thumb(&id)),
         compact_thumbnail: r.get("thumbnail").and_then(compact_thumb),
-        published_ts: published_text.as_deref().and_then(parse_relative_time),
+        published_ts: published_text.as_deref().and_then(parse_relative_time_localized),
         id,
         title,
         channel_name,
         channel_id,
         channel_avatar: avatar,
-        duration_text: if is_live { None } else { duration_text },
+        duration_text: if is_live || is_upcoming { None } else { duration_text },
         duration_secs,
         views_text,
         published_text,
@@ -357,6 +495,8 @@ fn parse_lockup(l: &Value) -> Option<Item> {
     let thumbnail = images.and_then(best_thumb);
     // badges (duration / LIVE / "N videos")
     let mut badge_texts = Vec::new();
+    let mut badge_is_live = false;
+    let mut badge_is_upcoming = false;
     if let Some(t) = thumb_vm {
         let mut found = Vec::new();
         find_all(t, "thumbnailBadgeViewModel", &mut found);
@@ -364,7 +504,25 @@ fn parse_lockup(l: &Value) -> Option<Item> {
             if let Some(tx) = b.get("text").and_then(Value::as_str) {
                 badge_texts.push(tx.to_string());
             }
+            if let Some(style) = b.get("badgeStyle").and_then(Value::as_str) {
+                if style.contains("LIVE") {
+                    badge_is_live = true;
+                }
+                if style.contains("UPCOMING") {
+                    badge_is_upcoming = true;
+                }
+            }
+            if let Some(icon) = b.get("icon") {
+                let mut names = Vec::new();
+                find_all(icon, "imageName", &mut names);
+                if names.iter().any(|n| n.as_str() == Some("LIVE")) {
+                    badge_is_live = true;
+                }
+            }
         }
+    }
+    if meta.pointer("/image/decoratedAvatarViewModel/liveBadge").is_some_and(|v| !v.is_null()) {
+        badge_is_live = true;
     }
     // metadata rows
     let mut channel_name = None;
@@ -372,10 +530,12 @@ fn parse_lockup(l: &Value) -> Option<Item> {
     let mut views = None;
     let mut published = None;
     let mut others = Vec::new();
-    if let Some(rows) = meta
+    let mut has_scheduled_or_waiting = false;
+    let rows_arr = meta
         .pointer("/metadata/contentMetadataViewModel/metadataRows")
-        .and_then(Value::as_array)
-    {
+        .and_then(Value::as_array);
+    let row_count = rows_arr.map(|r| r.len()).unwrap_or(0);
+    if let Some(rows) = rows_arr {
         for row in rows {
             for part in row.get("metadataParts").and_then(Value::as_array).into_iter().flatten() {
                 let Some(tx) = part.pointer("/text/content").and_then(Value::as_str) else { continue };
@@ -387,12 +547,15 @@ fn parse_lockup(l: &Value) -> Option<Item> {
                     .and_then(|b| b.get("browseId"))
                     .and_then(Value::as_str);
                 let low = tx.to_lowercase();
+                if is_scheduled_or_waiting_text(&low) {
+                    has_scheduled_or_waiting = true;
+                }
                 if let Some(b) = browse.filter(|b| b.starts_with("UC")) {
                     channel_name = Some(tx);
                     channel_id = Some(b.to_string());
-                } else if low.contains("view") || low.contains("watching") || low.contains("waiting") {
+                } else if is_view_or_viewer_text(&low) {
                     views = Some(tx);
-                } else if low.contains("ago") || low.contains("streamed") || low.contains("premiere") || low.contains("scheduled") {
+                } else if is_published_or_scheduled_text(&low) {
                     published = Some(tx);
                 } else {
                     others.push(tx);
@@ -400,6 +563,7 @@ fn parse_lockup(l: &Value) -> Option<Item> {
             }
         }
     }
+    let has_avatar = meta.pointer("/image/decoratedAvatarViewModel").is_some();
     if channel_id.is_none() {
         channel_id = meta
             .pointer("/image/decoratedAvatarViewModel/rendererContext/commandContext/onTap/innertubeCommand/browseEndpoint/browseId")
@@ -420,26 +584,52 @@ fn parse_lockup(l: &Value) -> Option<Item> {
             .map(str::to_string);
     }
     if channel_name.is_none() {
-        channel_name = others.first().cloned();
+        // Channel tabs omit the avatar and channel row, leaving only a single stats row
+        // (views/watching + date/scheduled). Do not steal stats into `channel_name`, so
+        // `channel()` can populate the real channel name.
+        let stats_only_row = !has_avatar && row_count <= 1 && (views.is_some() || published.is_some());
+        if !stats_only_row {
+            channel_name = others
+                .iter()
+                .find(|o| !(!has_avatar && row_count <= 1 && o.chars().next().is_some_and(|c| c.is_ascii_digit())))
+                .cloned();
+        }
     }
     match ctype {
         "LOCKUP_CONTENT_TYPE_VIDEO" | "LOCKUP_CONTENT_TYPE_MUSIC" | "LOCKUP_CONTENT_TYPE_SHORT" => {
             let is_short = ctype == "LOCKUP_CONTENT_TYPE_SHORT";
-            let is_live = badge_texts.iter().any(|b| b.eq_ignore_ascii_case("live"));
-            let is_upcoming = badge_texts.iter().any(|b| b.eq_ignore_ascii_case("upcoming"));
-            let duration_text = badge_texts.iter().find(|b| parse_duration(b).is_some()).cloned();
-            let published = published.or_else(|| others.iter().find(|o| parse_relative_time(o).is_some()).cloned());
+            let is_live = badge_is_live || badge_texts.iter().any(|b| is_live_badge_text(b));
+            let is_upcoming = !is_live
+                && (badge_is_upcoming
+                    || badge_texts.iter().any(|b| is_upcoming_badge_text(b))
+                    || (has_scheduled_or_waiting && badge_texts.iter().all(|b| parse_duration(b).is_none())));
+            let duration_text = if is_live || is_upcoming {
+                None
+            } else {
+                badge_texts.iter().find(|b| parse_duration(b).is_some()).cloned()
+            };
+            let published = published.or_else(|| others.iter().find(|o| parse_relative_time_localized(o).is_some()).cloned());
             let views = views.or_else(|| {
                 // compact form "1B" with PLAY_ARROW icon, or another language: no "views" word;
-                // pick the numeric-ish part that isn't the date or the channel
-                others
-                    .iter()
-                    .filter(|o| Some(*o) != published.as_ref() && Some(*o) != channel_name.as_ref())
-                    .find(|o| o.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
+                // pick the numeric part that isn't the date or the channel (prefer leading digit,
+                // fall back to any digit for label-first locales like Russian "Зрителей: 4,2 тыс.")
+                let candidates = || {
+                    others
+                        .iter()
+                        .filter(|o| Some(*o) != published.as_ref() && Some(*o) != channel_name.as_ref())
+                };
+                candidates()
+                    .find(|o| o.chars().next().is_some_and(|c| c.is_ascii_digit()))
+                    .or_else(|| {
+                        (!is_upcoming)
+                            .then(|| candidates().find(|o| o.chars().any(|c| c.is_ascii_digit())))
+                            .flatten()
+                    })
                     .cloned()
             });
+            let en_ui = region().0.to_ascii_lowercase().starts_with("en");
             let views = views.map(|v| {
-                if v.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ',' || "KMB".contains(c)) {
+                if en_ui && !is_live && !is_upcoming && v.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ',' || "KMB".contains(c)) {
                     format!("{v} views")
                 } else {
                     v
@@ -450,7 +640,7 @@ fn parse_lockup(l: &Value) -> Option<Item> {
                 compact_thumbnail: images.and_then(compact_thumb),
                 duration_secs: duration_text.as_deref().and_then(parse_duration),
                 duration_text,
-                published_ts: published.as_deref().and_then(parse_relative_time),
+                published_ts: published.as_deref().and_then(parse_relative_time_localized),
                 published_text: published,
                 views_text: views,
                 channel_name: channel_name.unwrap_or_default(),
@@ -1268,10 +1458,9 @@ pub fn watch_next(video_id: &str, playlist_id: Option<&str>) -> Result<WatchInfo
         // Only the main token works on its own; "Top chat" and "Live chat" differ
         // by one flag inside it (field 1 = 4 for top, 1 for everything).
         let first = lc.pointer("/continuations/0/reloadContinuationData/continuation").and_then(Value::as_str).map(str::to_string);
-        let top = first.clone();
-        let all = first.map(|t| t.replacen("ggEMCAQY", "ggEMCAEY", 1));
-        if let (Some(t), Some(a)) = (top, all) {
-            w.live_chat = Some((t, a));
+        if let Some(top) = first {
+            let all = all_chat_token(&top);
+            w.live_chat = Some((top, all));
         }
     }
     if let Some(cnt) = find(&results, "commentsEntryPointHeaderRenderer") {
@@ -1875,6 +2064,44 @@ mod tv_parse_tests {
 
 // ───────────────────────── live chat ─────────────────────────
 
+/// Converts a YouTube live chat "Top chat" continuation token into the matching
+/// "Live chat" (all messages) token by flipping protobuf field 16 -> field 1
+/// from 4 (Top chat) to 1 (All chat), regardless of base64 alignment.
+fn all_chat_token(top_token: &str) -> String {
+    if top_token.contains("ggEMCAQY") {
+        return top_token.replacen("ggEMCAQY", "ggEMCAEY", 1);
+    }
+    use base64::Engine;
+    let url_encoded = top_token.contains("%3D") || top_token.contains("%3d");
+    let raw_b64 = top_token.replace("%3D", "=").replace("%3d", "=");
+    let stripped = raw_b64.trim_end_matches('=');
+    let Ok(mut bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(stripped)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(stripped))
+    else {
+        return top_token.to_string();
+    };
+    // Match protobuf submessage tag 0x82 0x01 (field 16, length-delimited) followed by
+    // length byte (typically 0x0c) and field 1 varint = 4 (0x08 0x04) -> flip to 1 (0x01).
+    let mut flipped = false;
+    for i in 0..bytes.len().saturating_sub(4) {
+        if bytes[i] == 0x82 && bytes[i + 1] == 0x01 && bytes[i + 3] == 0x08 && bytes[i + 4] == 0x04 {
+            bytes[i + 4] = 0x01;
+            flipped = true;
+            break;
+        }
+    }
+    if !flipped {
+        return top_token.to_string();
+    }
+    let encoded = base64::engine::general_purpose::URL_SAFE.encode(&bytes);
+    if url_encoded {
+        encoded.replace('=', "%3D")
+    } else {
+        encoded
+    }
+}
+
 fn chat_text(msg: Option<&Value>) -> String {
     let Some(runs) = msg.and_then(|m| m.get("runs")).and_then(Value::as_array) else {
         return msg.map(text).unwrap_or_default();
@@ -1897,14 +2124,18 @@ fn chat_text(msg: Option<&Value>) -> String {
 }
 
 fn chat_message(item: &Value) -> Option<ChatMessage> {
-    let (r, paid) = if let Some(r) = item.get("liveChatTextMessageRenderer") {
-        (r, None)
+    let (r, paid, member_msg, sticker) = if let Some(r) = item.get("liveChatTextMessageRenderer") {
+        (r, None, false, false)
     } else if let Some(r) = item.get("liveChatPaidMessageRenderer") {
-        (r, opt_text(r.get("purchaseAmountText")))
+        (r, opt_text(r.get("purchaseAmountText")), false, false)
+    } else if let Some(r) = item.get("liveChatPaidStickerRenderer") {
+        (r, opt_text(r.get("purchaseAmountText")), false, true)
+    } else if let Some(r) = item.get("liveChatMembershipItemRenderer") {
+        (r, None, true, false)
     } else {
         return None;
     };
-    let mut role = ChatRole::Viewer;
+    let mut role = if member_msg { ChatRole::Member } else { ChatRole::Viewer };
     let mut verified = false;
     for b in r.get("authorBadges").and_then(Value::as_array).into_iter().flatten() {
         let b = b.get("liveChatAuthorBadgeRenderer").unwrap_or(b);
@@ -1916,11 +2147,27 @@ fn chat_message(item: &Value) -> Option<ChatMessage> {
             _ => {}
         }
     }
+    let msg_text = if sticker {
+        r.pointer("/sticker/accessibility/accessibilityData/label")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| "Super Sticker".into())
+    } else {
+        let body = chat_text(r.get("message"));
+        if !body.is_empty() {
+            body
+        } else if member_msg {
+            let sub = chat_text(r.get("headerSubtext"));
+            if !sub.is_empty() { sub } else { chat_text(r.get("headerPrimaryText")) }
+        } else {
+            body
+        }
+    };
     Some(ChatMessage {
         id: r.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
         author: opt_text(r.get("authorName")).unwrap_or_default(),
         author_photo: r.get("authorPhoto").and_then(best_thumb),
-        text: chat_text(r.get("message")),
+        text: msg_text,
         role,
         verified,
         paid,
@@ -1930,7 +2177,10 @@ fn chat_message(item: &Value) -> Option<ChatMessage> {
 /// One poll of a live chat. Reading needs no account.
 pub fn live_chat(token: &str) -> Result<ChatBatch> {
     let r = call("live_chat/get_live_chat", json!({ "continuation": token }))?;
-    let c = r.pointer("/continuationContents/liveChatContinuation").ok_or_else(|| anyhow!("chat has ended"))?;
+    let Some(c) = r.pointer("/continuationContents/liveChatContinuation") else {
+        // Server returned 200 without a liveChatContinuation: the chat has ended cleanly.
+        return Ok(ChatBatch { messages: Vec::new(), next: None, timeout_ms: 5000 });
+    };
     let mut batch = ChatBatch { timeout_ms: 5000, ..Default::default() };
     for a in c.get("actions").and_then(Value::as_array).into_iter().flatten() {
         if let Some(m) = a.pointer("/addChatItemAction/item").and_then(chat_message) {
@@ -2164,6 +2414,295 @@ mod channel_tab_tests {
         eprintln!("{kinds:?}");
         for k in ["featured", "videos", "shorts", "playlists"] {
             assert!(kinds.iter().any(|(_, kind)| kind == k), "no {k} tab in {kinds:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod live_card_tests {
+    use super::{Item, collect_items, json};
+
+    #[test]
+    fn localized_live_lockup_sets_is_live_and_keeps_viewer_count() {
+        let page = collect_items(&json!({
+            "lockupViewModel": {
+                "contentId": "SrbatMULSU4",
+                "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                "contentImage": {
+                    "thumbnailViewModel": {
+                        "image": { "sources": [{ "url": "https://i.ytimg.com/vi/SrbatMULSU4/hq720.jpg", "width": 720, "height": 404 }] },
+                        "overlays": [{
+                            "thumbnailBottomOverlayViewModel": {
+                                "badges": [{
+                                    "thumbnailBadgeViewModel": {
+                                        "icon": { "sources": [{ "clientResource": { "imageName": "LIVE" } }] },
+                                        "text": "В ЭФИРЕ",
+                                        "badgeStyle": "THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE"
+                                    }
+                                }]
+                            }
+                        }]
+                    }
+                },
+                "metadata": {
+                    "lockupMetadataViewModel": {
+                        "title": { "content": "ТУРНИР ЧАКА 11 СЕЗОН" },
+                        "metadata": {
+                            "contentMetadataViewModel": {
+                                "metadataRows": [
+                                    { "metadataParts": [{ "text": { "content": "LeBwa", "commandRuns": [{ "onTap": { "innertubeCommand": { "browseEndpoint": { "browseId": "UC2-3h_JwOe0TUNc7fYqRBog" } } } }] } }] },
+                                    { "metadataParts": [{ "text": { "content": "Зрителей: 4,2\u{a0}тыс." } }] }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        let [Item::Video(v)] = page.items.as_slice() else { panic!("missing live video card") };
+        assert!(v.is_live, "localized lockup with LIVE badgeStyle/icon must be live");
+        assert!(!v.is_upcoming);
+        assert!(v.duration_text.is_none());
+        assert_eq!(v.views_text.as_deref(), Some("Зрителей: 4,2\u{a0}тыс."));
+    }
+
+    #[test]
+    fn localized_video_renderer_live_overlay_sets_is_live() {
+        let page = collect_items(&json!({
+            "videoRenderer": {
+                "videoId": "abc12345678",
+                "title": { "simpleText": "Прямой эфир" },
+                "ownerText": { "runs": [{ "text": "Канал" }] },
+                "thumbnailOverlays": [{
+                    "thumbnailOverlayTimeStatusRenderer": {
+                        "style": "LIVE",
+                        "text": { "simpleText": "В ЭФИРЕ" }
+                    }
+                }]
+            }
+        }));
+        let [Item::Video(v)] = page.items.as_slice() else { panic!("missing video renderer") };
+        assert!(v.is_live);
+        assert!(v.duration_text.is_none());
+    }
+
+    #[test]
+    fn channel_live_tab_russian_lockups_distinguish_live_upcoming_and_vod_without_stealing_channel_name() {
+        // Real shapes returned by YouTube on /@NASA/streams in hl=ru, gl=RU
+        let feed = json!({
+            "items": [
+                // 1. Active live stream on channel Live tab (no avatar, 1 metadataRow with only viewer count)
+                { "lockupViewModel": {
+                    "contentId": "ROboUHfPUrU",
+                    "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                    "contentImage": { "thumbnailViewModel": { "overlays": [{
+                        "thumbnailBottomOverlayViewModel": { "badges": [{
+                            "thumbnailBadgeViewModel": {
+                                "text": "В ЭФИРЕ",
+                                "badgeStyle": "THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE",
+                                "icon": { "sources": [{ "clientResource": { "imageName": "LIVE" } }] }
+                            }
+                        }] }
+                    }] } },
+                    "metadata": { "lockupMetadataViewModel": {
+                        "title": { "content": "ISS Live Feed" },
+                        "metadata": { "contentMetadataViewModel": { "metadataRows": [
+                            { "metadataParts": [{ "text": { "content": "Зрителей: 135" } }] }
+                        ] } }
+                    } }
+                } },
+                // 2. Upcoming scheduled stream on channel Live tab (DEFAULT badgeStyle + localized "Скоро")
+                { "lockupViewModel": {
+                    "contentId": "YLrybIli73I",
+                    "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                    "contentImage": { "thumbnailViewModel": { "overlays": [{
+                        "thumbnailBottomOverlayViewModel": { "badges": [{
+                            "thumbnailBadgeViewModel": {
+                                "text": "Скоро",
+                                "badgeStyle": "THUMBNAIL_OVERLAY_BADGE_STYLE_DEFAULT"
+                            }
+                        }] }
+                    }] } },
+                    "metadata": { "lockupMetadataViewModel": {
+                        "title": { "content": "NASA Resupply Launch" },
+                        "metadata": { "contentMetadataViewModel": { "metadataRows": [
+                            { "metadataParts": [
+                                { "text": { "content": "Зрителей, ожидающих начала трансляции:\u{a0}4" } },
+                                { "text": { "content": "Планируемая дата публикации: 29.11.2026, 07:25" } }
+                            ] }
+                        ] } }
+                    } }
+                } },
+                // 3. Past VOD stream on channel Live tab
+                { "lockupViewModel": {
+                    "contentId": "nCJQZHBkSsU",
+                    "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                    "contentImage": { "thumbnailViewModel": { "overlays": [{
+                        "thumbnailBottomOverlayViewModel": { "badges": [{
+                            "thumbnailBadgeViewModel": {
+                                "text": "46:31",
+                                "badgeStyle": "THUMBNAIL_OVERLAY_BADGE_STYLE_DEFAULT"
+                            }
+                        }] }
+                    }] } },
+                    "metadata": { "lockupMetadataViewModel": {
+                        "title": { "content": "Progress 97 Docking" },
+                        "metadata": { "contentMetadataViewModel": { "metadataRows": [
+                            { "metadataParts": [
+                                { "text": { "content": "54\u{a0}тыс. просмотров" } },
+                                { "text": { "content": "Трансляция закончилась 1 день назад" } }
+                            ] }
+                        ] } }
+                    } }
+                } }
+            ]
+        });
+        let page = collect_items(&feed);
+        assert_eq!(page.items.len(), 3);
+
+        let live = page.items[0].as_video().unwrap();
+        assert!(live.is_live);
+        assert!(!live.is_upcoming);
+        assert!(live.channel_name.is_empty(), "must leave channel_name empty so channel() fills owner: {:?}", live.channel_name);
+        assert_eq!(live.views_text.as_deref(), Some("Зрителей: 135"));
+        assert!(live.duration_text.is_none());
+
+        let upcoming = page.items[1].as_video().unwrap();
+        assert!(!upcoming.is_live);
+        assert!(upcoming.is_upcoming, "localized 'Скоро' + scheduled metadata must mark is_upcoming");
+        assert!(upcoming.channel_name.is_empty(), "upcoming stats must not become channel_name: {:?}", upcoming.channel_name);
+        assert_eq!(upcoming.views_text.as_deref(), Some("Зрителей, ожидающих начала трансляции:\u{a0}4"));
+        assert_eq!(upcoming.published_text.as_deref(), Some("Планируемая дата публикации: 29.11.2026, 07:25"));
+        assert!(upcoming.duration_text.is_none());
+
+        let vod = page.items[2].as_video().unwrap();
+        assert!(!vod.is_live);
+        assert!(!vod.is_upcoming);
+        assert!(vod.channel_name.is_empty(), "VOD view count must not become channel_name: {:?}", vod.channel_name);
+        assert_eq!(vod.views_text.as_deref(), Some("54\u{a0}тыс. просмотров"));
+        assert_eq!(vod.published_text.as_deref(), Some("Трансляция закончилась 1 день назад"));
+        assert!(vod.published_ts.is_some());
+        assert_eq!(vod.duration_text.as_deref(), Some("46:31"));
+    }
+
+    #[test]
+    fn russian_abbreviated_related_lockup_parses_relative_time_and_chat_tokens() {
+        let feed = json!({
+            "lockupViewModel": {
+                "contentId": "uWWRf6a_iV8",
+                "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                "contentImage": { "thumbnailViewModel": { "overlays": [{
+                    "thumbnailBottomOverlayViewModel": { "badges": [{
+                        "thumbnailBadgeViewModel": { "text": "1:55:27", "badgeStyle": "THUMBNAIL_OVERLAY_BADGE_STYLE_DEFAULT" }
+                    }] }
+                }] } },
+                "metadata": { "lockupMetadataViewModel": {
+                    "title": { "content": "Live Workshop" },
+                    "metadata": { "contentMetadataViewModel": { "metadataRows": [
+                        { "metadataParts": [{ "text": { "content": "Drywood Craft" } }] },
+                        { "metadataParts": [
+                            { "text": { "content": "144\u{a0}тыс." } },
+                            { "text": { "content": "Трансляция закончилась 3 нед. назад" } }
+                        ] }
+                    ] } }
+                } }
+            }
+        });
+        let page = collect_items(&feed);
+        let v = page.items[0].as_video().unwrap();
+        assert_eq!(v.channel_name, "Drywood Craft");
+        assert_eq!(v.views_text.as_deref(), Some("144\u{a0}тыс."));
+        assert_eq!(v.published_text.as_deref(), Some("Трансляция закончилась 3 нед. назад"));
+        assert!(v.published_ts.is_some(), "must parse abbreviated Russian weeks");
+        assert!(super::parse_relative_time_localized("15 ч назад").is_some());
+        assert!(super::parse_relative_time_localized("Зрителей: 15").is_none());
+
+        // Top chat -> All chat token conversion (both fast path and unaligned protobuf fallback)
+        let fast = "0ofMyAOEARpeQ2lrcQABggEMCAQYAiAAKAAwADgAiAEB%3D%3D";
+        assert_eq!(super::all_chat_token(fast), "0ofMyAOEARpeQ2lrcQABggEMCAEYAiAAKAAwADgAiAEB%3D%3D");
+
+        use base64::Engine;
+        let raw = vec![0x0a, 0x03, b'a', b'b', b'c', 0x82, 0x01, 0x0c, 0x08, 0x04, 0x18, 0x00];
+        let unaligned = base64::engine::general_purpose::URL_SAFE.encode(&raw);
+        let converted = super::all_chat_token(&unaligned);
+        let decoded = base64::engine::general_purpose::URL_SAFE.decode(&converted).unwrap();
+        assert_eq!(decoded[9], 0x01, "field 1 must flip from 4 (Top) to 1 (All)");
+    }
+
+    #[test]
+    #[ignore = "network: verifies Explore Live, watch_next, live_chat, and channel Live tab in Russian"]
+    fn live_russian_innertube_end_to_end() {
+        crate::store::init();
+        let prev = crate::store::settings_snapshot();
+        crate::store::update_settings(|s| {
+            s.language = "ru".into();
+            s.region = "RU".into();
+        });
+        struct Restore(String, String);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let (l, r) = (self.0.clone(), self.1.clone());
+                crate::store::update_settings(|s| {
+                    s.language = l;
+                    s.region = r;
+                });
+            }
+        }
+        let _restore = Restore(prev.language.clone(), prev.region.clone());
+
+        // 1. Explore Live tab
+        let exp = super::explore("UC4R8DWoMoI7CAwX8_LjQHig").expect("explore live");
+        let live_cards: Vec<_> = exp.items.iter().filter_map(Item::as_video).filter(|v| v.is_live).collect();
+        println!("Explore Live (ru/RU): total={} active_live={}", exp.items.len(), live_cards.len());
+        assert!(!live_cards.is_empty(), "Explore Live must contain active streams");
+        for v in live_cards.iter().take(10) {
+            assert!(v.duration_text.is_none(), "live card {} must not have duration_text", v.id);
+            assert!(v.views_text.as_deref().is_some_and(|s| !s.is_empty()), "live card {} missing views_text", v.id);
+            assert!(!v.channel_name.is_empty(), "live card {} missing channel_name", v.id);
+        }
+
+        // 2. watch_next + live_chat (both Top and All) on an active live stream
+        let mut tested_chat = false;
+        for cand in live_cards.iter().take(5) {
+            let w = super::watch_next(&cand.id, None).expect("watch_next");
+            println!(
+                "watch_next {}: is_live={} views={:?} date={:?} chat={}",
+                cand.id,
+                w.is_live,
+                w.views_text,
+                w.date_text,
+                w.live_chat.is_some()
+            );
+            assert!(w.is_live, "watch_next must mark active stream {} live", cand.id);
+            assert!(!w.views_text.is_empty(), "watch_next {} missing live views_text", cand.id);
+            if let Some((top, all)) = w.live_chat {
+                assert_ne!(top, all, "top and all chat tokens must differ");
+                let b_top = super::live_chat(&top).expect("top live_chat");
+                let b_all = super::live_chat(&all).expect("all live_chat");
+                println!("  live_chat {}: top={} msgs, all={} msgs", cand.id, b_top.messages.len(), b_all.messages.len());
+                tested_chat = true;
+                break;
+            }
+        }
+        assert!(tested_chat, "expected at least one active live stream with live chat");
+
+        // 3. Channel Live tab (NASA has active live, upcoming, and past VOD streams)
+        let ch = super::channel("UCLA_DiR1FfKNvjuUpBHmylQ", Some(crate::feed::LIVE_TAB)).expect("NASA live tab");
+        let vids: Vec<_> = ch.page.items.iter().filter_map(Item::as_video).collect();
+        println!("Channel {} Live tab: {} videos", ch.info.name, vids.len());
+        assert!(!vids.is_empty());
+        for v in vids.iter().take(10) {
+            println!(
+                "  {} | live={} up={} | ch={:?} | dur={:?} | views={:?} | pub={:?} ts={:?}",
+                v.id, v.is_live, v.is_upcoming, v.channel_name, v.duration_text, v.views_text, v.published_text, v.published_ts
+            );
+            assert_eq!(v.channel_name, ch.info.name, "channel_name must not be stolen by stats on {}", v.id);
+            assert!(v.views_text.is_some(), "channel live tab item {} missing views_text", v.id);
+            if v.is_live || v.is_upcoming {
+                assert!(v.duration_text.is_none());
+            } else {
+                assert!(v.published_ts.is_some(), "past VOD {} missing published_ts", v.id);
+            }
         }
     }
 }

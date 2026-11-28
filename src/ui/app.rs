@@ -2523,8 +2523,8 @@ impl AppView {
         let handled = p.update(cx, |pl: &mut Player, cx| {
             let handled = match (playback_key, m.shift) {
                 ("space", _) => {
-                    // acted on at release (tap) or while held (2x)
-                    if held {
+                    // acted on at release (tap) or while held (2x); skip boost at live edge
+                    if held && !pl.is_at_live_edge() {
                         pl.start_boost(cx);
                         cx.notify();
                     }
@@ -2540,17 +2540,32 @@ impl AppView {
                     true
                 }
                 ("j", false) => {
-                    pl.seek_by(-10.0);
+                    if pl.is_live() {
+                        pl.seek_live_delta(-10.0, cx);
+                    } else {
+                        pl.seek_by(-10.0);
+                    }
                     true
                 }
                 ("l", false) => {
-                    pl.seek_by(10.0);
+                    if pl.is_live() {
+                        pl.seek_live_delta(10.0, cx);
+                    } else {
+                        pl.seek_by(10.0);
+                    }
                     true
                 }
                 ("left" | "right", _) => {
-                    let before = pl.time;
-                    pl.seek_by(if k == "left" { -step } else { step });
-                    pl.show_keyboard_feedback(KeyboardFeedback::Seek(pl.time - before), cx);
+                    if pl.is_live() {
+                        let moved = pl.seek_live_delta(if k == "left" { -step } else { step }, cx);
+                        if moved.abs() >= 0.5 {
+                            pl.show_keyboard_feedback(KeyboardFeedback::Seek(moved), cx);
+                        }
+                    } else {
+                        let before = pl.time;
+                        pl.seek_by(if k == "left" { -step } else { step });
+                        pl.show_keyboard_feedback(KeyboardFeedback::Seek(pl.time - before), cx);
+                    }
                     true
                 }
                 ("up" | "down", _) => {
@@ -2581,18 +2596,31 @@ impl AppView {
                     true
                 }
                 ("home", _) => {
-                    pl.seek_to(0.0);
+                    if pl.is_live() {
+                        let win = pl.live_dvr_window();
+                        if win > 0.0 {
+                            pl.seek_live_behind(win, cx);
+                        }
+                    } else {
+                        pl.seek_to(0.0);
+                    }
                     true
                 }
                 ("end", _) => {
-                    let d = pl.duration;
-                    pl.seek_to(d - 1.0);
+                    if pl.is_live() {
+                        pl.go_live(cx);
+                    } else {
+                        let d = pl.duration;
+                        pl.seek_to(d - 1.0);
+                    }
                     true
                 }
                 (d, false) if d.len() == 1 && d.chars().all(|c| c.is_ascii_digit()) => {
-                    let n: f64 = d.parse().unwrap();
-                    let dur = pl.duration;
-                    pl.seek_interactive(dur * n / 10.0);
+                    if !pl.is_live() {
+                        let n: f64 = d.parse().unwrap();
+                        let dur = pl.duration;
+                        pl.seek_interactive(dur * n / 10.0);
+                    }
                     true
                 }
                 ("a", false) => {

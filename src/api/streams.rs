@@ -1,5 +1,8 @@
 //! Stream extraction: yt-dlp for playable formats, the ANDROID_VR Innertube client
 //! for fast metadata (storyboards, captions), with an in-memory cache and prefetch.
+#[path = "live_dash.rs"]
+pub mod live_dash;
+
 use super::http;
 use super::json::*;
 use super::types::*;
@@ -59,9 +62,9 @@ pub fn prefetch_on_hover(video_id: &str) {
 fn resolve(video_id: &str) -> Result<StreamInfo> {
     let res = resolve_anonymous(video_id);
     let res = match res {
-        // the TV client answers live streams without an HLS manifest, and live
-        // playback needs one: "No playable stream found" (#268)
-        Ok(info) if info.is_live && info.hls_url.is_none() => visionos(video_id)
+        // the TV client answers <=1080p live streams without an HLS manifest, and live
+        // playback needs either HLS or unlocked live DASH adaptive formats (#268)
+        Ok(info) if info.is_live && !has_playable_stream(&info) => visionos(video_id)
             .or_else(|_| ios(video_id))
             .ok()
             .filter(|i| i.hls_url.is_some())
@@ -84,7 +87,7 @@ fn resolve_anonymous(video_id: &str) -> Result<StreamInfo> {
             .or_else(|e| ios(video_id).map_err(|e2| anyhow!("{e}\n{e2}")))
             .or_else(|e| android_vr(video_id).map_err(|e2| anyhow!("{e}\n{e2}"))),
         "android_vr" => android_vr(video_id)
-            .and_then(|i| if i.video.is_empty() && i.hls_url.is_none() { Err(anyhow!("Android VR returned no playable formats")) } else { Ok(i) })
+            .and_then(|i| if !has_playable_stream(&i) { Err(anyhow!("Android VR returned no playable formats")) } else { Ok(i) })
             .or_else(|e| visionos(video_id).map_err(|e2| anyhow!("{e}\n{e2}")))
             .or_else(|e| ios(video_id).map_err(|e2| anyhow!("{e}\n{e2}"))),
         _ => {
@@ -97,15 +100,35 @@ fn resolve_anonymous(video_id: &str) -> Result<StreamInfo> {
             // Anonymous, it is one more fallback further down.
             let signed_in = crate::api::auth::signed_in();
             let t = std::time::Instant::now();
-            let vision = visionos(video_id);
+            let vision = visionos_with_live_uhd_hint(video_id);
             if crate::perf::on() {
                 match &vision {
-                    Ok(i) => eprintln!("[streams] visionos ok in {:?}: {} variants, hls={:?}", t.elapsed(), i.video.len(), i.hls_url.as_deref().map(|u| &u[..u.len().min(80)])),
+                    Ok((i, uhd)) => eprintln!("[streams] visionos ok in {:?}: {} variants, hls={:?}, live_uhd={uhd}", t.elapsed(), i.video.len(), i.hls_url.as_deref().map(|u| &u[..u.len().min(80)])),
                     Err(e) => eprintln!("[streams] visionos failed in {:?}: {e}", t.elapsed()),
                 }
             }
             let mut vision_err = match vision {
-                Ok(info) => return Ok(info),
+                Ok((mut info, live_uhd)) => {
+                    // visionOS caps live HLS at 1080p60 even when the broadcast
+                    // has 1440p/4K adaptive formats. Try upgrading via TVHTML5
+                    // live DASH (keeping visionOS's HLS URL for previews/fallback).
+                    if live_uhd {
+                        match tv_inner(video_id, signed_in) {
+                            Ok(mut upgraded) => {
+                                if upgraded.hls_url.is_none() {
+                                    upgraded.hls_url = info.hls_url.take();
+                                }
+                                return Ok(upgraded);
+                            }
+                            Err(e) => {
+                                if crate::perf::on() {
+                                    eprintln!("[streams] live >1080p upgrade via tv failed (falling back to visionOS HLS): {e}");
+                                }
+                            }
+                        }
+                    }
+                    return Ok(info);
+                }
                 Err(e) => e,
             };
             if signed_in {
@@ -154,7 +177,7 @@ fn resolve_anonymous(video_id: &str) -> Result<StreamInfo> {
                 }
                 (Ok(y), Err(_)) => Ok(y),
                 // without yt-dlp, Innertube formats are the best we have
-                (Err(_), Ok(v)) if !v.video.is_empty() || v.hls_url.is_some() => Ok(v),
+                (Err(_), Ok(v)) if has_playable_stream(&v) => Ok(v),
                 (Err(e1), Ok(_)) => Err(anyhow!("{vision_err}\nyt-dlp: {e1}")),
                 (Err(e1), Err(e2)) => Err(anyhow!("{vision_err}\nyt-dlp: {e1}\nInnertube: {e2}")),
             }
@@ -241,10 +264,14 @@ struct HlsClient {
 }
 
 /// visionOS client: metadata, captions and storyboard from the player
-/// response, playback from its HLS manifest (variants up to 4K with separate
-/// audio renditions).
+/// response, playback from its HLS manifest (variants up to 4K for VOD, 1080p60
+/// for live broadcasts, with separate audio renditions).
 fn visionos(video_id: &str) -> Result<StreamInfo> {
-    hls_client(video_id, HlsClient {
+    visionos_with_live_uhd_hint(video_id).map(|(info, _)| info)
+}
+
+fn visionos_with_live_uhd_hint(video_id: &str) -> Result<(StreamInfo, bool)> {
+    hls_client_inner(video_id, HlsClient {
         label: "visionOS",
         source: "visionos",
         id: "101",
@@ -257,6 +284,41 @@ fn visionos(video_id: &str) -> Result<StreamInfo> {
         }),
         visitor: true,
     })
+}
+
+/// Best-effort visionOS HLS manifest URL (used to attach hover-preview/fallback
+/// HLS alongside live DASH streams without downloading the variant list).
+fn visionos_hls_url(video_id: &str) -> Option<String> {
+    let s = crate::store::settings_snapshot();
+    let vd = visitor_data().unwrap_or_default();
+    let mut client = json!({
+        "clientName": "VISIONOS", "clientVersion": VISION_VERSION,
+        "deviceMake": "Apple", "deviceModel": "RealityDevice17,1",
+        "osName": "visionOS", "osVersion": "26.5.23O471",
+        "userAgent": VISION_UA,
+        "hl": s.language, "gl": s.region,
+    });
+    let mut headers = vec![
+        ("User-Agent", VISION_UA),
+        ("X-YouTube-Client-Name", "101"),
+        ("X-YouTube-Client-Version", VISION_VERSION),
+        ("Origin", "https://www.youtube.com"),
+    ];
+    if !vd.is_empty() {
+        client["visitorData"] = json!(vd);
+        headers.push(("X-Goog-Visitor-Id", &vd));
+    }
+    let body = json!({
+        "videoId": video_id,
+        "contentCheckOk": true,
+        "racyCheckOk": true,
+        "context": { "client": client }
+    });
+    let r = http::post_json("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", &body, &headers).ok()?;
+    if playability_error(&r, Some("visionOS")).is_some() {
+        return None;
+    }
+    r.pointer("/streamingData/hlsManifestUrl").and_then(Value::as_str).map(str::to_string)
 }
 
 /// iOS client: the same HLS playback as visionOS, and it also plays videos
@@ -289,6 +351,10 @@ fn ios(video_id: &str) -> Result<StreamInfo> {
 static IOS_VISITOR: parking_lot::Mutex<String> = parking_lot::Mutex::new(String::new());
 
 fn hls_client(video_id: &str, c: HlsClient) -> Result<StreamInfo> {
+    hls_client_inner(video_id, c).map(|(info, _)| info)
+}
+
+fn hls_client_inner(video_id: &str, c: HlsClient) -> Result<(StreamInfo, bool)> {
     let s = crate::store::settings_snapshot();
     let label = c.label;
     let call = |vd: &str| -> Result<Value> {
@@ -348,19 +414,54 @@ fn hls_client(video_id: &str, c: HlsClient) -> Result<StreamInfo> {
     };
     let mut info = parse_player(&r);
     let hls = info.hls_url.clone().ok_or_else(|| anyhow!("{label}: no HLS manifest"))?;
-    // adaptive URLs from this client need a PO token; only the HLS path is usable
+    let live_has_uhd = info.is_live
+        && r.pointer("/streamingData/adaptiveFormats")
+            .and_then(Value::as_array)
+            .is_some_and(|af| {
+                af.iter().any(|f| {
+                    let w = f.get("width").and_then(Value::as_u64).unwrap_or(0) as u32;
+                    let h = f.get("height").and_then(Value::as_u64).unwrap_or(0) as u32;
+                    quality_class(w, h) > 1080
+                })
+            });
+    // adaptive URLs from this client hit a ~45 MB anonymous PO-token cutoff; only the HLS path is usable here
     info.audio.clear();
     info.muxed.clear();
-    let (video, audio, hls_orig_lang) = hls_variants(video_id, &hls, !info.is_live).unwrap_or_default();
+    let (video, audio, hls_orig_lang) = hls_variants(video_id, &hls, !info.is_live)
+        .or_else(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            hls_variants(video_id, &hls, !info.is_live)
+        })
+        .unwrap_or_default();
     info.video = video;
     // audio renditions (dubbed tracks): only names, the proxy picks the playlist
     info.audio = audio;
+    sort_formats(&mut info);
     if info.original_language.is_none() {
         info.original_language = hls_orig_lang;
     }
     info.hls_only = true;
     info.source = c.source;
-    Ok(info)
+    Ok((info, live_has_uhd))
+}
+
+/// Extracts `KEY=value` or `KEY="value"` from an HLS tag line at an attribute boundary
+/// (so `BANDWIDTH=` does not match `AVERAGE-BANDWIDTH=`).
+fn hls_attr(line: &str, key: &str) -> Option<String> {
+    let needle = format!("{key}=");
+    let mut search = line;
+    loop {
+        let i = search.find(&needle)?;
+        let before = search[..i].chars().last();
+        let rest = &search[i + needle.len()..];
+        if matches!(before, Some(':') | Some(',')) {
+            return Some(match rest.strip_prefix('"') {
+                Some(q) => q.split('"').next()?.to_string(),
+                None => rest.split(',').next()?.to_string(),
+            });
+        }
+        search = rest;
+    }
 }
 
 /// The variants of an HLS master playlist, as formats for the quality menu,
@@ -371,17 +472,18 @@ fn hls_variants(video_id: &str, master_url: &str, vod: bool) -> Result<(Vec<Stre
         crate::player::proxy::remember_vod_playlist(master_url, text.as_str().into());
     }
     crate::player::shorts_preload::remember_master(video_id, master_url, &text);
-    let attr = |l: &str, k: &str| -> Option<String> {
-        let rest = l.split(&format!("{k}=")).nth(1)?;
-        Some(if let Some(q) = rest.strip_prefix('"') { q.split('"').next()?.to_string() } else { rest.split(',').next()?.to_string() })
-    };
+    Ok(parse_hls_master(&text))
+}
+
+fn parse_hls_master(text: &str) -> (Vec<StreamFormat>, Vec<StreamFormat>, Option<String>) {
     let mut out: Vec<StreamFormat> = Vec::new();
     let mut audio: Vec<StreamFormat> = Vec::new();
     let mut hls_orig_lang: Option<String> = None;
     let mut lines = text.lines();
     while let Some(l) = lines.next() {
+        let l = l.trim();
         if l.starts_with("#EXT-X-MEDIA") && l.contains("TYPE=AUDIO") {
-            let lang_code = attr(l, "LANGUAGE").and_then(|c| clean_lang(&c)).unwrap_or_default();
+            let lang_code = hls_attr(l, "LANGUAGE").and_then(|c| clean_lang(&c)).unwrap_or_default();
             let media_name = hls_media_name(l);
             let is_orig = l.contains("acont=original")
                 || l.contains("acont%3Doriginal")
@@ -408,13 +510,13 @@ fn hls_variants(video_id: &str, master_url: &str, vod: bool) -> Result<(Vec<Stre
             continue;
         }
         let Some(url) = lines.next() else { break };
-        let (w, h) = attr(l, "RESOLUTION")
+        let (w, h) = hls_attr(l, "RESOLUTION")
             .and_then(|r| r.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))))
             .unwrap_or((0, 0));
-        let fps = attr(l, "FRAME-RATE").and_then(|f| f.parse::<f64>().ok()).unwrap_or(0.0) as u32;
-        let bitrate = attr(l, "BANDWIDTH").and_then(|b| b.parse().ok()).unwrap_or(0);
+        let fps = hls_attr(l, "FRAME-RATE").and_then(|f| f.parse::<f64>().ok()).unwrap_or(0.0).round() as u32;
+        let bitrate = hls_attr(l, "BANDWIDTH").and_then(|b| b.parse().ok()).unwrap_or(0);
         let class = quality_class(w, h);
-        let codecs = attr(l, "CODECS").unwrap_or_default();
+        let codecs = hls_attr(l, "CODECS").unwrap_or_default();
         // one entry per quality: keep SDR over HDR, then the higher-bitrate variant
         if let Some(e) = out.iter_mut().find(|e| quality_class(e.width, e.height) == class && e.fps == fps) {
             let key = |c: &str, b: u64| (!is_hdr_codecs(c), b);
@@ -454,7 +556,7 @@ fn hls_variants(video_id: &str, master_url: &str, vod: bool) -> Result<(Vec<Stre
     if audio.len() < 2 {
         audio.clear();
     }
-    Ok((out, audio, orig_lang))
+    (out, audio, orig_lang)
 }
 
 /// NAME="..." of an #EXT-X-MEDIA line.
@@ -560,6 +662,10 @@ const TV5_UA: &str = "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538
 /// check, plays age-restricted videos and counts the view for the account.
 /// Its stream URLs carry `n` and signature challenges that `jsc` solves.
 fn tv(video_id: &str) -> Result<StreamInfo> {
+    tv_inner(video_id, true)
+}
+
+fn tv_inner(video_id: &str, fetch_hls_fallback: bool) -> Result<StreamInfo> {
     let rt = crate::api::jsc::runtime();
     let token = crate::api::auth::access_token();
     let label = if token.is_some() { "TV (signed in)" } else { "TV" };
@@ -569,13 +675,71 @@ fn tv(video_id: &str) -> Result<StreamInfo> {
     if let Some(err) = playability_error(&r, Some(label)) {
         return Err(err);
     }
+    let is_live = r.pointer("/videoDetails/isLive").and_then(Value::as_bool) == Some(true);
+    let has_hls = r.pointer("/streamingData/hlsManifestUrl").and_then(Value::as_str).is_some();
+    let mut live_dash_uhd = false;
+    if is_live && !has_hls {
+        let af = r.pointer("/streamingData/adaptiveFormats").and_then(Value::as_array);
+        let has_uhd_video = af.is_some_and(|a| {
+            a.iter().any(|f| {
+                let w = f.get("width").and_then(Value::as_u64).unwrap_or(0) as u32;
+                let h = f.get("height").and_then(Value::as_u64).unwrap_or(0) as u32;
+                quality_class(w, h) > 1080
+                    && (f.get("url").is_some() || f.get("signatureCipher").is_some())
+            })
+        });
+        let has_audio = af.is_some_and(|a| {
+            a.iter().any(|f| {
+                f.get("mimeType").and_then(Value::as_str).unwrap_or("").starts_with("audio")
+                    && (f.get("url").is_some() || f.get("signatureCipher").is_some())
+            })
+        });
+        // For <=1080p live broadcasts, bail out before running the JS solver so
+        // `resolve_anonymous` falls straight through to fast visionOS HLS.
+        // For 1440p/4K live broadcasts, solve `n` and serve live DASH segments
+        // (`&sq=<N>`) since YouTube caps all HLS manifests at 1080p60.
+        if !has_uhd_video || !has_audio {
+            return Err(anyhow!("{label}: live stream has no HLS manifest"));
+        }
+        live_dash_uhd = true;
+    }
+    // Grab visionOS's HLS URL in parallel (best-effort) so hover previews and
+    // fallback remain available at zero extra wall-clock latency.
+    let hls_bg = (live_dash_uhd && fetch_hls_fallback).then(|| {
+        let id = video_id.to_string();
+        std::thread::spawn(move || visionos_hls_url(&id))
+    });
     unlock_stream_urls(&mut r, &player).map_err(|e| anyhow!("{label}: {e}"))?;
     let mut info = parse_player(&r);
+    if live_dash_uhd {
+        let probe_url = info
+            .video
+            .iter()
+            .find(|f| fmt_class(f) > 1080 && is_live_dash_format(f))
+            .map(|f| f.url.as_str());
+        let Some(probe_url) = probe_url else {
+            return Err(anyhow!("{label}: live stream >1080p formats could not be unlocked"));
+        };
+        if live_dash::probe_head(probe_url).is_none() {
+            return Err(anyhow!("{label}: live DASH head probe failed"));
+        }
+        if let Some(bg) = hls_bg {
+            if let Ok(Some(hls)) = bg.join() {
+                info.hls_url = Some(hls);
+            }
+        }
+    } else if info.is_live {
+        // Warm HEAD_CACHE if TV returned both an HLS URL and live DASH adaptive tracks,
+        // so switching to DASH never needs to probe on the UI thread.
+        if let Some(probe_url) = info.video.iter().find(|f| is_live_dash_format(f)).map(|f| f.url.as_str()) {
+            let _ = live_dash::probe_head(probe_url);
+        }
+    }
     info.source = if token.is_some() { "tv-account" } else { "tv" };
     if crate::perf::on() {
-        eprintln!("[streams] {label} ok in {:?} via {}: {} video, {} audio formats", t.elapsed(), rt.describe(), info.video.len(), info.audio.len());
+        eprintln!("[streams] {label} ok in {:?} via {}: {} video, {} audio formats (live_dash={live_dash_uhd})", t.elapsed(), rt.describe(), info.video.len(), info.audio.len());
     }
-    if info.video.is_empty() && info.muxed.is_empty() && info.hls_url.is_none() {
+    if !has_playable_stream(&info) {
         return Err(anyhow!("{label}: no playable formats"));
     }
     Ok(info)
@@ -586,17 +750,22 @@ fn tv(video_id: &str) -> Result<StreamInfo> {
 /// history is reported to.
 pub(crate) fn tv_player_response(video_id: &str, token: Option<&str>, sts: Option<u64>) -> Result<Value> {
     let s = crate::store::settings_snapshot();
+    let vd = if token.is_none() { visitor_data().unwrap_or_default() } else { String::new() };
+    let mut client = json!({
+        "clientName": "TVHTML5", "clientVersion": TV5_VERSION,
+        "deviceMake": "Samsung", "deviceModel": "UKS9800",
+        "osName": "Tizen", "osVersion": "2.4.0",
+        "userAgent": TV5_UA,
+        "hl": s.language, "gl": s.region
+    });
+    if !vd.is_empty() {
+        client["visitorData"] = json!(vd);
+    }
     let body = json!({
         "videoId": video_id,
         "contentCheckOk": true,
         "racyCheckOk": true,
-        "context": { "client": {
-            "clientName": "TVHTML5", "clientVersion": TV5_VERSION,
-            "deviceMake": "Samsung", "deviceModel": "UKS9800",
-            "osName": "Tizen", "osVersion": "2.4.0",
-            "userAgent": TV5_UA,
-            "hl": s.language, "gl": s.region
-        }},
+        "context": { "client": client },
         "playbackContext": { "contentPlaybackContext": { "signatureTimestamp": sts } }
     });
     let auth = token.map(|t| format!("Bearer {t}"));
@@ -608,6 +777,8 @@ pub(crate) fn tv_player_response(video_id: &str, token: Option<&str>, sts: Optio
     ];
     if let Some(a) = &auth {
         headers.push(("Authorization", a));
+    } else if !vd.is_empty() {
+        headers.push(("X-Goog-Visitor-Id", &vd));
     }
     http::post_json("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", &body, &headers)
 }
@@ -862,6 +1033,28 @@ fn parse_player(r: &Value) -> StreamInfo {
     };
     for f in sd.get("adaptiveFormats").and_then(Value::as_array).into_iter().flatten() {
         if let Some(sf) = parse_format(f) {
+            if info.is_live && live_dash::is_live_dash_url(&sf.url) {
+                let target_duration_secs = f
+                    .get("targetDurationSec")
+                    .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|x| x.round() as u64)))
+                    .unwrap_or(5);
+                let max_dvr_secs = f
+                    .get("maxDvrDurationSec")
+                    .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|x| x.round() as u64)))
+                    .unwrap_or(0);
+                let audio_sample_rate = f
+                    .get("audioSampleRate")
+                    .and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_u64().map(|n| n as u32)))
+                    .unwrap_or(44100);
+                live_dash::remember_format_meta(
+                    &sf.url,
+                    live_dash::LiveFormatMeta {
+                        target_duration_secs,
+                        max_dvr_secs,
+                        audio_sample_rate,
+                    },
+                );
+            }
             if sf.is_audio {
                 info.audio.push(sf);
             } else {
@@ -1130,6 +1323,25 @@ fn ytdlp_inventory(video_id: &str, out: &std::process::Output) -> Result<StreamI
             if info.hls_url.is_none() {
                 info.hls_url = s(f, "/manifest_url").or(Some(url.clone()));
             }
+            // Keep HLS variant metadata so live streams resolved via yt-dlp still populate the quality menu.
+            let width = f.get("width").and_then(Value::as_u64).unwrap_or(0) as u32;
+            let height = f.get("height").and_then(Value::as_u64).unwrap_or(0) as u32;
+            if vcodec != "none" && height > 0 {
+                let fps = f.get("fps").and_then(Value::as_f64).unwrap_or(0.0).round() as u32;
+                let class = quality_class(width, height);
+                info.video.push(StreamFormat {
+                    itag: s(f, "/format_id").and_then(|x| x.split('-').next().and_then(|n| n.parse().ok())).unwrap_or(0),
+                    url,
+                    mime: "application/vnd.apple.mpegurl".into(),
+                    codecs: vcodec,
+                    bitrate: (f.get("tbr").and_then(Value::as_f64).unwrap_or(0.0) * 1000.0) as u64,
+                    width,
+                    height,
+                    fps,
+                    quality_label: format!("{class}p{}", if fps > 30 { fps.to_string() } else { String::new() }),
+                    ..Default::default()
+                });
+            }
             continue;
         }
         if proto != "https" && proto != "http" {
@@ -1160,7 +1372,7 @@ fn ytdlp_inventory(video_id: &str, out: &std::process::Output) -> Result<StreamI
             info.video.push(sf);
         }
     }
-    if info.video.is_empty() && info.muxed.is_empty() && info.audio.is_empty() && info.hls_url.is_none() {
+    if !has_playable_stream(&info) {
         if let Some(reason) = stderr.lines().rev().find(|line| needs_sign_in(line)) {
             return Err(anyhow!("{reason}"));
         }
@@ -1299,6 +1511,27 @@ pub enum PlaybackStream<'a> {
     Adaptive(Option<&'a StreamFormat>, Option<&'a StreamFormat>),
 }
 
+/// Whether a format is a segmented YouTube live adaptive stream (`&sq=<N>`).
+pub fn is_live_dash_format(f: &StreamFormat) -> bool {
+    live_dash::is_live_dash_url(&f.url)
+}
+
+pub(crate) fn has_live_dash(info: &StreamInfo) -> bool {
+    info.is_live && !info.hls_only && info.video.iter().any(is_live_dash_format)
+}
+
+/// Whether `info` has a stream that `playback_stream` can play.
+/// Live broadcasts require either `hls_url` or unlocked live DASH adaptive formats.
+fn has_playable_stream(info: &StreamInfo) -> bool {
+    if info.hls_only {
+        info.hls_url.is_some()
+    } else if info.is_live {
+        info.hls_url.is_some() || has_live_dash(info)
+    } else {
+        !info.video.is_empty() || !info.muxed.is_empty() || !info.audio.is_empty() || info.hls_url.is_some()
+    }
+}
+
 /// Pick the same media for background preloading and for the subsequent loadfile.
 pub fn playback_stream<'a>(
     info: &'a StreamInfo,
@@ -1308,7 +1541,7 @@ pub fn playback_stream<'a>(
     audio_only: bool,
     prefer_avc: bool,
 ) -> Option<PlaybackStream<'a>> {
-    if info.hls_only || info.is_live || (info.video.is_empty() && info.muxed.is_empty()) {
+    if info.hls_only || (info.is_live && !has_live_dash(info)) || (info.video.is_empty() && info.muxed.is_empty()) {
         return info.hls_url.as_deref().map(PlaybackStream::Hls);
     }
     let (video, audio) = pick_formats(info, quality, codec, language);
@@ -1319,6 +1552,12 @@ pub fn playback_stream<'a>(
     };
     let video = if prefer_avc { best_variant(&info.video).or(video) } else { video };
     let video = video.filter(|_| !audio_only);
+    if info.is_live {
+        if video.is_some_and(is_live_dash_format) || audio.is_some_and(is_live_dash_format) {
+            return Some(PlaybackStream::Adaptive(video, audio));
+        }
+        return info.hls_url.as_deref().map(PlaybackStream::Hls);
+    }
     if video.is_none() && (!audio_only || audio.is_none()) {
         // Some responses have separate audio and muxed video, with no video-only track.
         return best_variant(&info.muxed)
@@ -1328,7 +1567,8 @@ pub fn playback_stream<'a>(
     Some(PlaybackStream::Adaptive(video, audio))
 }
 
-/// Builds a URL mpv can play: EDL combining separate video & audio streams.
+/// Builds a URL mpv can play: EDL combining separate video & audio streams for VOD.
+/// Live DASH playback sessions are opened explicitly by `Player::load_current`.
 pub fn mpv_source(video: Option<&StreamFormat>, audio: Option<&StreamFormat>, duration: u64) -> Option<String> {
     let _ = duration;
     let edl_part = |u: &str| format!("%{}%{}", u.len(), u);
@@ -1516,5 +1756,119 @@ mod playability_tests {
     fn ok_playability_has_no_error() {
         let ok = json!({ "playabilityStatus": { "status": "OK" } });
         assert!(playability_error(&ok, Some("visionOS")).is_none());
+    }
+
+    #[test]
+    fn live_stream_without_hls_manifest_is_not_playable() {
+        use super::{StreamFormat, StreamInfo, has_playable_stream, playback_stream};
+        let mut info = StreamInfo {
+            is_live: true,
+            video: vec![StreamFormat { height: 1080, url: "https://example.invalid/v".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        assert!(!has_playable_stream(&info));
+        assert!(playback_stream(&info, 1080, "vp9", None, false, false).is_none());
+
+        info.hls_url = Some("https://manifest.googlevideo.com/api/manifest/hls_variant/live.m3u8".into());
+        assert!(has_playable_stream(&info));
+        assert!(playback_stream(&info, 1080, "vp9", None, false, false).is_some());
+    }
+
+    #[test]
+    fn live_dash_1440p_and_4k_streams_are_playable_and_select_uhd() {
+        use super::{PlaybackStream, StreamFormat, StreamInfo, has_playable_stream, playback_stream};
+        let info = StreamInfo {
+            is_live: true,
+            hls_url: Some("https://manifest.googlevideo.com/api/manifest/hls_variant/live.m3u8".into()),
+            video: vec![
+                StreamFormat {
+                    itag: 315,
+                    url: "https://rr1---sn-abc.googlevideo.com/videoplayback?source=yt_live_broadcast&live=1&noclen=1&itag=315".into(),
+                    mime: "video/webm".into(),
+                    codecs: "vp9".into(),
+                    bitrate: 18_000_000,
+                    width: 3840,
+                    height: 2160,
+                    fps: 60,
+                    quality_label: "2160p60".into(),
+                    ..Default::default()
+                },
+                StreamFormat {
+                    itag: 308,
+                    url: "https://rr1---sn-abc.googlevideo.com/videoplayback?source=yt_live_broadcast&live=1&noclen=1&itag=308".into(),
+                    mime: "video/webm".into(),
+                    codecs: "vp9".into(),
+                    bitrate: 9_000_000,
+                    width: 2560,
+                    height: 1440,
+                    fps: 60,
+                    quality_label: "1440p60".into(),
+                    ..Default::default()
+                },
+                StreamFormat {
+                    itag: 299,
+                    url: "https://rr1---sn-abc.googlevideo.com/videoplayback?source=yt_live_broadcast&live=1&noclen=1&itag=299".into(),
+                    mime: "video/mp4".into(),
+                    codecs: "avc1.64002a".into(),
+                    bitrate: 5_500_000,
+                    width: 1920,
+                    height: 1080,
+                    fps: 60,
+                    quality_label: "1080p60".into(),
+                    ..Default::default()
+                },
+            ],
+            audio: vec![StreamFormat {
+                itag: 140,
+                url: "https://rr1---sn-abc.googlevideo.com/videoplayback?source=yt_live_broadcast&live=1&noclen=1&itag=140".into(),
+                mime: "audio/mp4".into(),
+                codecs: "mp4a.40.2".into(),
+                bitrate: 144_000,
+                is_audio: true,
+                audio_default: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(has_playable_stream(&info));
+        match playback_stream(&info, 1440, "vp9", None, false, false) {
+            Some(PlaybackStream::Adaptive(Some(v), Some(a))) => {
+                assert_eq!(v.itag, 308);
+                assert_eq!(v.height, 1440);
+                assert_eq!(a.itag, 140);
+            }
+            _ => panic!("expected 1440p60 adaptive live DASH selection"),
+        }
+        match playback_stream(&info, 0, "vp9", None, false, false) {
+            Some(PlaybackStream::Adaptive(Some(v), Some(_))) => assert_eq!(v.itag, 315),
+            _ => panic!("expected 2160p60 adaptive live DASH selection for Auto"),
+        }
+        match playback_stream(&info, 1440, "vp9", None, true, false) {
+            Some(PlaybackStream::Adaptive(None, Some(a))) => assert_eq!(a.itag, 140),
+            _ => panic!("expected audio-only live DASH selection"),
+        }
+    }
+
+    #[test]
+    fn parse_hls_master_handles_average_bandwidth_and_fractional_fps() {
+        let master = "\
+#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"233\",NAME=\"Default\",DEFAULT=YES,URI=\"https://example.invalid/a233.m3u8\"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"234\",NAME=\"Default\",DEFAULT=YES,URI=\"https://example.invalid/a234.m3u8\"
+#EXT-X-STREAM-INF:AVERAGE-BANDWIDTH=4200000,BANDWIDTH=5552610,CODECS=\"avc1.64002A,mp4a.40.2\",RESOLUTION=1920x1080,FRAME-RATE=59.940,AUDIO=\"234\"
+https://example.invalid/1080_avc.m3u8
+#EXT-X-STREAM-INF:AVERAGE-BANDWIDTH=4800000,BANDWIDTH=6100000,CODECS=\"vp09.00.42.08,mp4a.40.2\",RESOLUTION=1920x1080,FRAME-RATE=60.000,AUDIO=\"234\"
+https://example.invalid/1080_vp9.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2922155,CODECS=\"avc1.4D4020,mp4a.40.2\",RESOLUTION=1280x720,FRAME-RATE=60,AUDIO=\"234\"
+https://example.invalid/720.m3u8
+";
+        let (video, audio, _) = super::parse_hls_master(master);
+        // Single deduplicated "Default" audio rendition is cleared so the UI hides a redundant menu
+        assert!(audio.is_empty());
+        assert_eq!(video.len(), 2, "59.94 and 60.00 at 1080p must deduplicate into one 1080p60 entry");
+        let hd = video.iter().find(|v| v.height == 1080).unwrap();
+        assert_eq!(hd.fps, 60);
+        assert_eq!(hd.quality_label, "1080p60");
+        assert_eq!(hd.bitrate, 6_100_000, "must read BANDWIDTH, not AVERAGE-BANDWIDTH");
     }
 }

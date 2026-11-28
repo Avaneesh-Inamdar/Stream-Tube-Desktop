@@ -13,10 +13,16 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChatError {
+    Ended,
+    Retrying,
+}
+
 /// Live chat of a running stream, polled while the page is open.
 struct LiveChat {
     messages: Vec<ChatMessage>,
-    error: Option<String>,
+    error: Option<ChatError>,
     /// "Top chat" (YouTube's filtered view) or every message
     top: bool,
     hidden: bool,
@@ -249,14 +255,14 @@ impl WatchPage {
                                         true
                                     }
                                     None => {
-                                        chat.error = Some("Chat has ended".into());
+                                        chat.error = Some(ChatError::Ended);
                                         false
                                     }
                                 }
                             }
                             Err(e) => {
                                 let _ = e;
-                                chat.error = Some("Could not load chat, retrying…".into());
+                                chat.error = Some(ChatError::Retrying);
                                 wait = 10000;
                                 true
                             }
@@ -310,7 +316,7 @@ impl WatchPage {
         .detach();
     }
 
-    fn render_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_chat(&mut self, list_height: Pixels, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let live = self.info.ready().map(|w| w.live_chat.is_some()).unwrap_or(false);
         let p = pal(cx);
         let chat = self.chat.as_ref()?;
@@ -325,8 +331,8 @@ impl WatchPage {
             .py_2()
             .border_b_1()
             .border_color(p.border)
-            .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(translate("Live chat")))
-            .child(chip("chat-top", translate("Top"), chat.top, cx).on_click(cx.listener(|this, _, _, cx| {
+            .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(translate("Live chat")))
+            .child(chip("chat-top", translate("Top"), chat.top, cx).flex_none().on_click(cx.listener(|this, _, _, cx| {
                 if let Some(c) = &mut this.chat {
                     if !c.top {
                         c.top = true;
@@ -334,7 +340,7 @@ impl WatchPage {
                     }
                 }
             })))
-            .child(chip("chat-all", translate("All"), !chat.top, cx).on_click(cx.listener(|this, _, _, cx| {
+            .child(chip("chat-all", translate("All"), !chat.top, cx).flex_none().on_click(cx.listener(|this, _, _, cx| {
                 if let Some(c) = &mut this.chat {
                     if c.top {
                         c.top = false;
@@ -344,21 +350,50 @@ impl WatchPage {
             })))
             .child(
                 icon_button("chat-hide", if chat.hidden { "chevron-down" } else { "chevron-up" }, cx)
+                    .flex_none()
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Some(c) = &mut this.chat {
                             c.hidden ^= true;
+                            if !c.hidden {
+                                c.scroll.scroll_to_bottom();
+                            }
                         }
                         cx.notify();
                     })),
             );
-        let mut panel = div().flex().flex_col().mb_4().rounded_xl().border_1().border_color(p.border).overflow_hidden().child(header);
+        let mut panel = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .mb_4()
+            .rounded_xl()
+            .border_1()
+            .border_color(p.border)
+            .overflow_hidden()
+            .child(header);
         if chat.hidden {
             return Some(panel.into_any_element());
         }
-        let mut list = div().id("chat-list").h(px(440.)).overflow_y_scroll().track_scroll(&chat.scroll).flex().flex_col().gap_1().px_3().py_2();
+        let error_text = chat.error.map(|e| match e {
+            ChatError::Ended => translate("Chat has ended"),
+            ChatError::Retrying => translate("Could not load chat, retrying…"),
+        });
+        let mut list = div()
+            .id("chat-list")
+            .w_full()
+            .min_w_0()
+            .h(list_height)
+            .overflow_y_scroll()
+            .track_scroll(&chat.scroll)
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2();
         if chat.messages.is_empty() {
-            let status = chat.error.as_deref().unwrap_or("Loading chat…");
-            list = list.child(div().py_6().flex().justify_center().text_sm().text_color(p.text2).child(translate(status).to_string()));
+            let status = error_text.unwrap_or_else(|| translate("Loading chat…"));
+            list = list.child(div().py_6().flex().justify_center().text_sm().text_color(p.text2).child(status.to_string()));
         }
         for (i, m) in chat.messages.iter().enumerate() {
             let name_color = match m.role {
@@ -397,8 +432,8 @@ impl WatchPage {
             }
             list = list.child(row);
         }
-        if let (Some(e), false) = (&chat.error, chat.messages.is_empty()) {
-            list = list.child(div().py_2().text_xs().text_color(p.text3).child(translate(e).to_string()));
+        if let (Some(e), false) = (error_text, chat.messages.is_empty()) {
+            list = list.child(div().py_2().text_xs().text_color(p.text3).child(e.to_string()));
         }
         let signed_in = crate::api::auth::signed_in();
         localize_placeholder(&chat.input, if signed_in { "Chat…" } else { "Sign in to chat" }, window, cx);
@@ -412,14 +447,14 @@ impl WatchPage {
             .border_color(p.border)
             .child(div().flex_1().min_w_0().child(Input::new(&chat.input).disabled(!signed_in || chat.sending)))
             .when(signed_in, |d| {
-                d.child(icon_button("chat-send", "send", cx).on_click(cx.listener(|this, _, window, cx| {
+                d.child(icon_button("chat-send", "send", cx).flex_none().on_click(cx.listener(|this, _, window, cx| {
                     if let Some(c) = &this.chat {
                         let t = c.input.read(cx).value().to_string();
                         this.send_chat(t, window, cx);
                     }
                 })))
             });
-        panel = panel.child(nested_scroll("chat-wrap", list)).child(input_row);
+        panel = panel.child(nested_scroll("chat-wrap", list).w_full().min_w_0()).child(input_row);
         Some(panel.into_any_element())
     }
 
@@ -462,12 +497,12 @@ impl WatchPage {
                         };
                         pl.update(cx, |p, cx| {
                             if p.video.as_ref().map(|v| v.id == full.id).unwrap_or(false) {
-                                p.chapters = chapters;
-                                p.heatmap = heatmap;
+                                let live = w.is_live || p.streams.as_ref().is_some_and(|s| s.is_live);
+                                p.chapters = if live { Vec::new() } else { chapters };
+                                p.heatmap = if live { Vec::new() } else { heatmap };
                                 let dur = p.video.as_ref().and_then(|v| v.duration_secs);
                                 let mut v = full.clone();
-                                v.duration_secs = dur.or(Some(p.duration as u64));
-                                v.duration_text = v.duration_secs.filter(|d| *d > 0).map(crate::api::json::format_duration);
+                                apply_watch_duration(dur, p.duration, live, &mut v);
                                 if p.channel_id.is_none() {
                                     p.channel_id = v.channel_id.clone();
                                 }
@@ -489,7 +524,7 @@ impl WatchPage {
                             .filter_map(|i| i.as_video())
                             .find(|v| !v.is_short && !v.is_live && !store::is_filtered(v, &s))
                             .cloned();
-                        if let Some(n) = next.as_ref().filter(|_| s.autoplay_next && pl == player(cx)) {
+                        if let Some(n) = next.as_ref().filter(|_| !w.is_live && s.autoplay_next && pl == player(cx)) {
                             // warm up the autoplay candidate so the next video starts instantly
                             let id = n.id.clone();
                             std::thread::spawn(move || {
@@ -529,6 +564,9 @@ impl WatchPage {
     fn on_ended(&mut self, cx: &mut Context<Self>) {
         let playing = self.player.read(cx);
         if self.player != player(cx) || playing.video.as_ref().is_none_or(|video| video.id != self.id) {
+            return;
+        }
+        if is_live_playback(playing.video.as_ref(), playing.streams.as_deref(), self.info.ready()) {
             return;
         }
         let s = store::settings_snapshot();
@@ -725,12 +763,60 @@ impl WatchPage {
         let channel = w.channel.clone();
         let ch_name_copy = w.channel.name.clone();
         let ch_id_copy = w.channel.id.clone();
+        let is_live = {
+            let pl = self.player.read(cx);
+            is_live_playback(pl.video.as_ref(), pl.streams.as_deref(), Some(w))
+        };
         div()
             .flex()
             .flex_col()
             .gap_3()
             .pt_3()
             .child(selectable_text(SharedString::from(format!("watch-title-{}", w.id)), title).text_xl().font_weight(FontWeight::BOLD).text_color(p.text))
+            .when(is_live, |d| {
+                let viewers = (!s.hide_view_counts && !w.views_text.trim().is_empty()).then(|| w.views_text.trim().to_string());
+                let started = (!w.date_text.trim().is_empty()).then(|| w.date_text.trim().to_string());
+                d.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .gap_1()
+                                .px(px(6.))
+                                .py(px(2.))
+                                .rounded_sm()
+                                .bg(rgb(0xcc0000))
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(white())
+                                .whitespace_nowrap()
+                                .child(div().size(px(6.)).flex_none().rounded_full().bg(white()))
+                                .child(translate("LIVE")),
+                        )
+                        .when_some(viewers.clone(), |row, vw| {
+                            row.child(
+                                selectable_text(SharedString::from(format!("watch-live-views-{}", w.id)), vw)
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(p.text),
+                            )
+                        })
+                        .when_some(started, |row, dt| {
+                            row.when(viewers.is_some(), |r| r.child(div().text_sm().text_color(p.text3).child("•")))
+                                .child(
+                                    selectable_text(SharedString::from(format!("watch-live-date-{}", w.id)), dt)
+                                        .text_sm()
+                                        .text_color(p.text2),
+                                )
+                        }),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -876,7 +962,12 @@ impl WatchPage {
         let p = pal(cx);
         let expanded = self.desc_expanded;
         let s = store::settings_snapshot();
-        let views = if s.hide_view_counts { String::new() } else { w.views_text.clone() };
+        let views = if s.hide_view_counts { "" } else { w.views_text.trim() };
+        let meta_header = [views, w.date_text.trim()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("  ");
         let desc = if expanded {
             w.description.clone()
         } else {
@@ -902,7 +993,9 @@ impl WatchPage {
                     cx.notify();
                 }
             }))
-            .child(selectable_text(SharedString::from(format!("watch-meta-{}", w.id)), format!("{views}  {}", w.date_text)).text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text))
+            .when(!meta_header.is_empty(), |d| {
+                d.child(selectable_text(SharedString::from(format!("watch-meta-{}", w.id)), meta_header).text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text))
+            })
             .child(div().text_sm().text_color(p.text).child(rich_text_with_links("desc-text", desc, &w.description_links)))
             .when(expanded && !chapters.is_empty() && !s.hide_chapters, |d| {
                 let radius = rems(0.375 * thumbnail_corner_scale());
@@ -1254,6 +1347,9 @@ impl WatchPage {
             return div().into_any_element();
         }
         let Some(state) = &self.comments else {
+            if w.is_live && w.comments_token.is_none() {
+                return div().into_any_element();
+            }
             return div().py_4().text_sm().text_color(p.text2).child(if w.comments_token.is_none() { translate("Comments are turned off.") } else { "" }).into_any_element();
         };
         let data = match state {
@@ -1739,7 +1835,28 @@ impl WatchPage {
                                 .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(p.text).truncate().child(v.title.clone()))
                                 .child(div().text_sm().text_color(p.text2).truncate().child(v.channel_name.clone())),
                         )
-                        .children(v.duration_text.clone().map(|d| div().flex_none().text_sm().text_color(p.text2).child(d))),
+                        .when(v.is_live, |d| {
+                            d.child(
+                                div()
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap_1()
+                                    .px(px(5.))
+                                    .py(px(1.))
+                                    .rounded_sm()
+                                    .bg(rgb(0xcc0000))
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(white())
+                                    .whitespace_nowrap()
+                                    .child(div().size(px(5.)).flex_none().rounded_full().bg(white()))
+                                    .child(translate("LIVE")),
+                            )
+                        })
+                        .when(!v.is_live, |d| {
+                            d.children(v.duration_text.clone().map(|dur| div().flex_none().text_sm().text_color(p.text2).child(dur)))
+                        }),
                 );
             }
         } else if let Some(w) = self.info.ready().cloned() {
@@ -1930,9 +2047,14 @@ impl Render for WatchPage {
             (Load::Error(e), _) => selectable_text("watch-err", tf!("Could not load video details: {0}", e)).py_4().text_color(p.text2).into_any_element(),
             _ => spinner(cx).into_any_element(),
         };
+        let chat_h = if two_col && !theater {
+            (player_h - px(96.)).clamp(px(320.), px(520.))
+        } else {
+            ((vp.height - px(56.)) * 0.5).clamp(px(280.), px(440.))
+        };
         let chapters_panel = self.render_chapters_panel(cx);
         let queue_panel = self.render_queue_panel(window, cx);
-        let chat_panel = self.render_chat(window, cx);
+        let chat_panel = self.render_chat(chat_h, window, cx);
         let related = info.as_ref().map(|w| self.render_related(w, cx));
         let secondary = div()
             .flex()
@@ -2120,6 +2242,23 @@ mod tests {
     }
 }
 
+fn is_live_playback(video: Option<&VideoItem>, streams: Option<&StreamInfo>, info: Option<&WatchInfo>) -> bool {
+    video.is_some_and(|v| v.is_live)
+        || streams.is_some_and(|s| s.is_live)
+        || info.is_some_and(|w| w.is_live)
+}
+
+fn apply_watch_duration(existing_duration: Option<u64>, player_duration: f64, is_live: bool, v: &mut VideoItem) {
+    v.is_live = is_live;
+    if is_live {
+        v.duration_secs = None;
+        v.duration_text = None;
+    } else {
+        v.duration_secs = existing_duration.or(Some(player_duration as u64));
+        v.duration_text = v.duration_secs.filter(|d| *d > 0).map(crate::api::json::format_duration);
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum QueueScrollAction {
     None,
@@ -2207,5 +2346,40 @@ mod queue_merge_tests {
         assert_eq!(queue_scroll_action(Some(50), Some(50), true, false), QueueScrollAction::None);
         // Changing position (e.g. shuffle) scrolls to the new position.
         assert_eq!(queue_scroll_action(Some(12), Some(50), true, false), QueueScrollAction::ScrollTo(11));
+    }
+
+    #[::core::prelude::v1::test]
+    fn live_watch_duration_never_pollutes_history_entries() {
+        let mut live_video = VideoItem {
+            id: "live1".into(),
+            duration_secs: Some(3600),
+            duration_text: Some("1:00:00".into()),
+            ..Default::default()
+        };
+        apply_watch_duration(Some(3600), 7200.0, true, &mut live_video);
+        assert!(live_video.is_live);
+        assert_eq!(live_video.duration_secs, None);
+        assert_eq!(live_video.duration_text, None);
+
+        let mut vod = VideoItem { id: "vod1".into(), ..Default::default() };
+        apply_watch_duration(None, 125.0, false, &mut vod);
+        assert!(!vod.is_live);
+        assert_eq!(vod.duration_secs, Some(125));
+        assert_eq!(vod.duration_text.as_deref(), Some("2:05"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn live_playback_detection_checks_video_streams_and_watch_info() {
+        let vod_video = VideoItem::default();
+        let live_video = VideoItem { is_live: true, ..Default::default() };
+        let vod_streams = StreamInfo::default();
+        let live_streams = StreamInfo { is_live: true, ..Default::default() };
+        let vod_info = WatchInfo::default();
+        let live_info = WatchInfo { is_live: true, ..Default::default() };
+
+        assert!(!is_live_playback(Some(&vod_video), Some(&vod_streams), Some(&vod_info)));
+        assert!(is_live_playback(Some(&live_video), Some(&vod_streams), Some(&vod_info)));
+        assert!(is_live_playback(Some(&vod_video), Some(&live_streams), Some(&vod_info)));
+        assert!(is_live_playback(Some(&vod_video), Some(&vod_streams), Some(&live_info)));
     }
 }

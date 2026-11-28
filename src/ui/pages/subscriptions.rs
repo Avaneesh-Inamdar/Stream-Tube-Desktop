@@ -304,7 +304,11 @@ impl Render for FeedPage {
                 continue;
             }
             bar = bar.child(chip(SharedString::from(format!("k-{l}")), t(l), self.kind == k, cx).on_click(cx.listener(move |t, _, _, cx| {
-                t.kind = k;
+                if t.kind != k {
+                    t.kind = k;
+                    t.scroll.reset(0);
+                    t.rows = Arc::new(Vec::new());
+                }
                 cx.notify();
             })));
         }
@@ -334,16 +338,27 @@ impl Render for FeedPage {
             );
         let kind = self.kind;
         let videos = self.feed.videos.clone();
-        let filtered = videos.iter().enumerate()
-            .filter(|(_, v)| !store::is_filtered(v, &s))
-            .filter(|(_, v)| !(s.hide_watched_in_feed && is_watched(&v.id, cx)))
+        let effective_settings;
+        let filter_settings = if kind == Kind::Live && s.hide_live {
+            let mut adjusted = (*s).clone();
+            adjusted.hide_live = false;
+            effective_settings = adjusted;
+            &effective_settings
+        } else {
+            &*s
+        };
+        let filtered: Vec<(usize, &VideoItem)> = videos.iter().enumerate()
+            .filter(|(_, v)| !store::is_filtered(v, filter_settings))
+            .filter(|(_, v)| !(s.hide_watched_in_feed && !v.is_live && is_watched(&v.id, cx)))
             .filter(|(_, v)| match kind {
                 Kind::All => true,
                 Kind::Videos => !v.is_short && !v.is_live,
                 Kind::Shorts => v.is_short,
                 Kind::Live => v.is_live || v.is_upcoming,
-            });
-        let rows = subscription_rows(filtered, columns, s.feed_group_by_day && kind != Kind::Shorts, crate::api::json::now());
+            })
+            .collect();
+        let ordered = order_subscription_videos(filtered, kind);
+        let rows = subscription_rows(ordered.into_iter(), columns, s.feed_group_by_day && kind != Kind::Shorts, crate::api::json::now());
         self.update_rows(rows, card_w, window, cx);
 
         let rows = self.rows.clone();
@@ -382,6 +397,41 @@ impl Render for FeedPage {
     }
 }
 
+fn order_subscription_videos<'a>(
+    mut videos: Vec<(usize, &'a VideoItem)>,
+    kind: Kind,
+) -> Vec<(usize, &'a VideoItem)> {
+    if matches!(kind, Kind::All | Kind::Live) {
+        videos.sort_by_key(|(_, video)| {
+            if video.is_live {
+                0u8
+            } else if video.is_upcoming {
+                1
+            } else {
+                2
+            }
+        });
+    }
+    videos
+}
+
+fn subscription_heading(video: &VideoItem, now: i64) -> &'static str {
+    if video.is_live {
+        return "Live now";
+    }
+    if video.is_upcoming {
+        return "Upcoming";
+    }
+    let elapsed = video.published_ts.map(|ts| now.saturating_sub(ts)).unwrap_or(i64::MAX);
+    match elapsed {
+        d if d < 86400 => "Today",
+        d if d < 2 * 86400 => "Yesterday",
+        d if d < 7 * 86400 => "This week",
+        d if d < 30 * 86400 => "This month",
+        _ => "Older",
+    }
+}
+
 fn subscription_rows<'a>(
     videos: impl Iterator<Item = (usize, &'a VideoItem)>,
     columns: usize,
@@ -392,14 +442,7 @@ fn subscription_rows<'a>(
     let mut last_heading = None;
     for (index, video) in videos {
         if grouped {
-            let elapsed = video.published_ts.map(|ts| now.saturating_sub(ts)).unwrap_or(i64::MAX);
-            let heading = match elapsed {
-                d if d < 86400 => "Today",
-                d if d < 2 * 86400 => "Yesterday",
-                d if d < 7 * 86400 => "This week",
-                d if d < 30 * 86400 => "This month",
-                _ => "Older",
-            };
+            let heading = subscription_heading(video, now);
             if last_heading != Some(heading) {
                 rows.push(SubscriptionRow::Heading(heading));
                 last_heading = Some(heading);
@@ -467,6 +510,42 @@ mod feed_selection_tests {
             SubscriptionRow::Videos(indices) => Some(indices.len()),
             SubscriptionRow::Heading(_) => None,
         }).sum::<usize>(), 400);
+    }
+
+    #[::core::prelude::v1::test]
+    fn live_streams_sort_ahead_of_upcoming_and_never_land_under_older() {
+        let now = 1_000_000;
+        let videos = vec![
+            VideoItem { id: "today-vod".into(), published_ts: Some(now - 3600), ..Default::default() },
+            VideoItem { id: "upcoming-1".into(), is_upcoming: true, published_ts: None, ..Default::default() },
+            VideoItem { id: "live-no-ts".into(), is_live: true, published_ts: None, ..Default::default() },
+            VideoItem { id: "live-stale-ts".into(), is_live: true, published_ts: Some(now - 10 * 86400), ..Default::default() },
+            VideoItem { id: "old-vod".into(), published_ts: Some(now - 60 * 86400), ..Default::default() },
+        ];
+
+        let live_filtered: Vec<_> = videos
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.is_live || v.is_upcoming)
+            .collect();
+        let live_ordered = order_subscription_videos(live_filtered, Kind::Live);
+        let live_ids: Vec<_> = live_ordered.iter().map(|(_, v)| v.id.as_str()).collect();
+        assert_eq!(live_ids, vec!["live-no-ts", "live-stale-ts", "upcoming-1"]);
+
+        let live_rows = subscription_rows(live_ordered.into_iter(), 4, true, now);
+        assert_eq!(live_rows.len(), 4);
+        assert!(matches!(live_rows[0], SubscriptionRow::Heading("Live now")));
+        assert!(matches!(&live_rows[1], SubscriptionRow::Videos(i) if i == &[2, 3]));
+        assert!(matches!(live_rows[2], SubscriptionRow::Heading("Upcoming")));
+        assert!(matches!(&live_rows[3], SubscriptionRow::Videos(i) if i == &[1]));
+
+        let all_ordered = order_subscription_videos(videos.iter().enumerate().collect(), Kind::All);
+        let all_rows = subscription_rows(all_ordered.into_iter(), 4, true, now);
+        let headings: Vec<_> = all_rows.iter().filter_map(|r| match r {
+            SubscriptionRow::Heading(h) => Some(*h),
+            SubscriptionRow::Videos(_) => None,
+        }).collect();
+        assert_eq!(headings, vec!["Live now", "Upcoming", "Today", "Older"]);
     }
 }
 
